@@ -1,0 +1,21 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    environment:
+      YOLO_MODEL: ${YOLO_MODEL:-yolo26s.pt}
+      YOLO_DEVICE: "0"
+      YOLO_IMGSZ: ${YOLO_IMGSZ:-640}
+      FIRE_SMOKE_MODEL: ${FIRE_SMOKE_MODEL:-models/fire_smoke_yolov8.engine}
+      FIRE_SMOKE_SHA256: ${FIRE_SMOKE_ENGINE_SHA256:?Set reviewed TensorRT engine SHA256}
+      FIRE_SMOKE_DEVICE: "0"
+      FIRE_SMOKE_WORKERS: ${FIRE_SMOKE_WORKERS:-1}
+      ANALYSIS_WORKERS: ${ANALYSIS_WORKERS:-4}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -1,0 +1,84 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: monitor
+      POSTGRES_USER: monitor
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-monitor-dev-password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monitor -d monitor"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy noeviction
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8100
+      DATABASE_URL: postgresql+psycopg://monitor:${POSTGRES_PASSWORD:-monitor-dev-password}@postgres:5432/monitor
+      REDIS_URL: redis://redis:6379/0
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:-change-this-before-production}
+      YOLO_MODEL: ${YOLO_MODEL:-yolo26n.pt}
+      YOLO_DEVICE: cpu
+      FIRE_SMOKE_MODEL: ${FIRE_SMOKE_MODEL:-models/fire_smoke_yolov8.pt}
+      FIRE_SMOKE_SHA256: ${FIRE_SMOKE_SHA256:-ac0a10257b2bc1f20c9d957f8adeeb61dd6140322fc19d0b4a116cb491776d16}
+      FIRE_SMOKE_DEVICE: cpu
+      FIRE_SMOKE_WORKERS: ${FIRE_SMOKE_WORKERS:-1}
+      SHADOW_MODE: ${SHADOW_MODE:-true}
+      ANALYSIS_WORKERS: ${ANALYSIS_WORKERS:-2}
+    ports:
+      - "8100:8100"
+    volumes:
+      - evidence_data:/app/data/evidence
+      - model_cache:/root/.cache
+      - ./models:/app/models:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.4.1
+    profiles: ["monitoring"]
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    depends_on: [app]
+
+  grafana:
+    image: grafana/grafana:12.0.2
+    profiles: ["monitoring"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-monitor-admin}
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
+volumes:
+  postgres_data:
+  redis_data:
+  evidence_data:
+  model_cache:
+  grafana_data:

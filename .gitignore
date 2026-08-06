@@ -1,0 +1,15 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+data/*
+!data/evidence/
+!data/evidence/.gitkeep
+*.db
+*.engine
+*.onnx
+*.pt
