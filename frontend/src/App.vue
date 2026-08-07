@@ -187,13 +187,13 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);socket?.close()})
 <template>
   <div class="shell">
     <aside class="sidebar">
-      <div class="brand"><div class="brand-mark">A</div><div><strong>灵眸</strong><small>AI VISION OPS</small></div></div>
+      <div class="brand"><div class="brand-mark">JS</div><div><strong>江苏有线</strong><small>无锡广电 · AI巡检</small></div></div>
       <nav><button v-for="tab in tabs" :key="tab[0]" :class="{active:active===tab[0]}" @click="setTab(tab[0])"><span>{{tab[2]}}</span>{{tab[1]}}</button></nav>
       <div class="system-pill"><i :class="onlineCount?'good':'warn'"></i><div><b>{{onlineCount}} / {{cameras.length}} 路在线</b><small>安全检测持续运行</small></div></div>
-      <div class="side-foot"><span>端口 8100</span><span>内部试点</span></div>
+      <div class="side-foot"><span>无锡广电</span><span>智能巡检平台</span></div>
     </aside>
     <main>
-      <header class="topbar"><div><h1>{{tabs.find(t=>t[0]===active)?.[1]}}</h1><p>本地 YOLO 检测 + 外部视觉模型复核 · 安全模式全天运行</p></div><div class="top-actions"><button class="icon-btn refresh" :class="{spin:loading}" @click="loadAll()">↻</button><button v-if="active==='cameras'" class="primary" @click="scrollToAdd">＋ 添加视频源</button></div></header>
+      <header class="topbar"><div class="title-stack"><div class="title-line"><h1>无锡广电AI巡检系统</h1><span>{{tabs.find(t=>t[0]===active)?.[1]}}</span></div><p>本地智能检测 + 视觉大模型复核 · 让营业厅巡检更准确、更及时</p></div><div class="top-actions"><button class="icon-btn refresh" :class="{spin:loading}" @click="loadAll()">↻</button><button v-if="active==='cameras'" class="primary" @click="scrollToAdd">＋ 添加视频源</button></div></header>
 
       <section v-if="active==='dashboard'" class="page">
         <div class="metrics">
