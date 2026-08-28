@@ -10,6 +10,7 @@ from prometheus_client import Counter, Gauge, Histogram
 
 from backend import models
 from backend.alerts import AlertService
+from backend.annotation import annotate_detections
 from backend.capabilities import CORE_CAPABILITIES, mode_is_active
 from backend.cleanup import CleanupService
 from backend.config import Settings
@@ -18,12 +19,11 @@ from backend.detectors.black_screen import is_black_screen
 from backend.detectors.fire_smoke import FireSmokeDetector
 from backend.detectors.yolo import YoloDetector
 from backend.eventbus import EventBus
-from backend.media import PersonOverlay, SafetyOverlay, draw_person_overlays, draw_safety_overlays
 from backend.media_capture import MediaGateway
 from backend.queueing import AnalysisQueue
 from backend.repository import Repository, as_json, from_json
 from backend.rules import RuleStateRegistry, is_scheduled, point_in_polygon
-from backend.schemas import CameraOptions, GeometrySpec, Mode, ScheduleSpec
+from backend.schemas import CameraOptions, Detection, GeometrySpec, Mode, ScheduleSpec
 from backend.security import SecretCipher
 from backend.vlm import VLMError, VisionModelClient
 from backend.webhook import WebhookClient
@@ -352,7 +352,8 @@ class MonitoringRuntime:
                 )
                 results.append({"mode": Mode.OFF_DUTY.value, "status": status, "reason": reason})
                 if triggered:
-                    await self.alerts.create(camera, analysis, frame.jpeg)
+                    evidence = annotate_detections(frame.jpeg, people, zone=geometry.post_roi)
+                    await self.alerts.create(camera, analysis, evidence)
 
         if Mode.PEOPLE_FLOW.value in modes and geometry.flow_line and mode_is_active(Mode.PEOPLE_FLOW.value, schedule, now):
             tracks = [
@@ -368,7 +369,9 @@ class MonitoringRuntime:
             roi_ids = {id(item) for item in roi_people}
             phone_candidates = roi_people + [item for item in detections if item.class_name in {"cell phone", "mobile phone"}]
             if roi_ids and self.yolo.phone_candidate(phone_candidates):
-                result = await self._behavior(camera, Mode.PHONE_USE, state, options, frame.jpeg)
+                result = await self._behavior(
+                    camera, Mode.PHONE_USE, state, options, frame.jpeg, evidence_detections=phone_candidates
+                )
                 results.append(result)
             else:
                 self.repository.add_analysis(
@@ -378,7 +381,9 @@ class MonitoringRuntime:
                 results.append({"mode": Mode.PHONE_USE.value, "status": "none"})
 
         if Mode.SMOKING.value in modes and people and mode_is_active(Mode.SMOKING.value, schedule, now) and self._mode_due(camera.id, Mode.SMOKING.value, options.behavior_interval_seconds, force):
-            result = await self._behavior(camera, Mode.SMOKING, state, options, frame.jpeg)
+            result = await self._behavior(
+                camera, Mode.SMOKING, state, options, frame.jpeg, evidence_detections=people
+            )
             results.append(result)
 
         if Mode.INTRUSION.value in modes and geometry.intrusion_zone:
@@ -412,14 +417,12 @@ class MonitoringRuntime:
                     reason=f"人员进入禁区：{geometry.intrusion_zone.name}",
                     latency_ms=0,
                 )
-                people_overlay = [PersonOverlay(item.box, item.confidence, item.track_id) for item in people]
-                evidence = draw_person_overlays(frame.jpeg, people_overlay)
-                evidence = draw_safety_overlays(
-                    evidence,
-                    [],
-                    geometry.intrusion_zone.points,
-                    people_overlay,
-                    set(triggered_ids),
+                evidence = annotate_detections(
+                    frame.jpeg,
+                    intrusion_people,
+                    zone=geometry.intrusion_zone.points,
+                    highlighted_track_ids=set(triggered_ids),
+                    show_track_ids=True,
                 )
                 await self.alerts.create(camera, analysis, evidence, bypass_cooldown=True)
                 results.append({"mode": Mode.INTRUSION.value, "status": "confirmed", "track_ids": triggered_ids})
@@ -526,8 +529,7 @@ class MonitoringRuntime:
                 latency_ms=self.fire_smoke.last_latency_ms,
             )
             if confirmed:
-                overlays = [SafetyOverlay(item.class_name, item.box, item.confidence) for item in qualified]
-                evidence = draw_safety_overlays(frame.jpeg, overlays)
+                evidence = annotate_detections(frame.jpeg, qualified)
                 await self.alerts.create(camera, analysis, evidence)
             results.append({"mode": Mode.FIRE_SMOKE.value, "class": kind, "status": status, "confidence": confidence})
 
@@ -547,7 +549,13 @@ class MonitoringRuntime:
         return True
 
     async def _behavior(
-        self, camera: models.Camera, mode: Mode, state, options: CameraOptions, fallback_jpeg: bytes
+        self,
+        camera: models.Camera,
+        mode: Mode,
+        state,
+        options: CameraOptions,
+        fallback_jpeg: bytes,
+        evidence_detections: list[Detection] | None = None,
     ) -> dict[str, Any]:
         frames = [packet.jpeg for packet in self.media.sample(camera.id, 8)] or [fallback_jpeg]
         if not self.vlm:
@@ -569,7 +577,8 @@ class MonitoringRuntime:
             )
             confirmed = state.behavior_confirmed(mode.value, response.result.status == "confirmed", utc_now())
             if confirmed:
-                await self.alerts.create(camera, analysis, fallback_jpeg)
+                evidence = annotate_detections(fallback_jpeg, evidence_detections or [])
+                await self.alerts.create(camera, analysis, evidence)
             return {
                 "mode": mode.value, "status": response.result.status,
                 "confirmed_window": confirmed, "reason": response.result.reason,
