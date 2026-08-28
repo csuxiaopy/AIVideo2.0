@@ -1,23 +1,15 @@
+# 生产基线配置（Linux 服务器）
+# 日常开发/持续更新请叠加 compose.cpu.dev.yml：
+#   docker compose -f compose.cpu.yml -f compose.cpu.dev.yml up -d
+#
+# 设计要点：
+# - 数据库使用 SQLite（服务器现有 data/yolo_vlm.db 直接挂载，零迁移、数据不丢）
+# - 持久化数据（SQLite/evidence/snapshots）全部落在宿主 ./data 目录
+# - 依赖装入镜像；业务代码更新不重建镜像（dev 覆盖层通过 bind mount 挂载）
 services:
-  postgres:
-    image: docker.m.daocloud.io/library/postgres:17-alpine
-    pull_policy: never
-    environment:
-      POSTGRES_DB: monitor
-      POSTGRES_USER: monitor
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-monitor-dev-password}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U monitor -d monitor"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    restart: unless-stopped
-
   redis:
-    image: docker.m.daocloud.io/library/redis:8-alpine
-    pull_policy: never
+    image: ${REDIS_IMAGE:-docker.m.daocloud.io/library/redis:8-alpine}
+    pull_policy: missing
     command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy noeviction
     volumes:
       - redis_data:/data
@@ -32,14 +24,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.cpu
-    security_opt:
-      - seccomp=unconfined
     environment:
       APP_HOST: 0.0.0.0
       APP_PORT: 8100
-      # 配合代码挂载开启热重载：改 backend 代码后容器内自动重启，无需 rebuild
-      APP_RELOAD: ${APP_RELOAD:-true}
-      DATABASE_URL: postgresql+psycopg://monitor:${POSTGRES_PASSWORD:-monitor-dev-password}@postgres:5432/monitor
+      DATABASE_URL: sqlite:////app/data/yolo_vlm.db
       REDIS_URL: redis://redis:6379/0
       APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:-change-this-before-production}
       YOLO_MODEL: ${YOLO_MODEL:-yolo26n.pt}
@@ -57,38 +45,17 @@ services:
     ports:
       - "8100:8100"
     volumes:
-      - evidence_data:/app/data/evidence
-      - snapshot_data:/app/data/snapshots
+      # 持久化：SQLite 库 + evidence + snapshots 全部在宿主 ./data，重启/更新不丢
+      - ./data:/app/data
       - model_cache:/root/.cache
       - ./models:/app/models:ro
       - ./yolo26n.pt:/app/yolo26n.pt:ro
-      # 代码挂载：本地源码直接映射进容器，改代码无需重新 build 镜像
-      - ./backend:/app/backend
-      - ./alembic:/app/alembic
-      - ./alembic.ini:/app/alembic.ini:ro
-      - ./run.py:/app/run.py:ro
-    
     depends_on:
-      postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
     restart: unless-stopped
 
-  # 前端构建服务：自动安装依赖并监听源码变化持续构建到 ./frontend/dist
-  # （app 服务已挂载该目录，构建完成后刷新浏览器即可，无需任何手工步骤）
-  web:
-    image: docker.m.daocloud.io/library/node:22-alpine
-    working_dir: /src
-    environment:
-      COREPACK_NPM_REGISTRY: https://registry.npmmirror.com
-    command: sh -c "corepack enable && pnpm install --frozen-lockfile && pnpm exec vite build --watch"
-    volumes:
-      - ./frontend:/src
-      # node_modules 用独立卷隔离，避免容器内 Linux 二进制覆盖宿主机 Windows 二进制
-      - web_node_modules:/src/node_modules
-    restart: unless-stopped
-
   prometheus:
-    image: prom/prometheus:v3.4.1
+    image: ${PROMETHEUS_IMAGE:-docker.m.daocloud.io/library/prometheus:v3.4.1}
     profiles: ["monitoring"]
     command: ["--config.file=/etc/prometheus/prometheus.yml"]
     volumes:
@@ -97,7 +64,7 @@ services:
     depends_on: [app]
 
   grafana:
-    image: grafana/grafana:12.0.2
+    image: ${GRAFANA_IMAGE:-docker.m.daocloud.io/library/grafana:12.0.2}
     profiles: ["monitoring"]
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-monitor-admin}
@@ -109,10 +76,6 @@ services:
     depends_on: [prometheus]
 
 volumes:
-  postgres_data:
   redis_data:
-  evidence_data:
-  snapshot_data:
   model_cache:
   grafana_data:
-  web_node_modules:

@@ -1,0 +1,37 @@
+# 开发/持续更新覆盖层（叠加在 compose.cpu.yml 之上）
+#   docker compose -f compose.cpu.yml -f compose.cpu.dev.yml up -d
+#
+# 实现「改代码不重建镜像」：
+# - 后端：backend/、run.py 等 bind mount 进容器 + uvicorn --reload
+# - 前端：Vite dev server（HMR），宿主机改 .vue/.ts 浏览器即时更新
+# - 依赖变化（requirements.txt/package.json/pnpm-lock.yaml）才需要重建镜像
+services:
+  app:
+    environment:
+      APP_RELOAD: "true"
+    volumes:
+      - ./backend:/app/backend
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini:ro
+      - ./run.py:/app/run.py:ro
+
+  # 前端开发服务器：挂载源码 + node_modules 用独立卷（避免宿主机空目录覆盖/跨平台二进制冲突）
+  web:
+    image: ${NODE_IMAGE:-docker.m.daocloud.io/library/node:22-alpine}
+    working_dir: /src
+    environment:
+      COREPACK_NPM_REGISTRY: https://registry.npmmirror.com
+      # Vite 代理目标：容器内指向 app 服务
+      VITE_API_TARGET: http://app:8100
+    command: sh -c "corepack enable && pnpm install --frozen-lockfile && pnpm dev --host 0.0.0.0 --port 5173"
+    volumes:
+      - ./frontend:/src
+      - web_node_modules:/src/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  web_node_modules:
