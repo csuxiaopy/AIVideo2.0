@@ -1,18 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import shutil
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 from prometheus_client import Counter, Gauge, Histogram
 
 from backend import models
+from backend.alerts import AlertService
 from backend.capabilities import CORE_CAPABILITIES, mode_is_active
 from backend.config import Settings
 from backend.database import utc_now
@@ -20,7 +17,8 @@ from backend.detectors.black_screen import is_black_screen
 from backend.detectors.fire_smoke import FireSmokeDetector
 from backend.detectors.yolo import YoloDetector
 from backend.eventbus import EventBus
-from backend.media import MediaGateway, PersonOverlay, SafetyOverlay, draw_person_overlays, draw_safety_overlays
+from backend.media import PersonOverlay, SafetyOverlay, draw_person_overlays, draw_safety_overlays
+from backend.media_capture import MediaGateway
 from backend.queueing import AnalysisQueue
 from backend.repository import Repository, as_json, from_json
 from backend.rules import RuleStateRegistry, is_scheduled, point_in_polygon
@@ -38,6 +36,19 @@ QUEUE_GAUGE = Gauge("monitor_queue_depth", "Queue depth", ["priority"])
 VLM_CALLS = Counter("monitor_vlm_calls_total", "VLM calls", ["mode", "status"])
 
 
+def staggered_capture_times(cameras: list[models.Camera], now: float) -> dict[str, float]:
+    """Spread cameras with the same interval evenly across that complete interval."""
+    groups: dict[int, list[models.Camera]] = defaultdict(list)
+    for camera in cameras:
+        if camera.enabled:
+            groups[camera.frame_interval_seconds or 60].append(camera)
+    schedule: dict[str, float] = {}
+    for interval, group in groups.items():
+        for index, camera in enumerate(group):
+            schedule[camera.id] = now + index * interval / max(1, len(group))
+    return schedule
+
+
 class MonitoringRuntime:
     def __init__(self, settings: Settings, repository: Repository, cipher: SecretCipher):
         self.settings = settings
@@ -47,7 +58,14 @@ class MonitoringRuntime:
         self.queue = AnalysisQueue(settings.redis_url)
         self.fire_queue = AnalysisQueue(settings.redis_url, prefix="monitor:fire-tasks")
         self.rules = RuleStateRegistry()
-        self.media = MediaGateway(self.repository.set_camera_runtime)
+        self.media = MediaGateway(
+            self.repository.set_camera_runtime,
+            settings.snapshot_dir,
+            settings.max_live_previews,
+            settings.live_preview_fps,
+            settings.live_preview_timeout_seconds,
+            settings.frame_capture_timeout_seconds,
+        )
         detector_settings = self.repository.get_detector_settings()
         self.yolo = YoloDetector(
             detector_settings.general_model or settings.yolo_model,
@@ -62,6 +80,7 @@ class MonitoringRuntime:
             detector_settings.model_sha256 or settings.fire_smoke_sha256,
         )
         self.webhook = WebhookClient()
+        self.alerts = AlertService(settings, repository, cipher, self.event_bus, self.webhook)
         self.vlm: VisionModelClient | None = None
         self.scheduler_task: asyncio.Task | None = None
         self.worker_tasks: list[asyncio.Task] = []
@@ -82,6 +101,7 @@ class MonitoringRuntime:
         await self.queue.start()
         await self.fire_queue.start()
         await self.reload_models()
+        await self.media.start()
         await self.sync_cameras()
         self.running = True
         if self.settings.scheduler_enabled:
@@ -145,9 +165,11 @@ class MonitoringRuntime:
         ]
         await self.media.sync(media_specs)
         now = time.monotonic()
-        for index, camera in enumerate(cameras):
-            self.next_run.setdefault(camera.id, now + index / max(1, len(cameras)))
-            self.next_fire_run.setdefault(camera.id, now + index / max(1, len(cameras)))
+        enabled = [camera for camera in cameras if camera.enabled]
+        # Recompute the complete plan after a camera is added, removed, enabled or edited.
+        # Keeping old due times while bulk-adding cameras would cluster new cameras near
+        # the end of the period instead of preserving an even distribution.
+        self.next_run = staggered_capture_times(enabled, now)
         ONLINE_GAUGE.set(sum(1 for camera in cameras if camera.online))
 
     async def analyze_now(self, camera_id: str) -> dict[str, Any]:
@@ -155,11 +177,13 @@ class MonitoringRuntime:
         if not camera:
             raise KeyError(camera_id)
         async with self.camera_locks[camera_id]:
+            await self.media.capture(camera_id)
             general = await self._process(camera, force=True)
             modes = set(from_json(camera.modes_json, []))
             if Mode.FIRE_SMOKE.value in modes:
                 fire = await self._process_fire(camera, force=True)
                 general["results"].extend(fire["results"])
+            self.repository.set_last_analysis_at(camera_id)
             return general
 
     async def _scheduler(self) -> None:
@@ -169,25 +193,20 @@ class MonitoringRuntime:
             for camera in cameras:
                 if not camera.enabled:
                     continue
-                options = CameraOptions.model_validate(from_json(camera.options_json, {}))
                 modes = set(from_json(camera.modes_json, []))
-                general_modes = modes - {Mode.FIRE_SMOKE.value}
-                period = min(options.health_interval_seconds, max(1.0, 1.0 / options.yolo_fps))
-                general_due = general_modes and now >= self.next_run.get(camera.id, now)
-                if general_due:
+                period = camera.frame_interval_seconds or 60
+                if modes and now >= self.next_run.get(camera.id, now):
                     self.next_run[camera.id] = now + period
                     if camera.id not in self.queued:
-                        priority = "high" if general_modes & {Mode.BLACK_SCREEN.value, Mode.INTRUSION.value} else "low" if general_modes == {Mode.PEOPLE_FLOW.value} else "normal"
+                        priority = (
+                            "critical" if Mode.FIRE_SMOKE.value in modes
+                            else "high" if modes & {Mode.BLACK_SCREEN.value, Mode.INTRUSION.value}
+                            else "low" if modes == {Mode.PEOPLE_FLOW.value}
+                            else "normal"
+                        )
                         task_id = await self.queue.enqueue(camera.id, priority)
                         if task_id:
                             self.queued.add(camera.id)
-                fire_period = max(0.2, 1.0 / options.fire_smoke_fps)
-                if Mode.FIRE_SMOKE.value in modes and now >= self.next_fire_run.get(camera.id, now):
-                    self.next_fire_run[camera.id] = now + fire_period
-                    if camera.id not in self.fire_queued:
-                        task_id = await self.fire_queue.enqueue(camera.id, "critical")
-                        if task_id:
-                            self.fire_queued.add(camera.id)
             for priority, depth in (await self.queue.depths()).items():
                 QUEUE_GAUGE.labels(priority=priority).set(depth)
             for priority, depth in (await self.fire_queue.depths()).items():
@@ -210,8 +229,17 @@ class MonitoringRuntime:
                     if camera and camera.enabled:
                         if fire_only:
                             await self._process_fire(camera)
+                            self.repository.set_last_analysis_at(camera.id)
                         else:
+                            # Scheduled capture is short lived: FFmpeg exits after one JPEG.
+                            await self.media.capture(camera.id)
                             await self._process(camera)
+                            self.repository.set_last_analysis_at(camera.id)
+                            modes = set(from_json(camera.modes_json, []))
+                            if Mode.FIRE_SMOKE.value in modes and camera.id not in self.fire_queued:
+                                task_id = await self.fire_queue.enqueue(camera.id, "critical")
+                                if task_id:
+                                    self.fire_queued.add(camera.id)
                 TASKS.labels(status="ok").inc()
                 self.processed += 1
             except asyncio.CancelledError:
@@ -258,7 +286,7 @@ class MonitoringRuntime:
             )
             results.append({"mode": Mode.BLACK_SCREEN.value, "status": analysis.status, "reason": analysis.reason})
             if triggered:
-                await self._alert(camera, analysis, frame.jpeg)
+                await self.alerts.create(camera, analysis, frame.jpeg)
 
         yolo_modes = modes - {Mode.BLACK_SCREEN.value}
         detections = []
@@ -308,7 +336,7 @@ class MonitoringRuntime:
                 )
                 results.append({"mode": Mode.OFF_DUTY.value, "status": status, "reason": reason})
                 if triggered:
-                    await self._alert(camera, analysis, frame.jpeg)
+                    await self.alerts.create(camera, analysis, frame.jpeg)
 
         if Mode.PEOPLE_FLOW.value in modes and geometry.flow_line and mode_is_active(Mode.PEOPLE_FLOW.value, schedule, now):
             tracks = [
@@ -377,7 +405,7 @@ class MonitoringRuntime:
                     people_overlay,
                     set(triggered_ids),
                 )
-                await self._alert(camera, analysis, evidence, bypass_cooldown=True)
+                await self.alerts.create(camera, analysis, evidence, bypass_cooldown=True)
                 results.append({"mode": Mode.INTRUSION.value, "status": "confirmed", "track_ids": triggered_ids})
         else:
             self.media.set_intrusion(camera.id, [], set())
@@ -484,7 +512,7 @@ class MonitoringRuntime:
             if confirmed:
                 overlays = [SafetyOverlay(item.class_name, item.box, item.confidence) for item in qualified]
                 evidence = draw_safety_overlays(frame.jpeg, overlays)
-                await self._alert(camera, analysis, evidence)
+                await self.alerts.create(camera, analysis, evidence)
             results.append({"mode": Mode.FIRE_SMOKE.value, "class": kind, "status": status, "confidence": confidence})
 
         if force and not qualified:
@@ -525,7 +553,7 @@ class MonitoringRuntime:
             )
             confirmed = state.behavior_confirmed(mode.value, response.result.status == "confirmed", utc_now())
             if confirmed:
-                await self._alert(camera, analysis, fallback_jpeg)
+                await self.alerts.create(camera, analysis, fallback_jpeg)
             return {
                 "mode": mode.value, "status": response.result.status,
                 "confirmed_window": confirmed, "reason": response.result.reason,
@@ -540,59 +568,18 @@ class MonitoringRuntime:
             )
             return {"mode": mode.value, "status": "uncertain", "error": str(exc)}
 
-    async def _alert(
-        self, camera: models.Camera, analysis: models.Analysis, jpeg: bytes, bypass_cooldown: bool = False
-    ) -> None:
-        options = CameraOptions.model_validate(from_json(camera.options_json, {}))
-        cooldown_seconds = options.alert_cooldown_seconds
-        if analysis.mode == Mode.FIRE_SMOKE.value:
-            cooldown_seconds = 60
-        elif analysis.mode == Mode.INTRUSION.value:
-            cooldown_seconds = options.intrusion_cooldown_seconds
-        last = self.repository.latest_alert_time(camera.id, analysis.mode)
-        if not bypass_cooldown and last and utc_now() - last < timedelta(seconds=cooldown_seconds):
-            return
-        filename = f"{camera.id}-{analysis.mode}-{utc_now().strftime('%Y%m%dT%H%M%S%fZ')}.jpg"
-        path = self.settings.evidence_dir / filename
-        path.write_bytes(jpeg)
-        alert = self.repository.add_alert(
-            camera_id=camera.id, analysis_id=analysis.id, mode=analysis.mode,
-            status="confirmed", confidence=analysis.confidence, reason=analysis.reason,
-            severity=analysis.severity, zone_name=analysis.zone_name,
-            local_model=analysis.local_model, model_version=analysis.model_version,
-            evidence_path=filename, webhook_status="shadow" if self.settings.shadow_mode else "pending",
-            shadow=self.settings.shadow_mode,
-        )
-        payload = {
-            "type": "alert", "id": alert.id, "camera_id": camera.id, "camera_name": camera.name,
-            "mode": alert.mode, "status": alert.status, "confidence": alert.confidence,
-            "severity": alert.severity, "scene_type": camera.scene_type,
-            "zone_name": alert.zone_name,
-            "fire_smoke_class": alert.zone_name if alert.mode == Mode.FIRE_SMOKE.value else None,
-            "reason": alert.reason, "created_at": alert.created_at.isoformat(),
-            "evidence_url": f"/evidence/{filename}", "shadow": alert.shadow,
-        }
-        await self.event_bus.publish(payload)
-        if not self.settings.shadow_mode:
-            webhook_settings = self.repository.get_webhook_settings()
-            if webhook_settings.enabled and webhook_settings.url and webhook_settings.secret_encrypted:
-                secret = self.cipher.decrypt(webhook_settings.secret_encrypted)
-                asyncio.create_task(self._deliver_webhook(alert.id, webhook_settings.url, secret, payload))
-
-    async def _deliver_webhook(self, alert_id: int, url: str, secret: str, payload: dict[str, Any]) -> None:
-        try:
-            await self.webhook.send(url, secret, payload)
-            self.repository.update_alert_webhook(alert_id, "delivered")
-        except Exception:
-            self.repository.update_alert_webhook(alert_id, "failed")
-            logger.exception("Webhook delivery failed for alert %s", alert_id)
-
     async def status(self) -> dict[str, Any]:
         general_depth = await self.queue.depths()
         fire_depth = await self.fire_queue.depths()
         return {
             "scheduler": {"status": "running" if self.running else "stopped", "last_heartbeat": self.last_heartbeat.isoformat()},
-            "media": {"status": "running", "streams": len(self.media.streams)},
+            "media": {
+                "status": "running",
+                "registered_cameras": len(self.media.sources),
+                "snapshots": len(self.media.snapshots),
+                "active_previews": len(self.media.previews),
+                "max_live_previews": self.media.max_live_previews,
+            },
             "yolo": {"status": "ready" if self.yolo.available else "degraded", "detail": self.yolo.detail},
             "queue": {
                 "status": "redis" if self.queue.redis_available else "in_memory",

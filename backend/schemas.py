@@ -26,12 +26,13 @@ class SceneType(str, Enum):
 
 
 ALL_MODES = {mode.value for mode in Mode}
+FRAME_INTERVAL_CHOICES = {5, 10, 30, 60, 120}
 Point = tuple[Annotated[float, Field(ge=0, le=1)], Annotated[float, Field(ge=0, le=1)]]
 
 
 class CameraOptions(BaseModel):
     health_interval_seconds: int = Field(default=5, ge=2, le=60)
-    yolo_fps: float = Field(default=1.0, ge=0.1, le=10)
+    yolo_fps: float = Field(default=0.1, ge=0.1, le=10)
     behavior_interval_seconds: int = Field(default=15, ge=5, le=300)
     off_duty_seconds: int = Field(default=300, ge=30, le=86400)
     shift_grace_seconds: int = Field(default=60, ge=0, le=3600)
@@ -100,6 +101,14 @@ class CameraCreate(BaseModel):
     geometry: GeometrySpec = Field(default_factory=GeometrySpec)
     schedule: ScheduleSpec = Field(default_factory=ScheduleSpec)
     options: CameraOptions = Field(default_factory=CameraOptions)
+    frame_interval_seconds: int = 60
+
+    @field_validator("frame_interval_seconds")
+    @classmethod
+    def valid_frame_interval(cls, value: int) -> int:
+        if value not in FRAME_INTERVAL_CHOICES:
+            raise ValueError("抽帧频率必须是 5、10、30、60 或 120 秒")
+        return value
 
     @field_validator("rtsp_url")
     @classmethod
@@ -131,6 +140,14 @@ class CameraPatch(BaseModel):
     enabled: bool | None = None
     scene_type: SceneType | None = None
     options: CameraOptions | None = None
+    frame_interval_seconds: int | None = None
+
+    @field_validator("frame_interval_seconds")
+    @classmethod
+    def valid_frame_interval(cls, value: int | None) -> int | None:
+        if value is not None and value not in FRAME_INTERVAL_CHOICES:
+            raise ValueError("抽帧频率必须是 5、10、30、60 或 120 秒")
+        return value
 
     @field_validator("rtsp_url")
     @classmethod
@@ -147,6 +164,10 @@ class ModesUpdate(BaseModel):
     @classmethod
     def unique_modes(cls, value: list[Mode]) -> list[Mode]:
         return list(dict.fromkeys(value))
+
+
+class PreviewSessionRequest(BaseModel):
+    session_id: str = Field(min_length=16, max_length=100)
 
 
 class ModelSettingsUpdate(BaseModel):

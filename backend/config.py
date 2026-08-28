@@ -16,11 +16,17 @@ class Settings(BaseSettings):
 
     app_host: str = "127.0.0.1"
     app_port: int = 8100
+    app_reload: bool = False
     database_url: str = f"sqlite:///{(ROOT / 'data' / 'yolo_vlm.db').as_posix()}"
     redis_url: str = "redis://127.0.0.1:6379/0"
     app_encryption_key: str = "development-only-change-me"
     evidence_dir: Path = ROOT / "data" / "evidence"
+    snapshot_dir: Path = ROOT / "data" / "snapshots"
     evidence_retention_days: int = 30
+    max_live_previews: int = 4
+    live_preview_fps: float = 2.0
+    live_preview_timeout_seconds: int = 60
+    frame_capture_timeout_seconds: int = 15
     yolo_model: str = "yolo26n.pt"
     yolo_device: str = "cpu"
     yolo_imgsz: int = 640
@@ -37,6 +43,7 @@ class Settings(BaseSettings):
 
     def prepare(self) -> None:
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
+        self.snapshot_dir.mkdir(parents=True, exist_ok=True)
         if self.database_url.startswith("sqlite"):
             database_path = self.database_url.split("///", 1)[-1]
             Path(database_path).parent.mkdir(parents=True, exist_ok=True)

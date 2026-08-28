@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import case, desc, func, select
@@ -55,7 +55,13 @@ class Repository:
             session.delete(camera)
         return True
 
-    def set_camera_runtime(self, camera_id: str, online: bool, error: str | None = None) -> None:
+    def set_camera_runtime(
+        self,
+        camera_id: str,
+        online: bool,
+        error: str | None = None,
+        frame_at: datetime | None = None,
+    ) -> None:
         with session_scope() as session:
             camera = session.get(models.Camera, camera_id)
             if camera:
@@ -63,6 +69,14 @@ class Repository:
                 camera.last_error = (error or "")[:1000] or None
                 if online:
                     camera.last_seen_at = utc_now()
+                if frame_at is not None:
+                    camera.last_frame_at = frame_at
+
+    def set_last_analysis_at(self, camera_id: str, analyzed_at: datetime | None = None) -> None:
+        with session_scope() as session:
+            camera = session.get(models.Camera, camera_id)
+            if camera:
+                camera.last_analysis_at = analyzed_at or utc_now()
 
     def add_analysis(self, **values: Any) -> models.Analysis:
         row = models.Analysis(**values)
@@ -158,25 +172,33 @@ class Repository:
 
     def dashboard(self) -> dict[str, Any]:
         today = datetime.now(timezone.utc).date()
+        today_start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+        tomorrow_start = today_start + timedelta(days=1)
         with session_scope() as session:
             cameras = session.scalar(select(func.count()).select_from(models.Camera)) or 0
             online = session.scalar(select(func.count()).select_from(models.Camera).where(models.Camera.online)) or 0
             alerts = session.scalar(
-                select(func.count()).select_from(models.Alert).where(func.date(models.Alert.created_at) == str(today))
+                select(func.count()).select_from(models.Alert).where(
+                    models.Alert.created_at >= today_start, models.Alert.created_at < tomorrow_start
+                )
             ) or 0
             failures = session.scalar(
                 select(func.count()).select_from(models.Analysis).where(
-                    models.Analysis.error.is_not(None), func.date(models.Analysis.created_at) == str(today)
+                    models.Analysis.error.is_not(None),
+                    models.Analysis.created_at >= today_start,
+                    models.Analysis.created_at < tomorrow_start,
                 )
             ) or 0
             entered = session.scalar(
                 select(func.coalesce(func.sum(models.TrafficAggregate.entered), 0)).where(
-                    func.date(models.TrafficAggregate.bucket_start) == str(today)
+                    models.TrafficAggregate.bucket_start >= today_start,
+                    models.TrafficAggregate.bucket_start < tomorrow_start,
                 )
             ) or 0
             exited = session.scalar(
                 select(func.coalesce(func.sum(models.TrafficAggregate.exited), 0)).where(
-                    func.date(models.TrafficAggregate.bucket_start) == str(today)
+                    models.TrafficAggregate.bucket_start >= today_start,
+                    models.TrafficAggregate.bucket_start < tomorrow_start,
                 )
             ) or 0
             scene_rows = session.execute(
@@ -184,12 +206,16 @@ class Repository:
             ).all()
             critical = session.scalar(
                 select(func.count()).select_from(models.Alert).where(
-                    models.Alert.severity == "critical", func.date(models.Alert.created_at) == str(today)
+                    models.Alert.severity == "critical",
+                    models.Alert.created_at >= today_start,
+                    models.Alert.created_at < tomorrow_start,
                 )
             ) or 0
             intrusions = session.scalar(
                 select(func.count()).select_from(models.Alert).where(
-                    models.Alert.mode == "intrusion", func.date(models.Alert.created_at) == str(today)
+                    models.Alert.mode == "intrusion",
+                    models.Alert.created_at >= today_start,
+                    models.Alert.created_at < tomorrow_start,
                 )
             ) or 0
             latest_traffic = list(

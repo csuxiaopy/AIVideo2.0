@@ -30,9 +30,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.cpu
+    security_opt:
+      - seccomp=unconfined
     environment:
       APP_HOST: 0.0.0.0
       APP_PORT: 8100
+      # 配合代码挂载开启热重载：改 backend 代码后容器内自动重启，无需 rebuild
+      APP_RELOAD: ${APP_RELOAD:-true}
       DATABASE_URL: postgresql+psycopg://monitor:${POSTGRES_PASSWORD:-monitor-dev-password}@postgres:5432/monitor
       REDIS_URL: redis://redis:6379/0
       APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:-change-this-before-production}
@@ -44,15 +48,39 @@ services:
       FIRE_SMOKE_WORKERS: ${FIRE_SMOKE_WORKERS:-1}
       SHADOW_MODE: ${SHADOW_MODE:-true}
       ANALYSIS_WORKERS: ${ANALYSIS_WORKERS:-2}
+      MAX_LIVE_PREVIEWS: ${MAX_LIVE_PREVIEWS:-4}
+      LIVE_PREVIEW_FPS: ${LIVE_PREVIEW_FPS:-2}
+      LIVE_PREVIEW_TIMEOUT_SECONDS: ${LIVE_PREVIEW_TIMEOUT_SECONDS:-60}
+      FRAME_CAPTURE_TIMEOUT_SECONDS: ${FRAME_CAPTURE_TIMEOUT_SECONDS:-15}
     ports:
       - "8100:8100"
     volumes:
       - evidence_data:/app/data/evidence
+      - snapshot_data:/app/data/snapshots
       - model_cache:/root/.cache
       - ./models:/app/models:ro
+      - ./yolo26n.pt:/app/yolo26n.pt:ro
+      # 代码挂载：本地源码直接映射进容器，改代码无需重新 build 镜像
+      - ./backend:/app/backend
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini:ro
+      - ./run.py:/app/run.py:ro
+      - ./frontend/dist:/app/frontend/dist:ro
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  # 前端构建服务：自动安装依赖并监听源码变化持续构建到 ./frontend/dist
+  # （app 服务已挂载该目录，构建完成后刷新浏览器即可，无需任何手工步骤）
+  web:
+    image: node:22-alpine
+    working_dir: /src
+    command: sh -c "corepack enable && pnpm install && pnpm exec vite build --watch"
+    volumes:
+      - ./frontend:/src
+      # node_modules 用独立卷隔离，避免容器内 Linux 二进制覆盖宿主机 Windows 二进制
+      - web_node_modules:/src/node_modules
     restart: unless-stopped
 
   prometheus:
@@ -80,5 +108,7 @@ volumes:
   postgres_data:
   redis_data:
   evidence_data:
+  snapshot_data:
   model_cache:
   grafana_data:
+  web_node_modules:
