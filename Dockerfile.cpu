@@ -1,9 +1,15 @@
+# syntax=docker/dockerfile:1
 FROM docker.m.daocloud.io/library/node:22-alpine AS web
+# corepack 下载 pnpm 本体也走国内源
+ENV COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
 WORKDIR /src/frontend
-COPY frontend/package*.json ./
-RUN npm install
+RUN corepack enable
+# 只先复制依赖清单，最大化利用层缓存（源码变动不会触发重新装依赖）
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
 COPY frontend/ ./
-RUN npm run build
+RUN pnpm run build
+
 FROM docker.m.daocloud.io/library/python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
@@ -14,9 +20,11 @@ RUN sed -i "s|http://deb.debian.org|http://mirrors.aliyun.com|g" /etc/apt/source
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt requirements-yolo.txt ./
+# 先装 torch CPU 版（单独成层，依赖文件不变时命中缓存）
 RUN pip install --no-cache-dir --progress-bar off \
     --index-url https://download.pytorch.org/whl/cpu \
     torch==2.13.0+cpu torchvision==0.28.0+cpu
+# ultralytics 声明的 torch 依赖已被上面的版本满足，pip 不会重复下载
 RUN pip install --no-cache-dir --progress-bar off --index-url https://mirrors.aliyun.com/pypi/simple/ -r requirements-yolo.txt
 COPY backend ./backend
 COPY alembic ./alembic

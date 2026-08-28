@@ -1,0 +1,38 @@
+# 版本库与本地环境
+.git/
+.venv/
+.workbuddy/
+.codex-server.*.log
+
+# Python 缓存与测试
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-tmp*/
+.pytest-report/
+tests/
+
+# 前端：Windows 本地依赖与构建产物绝不能进构建上下文
+# （会覆盖容器内 Linux 二进制，正是历史权限报错的根因）
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+
+# 数据与模型（运行时由 compose 卷挂载，不需要进镜像）
+data/
+models/
+*.pt
+*.db
+*.engine
+*.onnx
+
+# 密钥（防止进入构建上下文泄露）
+.env
+
+# 其他与镜像无关的目录
+docs/
+deploy/
+scripts/
+frontend/*.md
+*.md
