@@ -74,10 +74,16 @@ def _mount_frontend(app: FastAPI) -> None:
 
         @app.get("/{path:path}", response_class=HTMLResponse)
         async def spa(path: str):
-            candidate = web_dist_dir / path
+            # Anti path-traversal: resolve and confine the candidate inside web_dist_dir.
+            root = web_dist_dir.resolve()
+            candidate = (web_dist_dir / path).resolve()
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                return FileResponse(root / "index.html")
             if path and candidate.is_file():
                 return FileResponse(candidate)
-            return FileResponse(web_dist_dir / "index.html")
+            return FileResponse(root / "index.html")
     else:
         @app.get("/", response_class=HTMLResponse)
         async def placeholder() -> str:

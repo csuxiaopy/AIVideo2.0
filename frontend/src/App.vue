@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { api } from './api'
+import EvidencePreview from './components/EvidencePreview.vue'
 import type { Camera, DrawLayer, Mode, Point, SceneType, SceneTemplate } from './types'
 
 const modeInfo:Record<Mode,{name:string;icon:string;note:string}> = {
@@ -281,7 +282,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);socket?.close();window.remov
         </div>
       </section>
 
-      <section v-else-if="active==='alerts'" class="page"><section class="panel table-panel"><div class="section-head"><div><h2>告警中心</h2><p>烟火紧急告警置顶；仅确认违规才告警</p></div></div><table><thead><tr><th>级别</th><th>证据</th><th>摄像头 / 场景</th><th>事件</th><th>区域</th><th>原因</th><th>时间</th></tr></thead><tbody><tr v-for="item in alerts" :key="item.id" :class="`severity-${item.severity}`"><td><span class="severity-badge" :class="item.severity">{{item.severity||'normal'}}</span></td><td><img v-if="item.evidence_url" class="evidence" :src="item.evidence_url"><span v-else>—</span></td><td>{{item.camera_id}}<br><small>{{sceneInfo[cameras.find(c=>c.id===item.camera_id)?.scene_type||'custom'].name}}</small></td><td><span class="event-type">{{modeName(item.mode)}}</span></td><td>{{item.zone_name||'—'}}</td><td class="reason">{{item.reason}}</td><td>{{formatTime(item.created_at)}}</td></tr></tbody></table><div v-if="!alerts.length" class="empty">暂无告警</div></section></section>
+      <section v-else-if="active==='alerts'" class="page"><section class="panel table-panel"><div class="section-head"><div><h2>告警中心</h2><p>烟火紧急告警置顶；仅确认违规才告警</p></div></div><table><thead><tr><th>级别</th><th>证据</th><th>摄像头 / 场景</th><th>事件</th><th>区域</th><th>原因</th><th>时间</th></tr></thead><tbody><tr v-for="item in alerts" :key="item.id" :class="`severity-${item.severity}`"><td><span class="severity-badge" :class="item.severity">{{item.severity||'normal'}}</span></td><td><EvidencePreview :src="item.evidence_url" alt="告警证据" /></td><td>{{item.camera_id}}<br><small>{{sceneInfo[cameras.find(c=>c.id===item.camera_id)?.scene_type||'custom'].name}}</small></td><td><span class="event-type">{{modeName(item.mode)}}</span></td><td>{{item.zone_name||'—'}}</td><td class="reason">{{item.reason}}</td><td>{{formatTime(item.created_at)}}</td></tr></tbody></table><div v-if="!alerts.length" class="empty">暂无告警</div></section></section>
 
       <section v-else-if="active==='traffic'" class="page"><div class="metrics"><article><span>当前在店人数</span><strong>{{dashboard.current_people||0}}</strong></article><article><span>今日进入</span><strong>{{latestTraffic.reduce((n,x)=>n+x.entered,0)}}</strong></article><article><span>今日离开</span><strong>{{latestTraffic.reduce((n,x)=>n+x.exited,0)}}</strong></article><article><span>统计摄像头</span><strong>{{cameras.filter(c=>c.modes.includes('people_flow')).length}}</strong></article></div><section class="panel table-panel"><table><thead><tr><th>摄像头</th><th>时间</th><th>当前人数</th><th>进入</th><th>离开</th></tr></thead><tbody><tr v-for="row in traffic" :key="`${row.camera_id}-${row.bucket_start}`"><td>{{row.camera_id}}</td><td>{{formatTime(row.bucket_start)}}</td><td>{{row.current_count}}</td><td class="green">+{{row.entered}}</td><td>-{{row.exited}}</td></tr></tbody></table><div v-if="!traffic.length" class="empty">暂无人流数据</div></section></section>
 
