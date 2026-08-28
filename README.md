@@ -4,13 +4,13 @@
 
 # 监衡：YOLO + 视觉大模型监控平台
 
-独立的 96 路 RTSP 智能监控项目。每个摄像头可以多选黑屏、离岗、在岗记录、人流、玩手机、抽烟、烟火和闯入八种固定模式。系统不训练模型：人员、手机、区域和跟踪使用公开 COCO 预训练 YOLO，烟火使用独立 YOLOv8 试点权重，玩手机和抽烟由外部视觉大模型分级复核。
+独立的 64 路 RTSP 智能监控项目。每个摄像头可以多选黑屏、离岗、在岗记录、人流、玩手机、抽烟、烟火和闯入八种固定模式。系统不训练模型：人员、手机、区域和跟踪使用公开 COCO 预训练 YOLO，烟火使用独立 YOLOv8 试点权重，玩手机和抽烟由外部视觉大模型分级复核。
 
 ## 检测模型
 
 | 模型 | 权重/来源 | 用途 | 关键参数（默认值） |
 | --- | --- | --- | --- |
-| **通用 YOLO** | `models/yolo26s.pt`，COCO 公开预训练（AGPL-3.0） | person / cell phone 检测，为离岗、在岗、人流、玩手机、抽烟、闯入提供候选与跟踪 | `YOLO_IMGSZ=640`、`YOLO_CONFIDENCE=0.35`、`YOLO_IOU=0.5`、CPU/GPU 由 `YOLO_DEVICE` 决定；人员判断再叠加 `confidence≥0.45`（脚点判定）。切换模型（yolo26n/s/m、自训练 best.pt）只改 `YOLO_MODEL` 或系统配置，无需改代码 |
+| **通用 YOLO** | `yolo26n.pt`，COCO 公开预训练（AGPL-3.0） | person / cell phone 检测，为离岗、在岗、人流、玩手机、抽烟、闯入提供候选与跟踪 | `YOLO_IMGSZ=640`、`YOLO_CONFIDENCE=0.35`、CPU/GPU 由 `YOLO_DEVICE` 决定；人员判断再叠加 `confidence≥0.45`（脚点判定） |
 | **烟火 YOLO** | `models/fire_smoke_yolov8.pt`（来源 `mfranzon/fire-smoke-yolov8`，试点用途） | fire / smoke 检测，独立于通用模型 | 火焰置信度 `fire_confidence=0.55`、烟雾 `smoke_confidence=0.45`；启动时校验 SHA256（`ac0a1025…76d16`），不匹配拒绝加载，绝不联网下载 |
 | **视觉大模型（VLM）** | 外部 OpenAI 兼容接口（Base URL + API Key 在“系统配置”保存，密文存储） | 玩手机/抽烟的分级复核 | 经济模型（初筛）→ 非结论再交增强模型（确认） |
 | **统计黑屏检测** | 无模型，OpenCV 像素统计 | 黑屏判定 | 见下文告警逻辑 |
@@ -19,7 +19,7 @@
 
 ## 执行流程
 
-1. **调度器**按每个摄像头自己的 `frame_interval_seconds` 周期触发抓帧；同周期摄像头在时间轴上均匀错峰，避免 96 路同时打满 CPU。
+1. **调度器**按每个摄像头自己的 `frame_interval_seconds` 周期触发抓帧；同周期摄像头在时间轴上均匀错峰，避免 64 路同时打满 CPU。
 2. 任务进入 **Redis 优先级队列**（Redis 不可用时降级为内存队列）：烟火 `critical` > 黑屏/闯入 `high` > 普通 `normal` > 纯人流 `low`；烟火走**独立队列**和独立 worker（`FIRE_SMOKE_WORKERS=1`），不会排队被普通任务阻塞。
 3. worker 通过 FFmpeg 抓取单张 JPEG（短生命周期进程，抓完即退出），送入各检测模式。
 4. 每种模式有独立的最小执行间隔（模式节流），如黑屏 `health_interval_seconds=5`、行为复核 `behavior_interval_seconds=15`、在岗/离岗记录 15 秒，避免重复分析。

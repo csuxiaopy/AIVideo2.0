@@ -34,8 +34,6 @@ COPY backend ./backend
 COPY alembic ./alembic
 COPY alembic.ini ./alembic.ini
 COPY run.py ./run.py
-# 模型权重（仅 models/ 下的少量 .pt，见 .dockerignore）；compose 部署时会被 ./models 卷挂载覆盖
-COPY models ./models
 COPY --from=web /src/frontend/dist ./frontend/dist
 RUN mkdir -p /app/data/evidence /app/models
 EXPOSE 8100

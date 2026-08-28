@@ -73,10 +73,7 @@ class MonitoringRuntime:
             detector_settings.general_device or settings.yolo_device,
             settings.yolo_imgsz,
             settings.yolo_confidence,
-            settings.yolo_iou,
         )
-        # 限制同一时刻进入 YOLO 推理的并发数，避免多个 worker 同时压同一模型
-        self.yolo_semaphore = asyncio.Semaphore(settings.yolo_max_concurrency)
         self.fire_smoke = FireSmokeDetector(
             detector_settings.fire_smoke_model or settings.fire_smoke_model,
             detector_settings.fire_smoke_device or settings.fire_smoke_device,
@@ -153,11 +150,10 @@ class MonitoringRuntime:
     async def reload_detectors(self) -> None:
         detector_settings = self.repository.get_detector_settings()
         self.yolo = YoloDetector(
-            detector_settings.general_model or self.settings.yolo_model,
-            detector_settings.general_device or self.settings.yolo_device,
+            detector_settings.general_model,
+            detector_settings.general_device,
             self.settings.yolo_imgsz,
             self.settings.yolo_confidence,
-            self.settings.yolo_iou,
         )
         self.fire_smoke = FireSmokeDetector(
             detector_settings.fire_smoke_model,
@@ -312,8 +308,7 @@ class MonitoringRuntime:
         detections = []
         if yolo_modes:
             try:
-                async with self.yolo_semaphore:
-                    detections = await asyncio.to_thread(self.yolo.detect, camera.id, frame.jpeg)
+                detections = await asyncio.to_thread(self.yolo.detect, camera.id, frame.jpeg)
             except Exception as exc:
                 if force or time.monotonic() - self.last_detector_error[camera.id] > 60:
                     self.last_detector_error[camera.id] = time.monotonic()
@@ -610,7 +605,7 @@ class MonitoringRuntime:
                 "active_previews": len(self.media.previews),
                 "max_live_previews": self.media.max_live_previews,
             },
-            "yolo": self.yolo.status(),
+            "yolo": {"status": "ready" if self.yolo.available else "degraded", "detail": self.yolo.detail},
             "queue": {
                 "status": "redis" if self.queue.redis_available else "in_memory",
                 "depth": general_depth,
@@ -630,7 +625,7 @@ class MonitoringRuntime:
                 "failures": self.failures,
             },
             "detectors": {
-                "general": self.yolo.status(),
+                "general": {"status": "ready" if self.yolo.available else "degraded", "detail": self.yolo.detail},
                 "fire_smoke": self.fire_smoke.status(),
             },
             "shadow_mode": self.settings.shadow_mode,
