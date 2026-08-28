@@ -3,10 +3,27 @@
 #   docker compose -f compose.cpu.yml -f compose.cpu.dev.yml up -d
 #
 # 设计要点：
-# - 数据库使用 SQLite（服务器现有 data/yolo_vlm.db 直接挂载，零迁移、数据不丢）
-# - 持久化数据（SQLite/evidence/snapshots）全部落在宿主 ./data 目录
+# - 数据库使用 PostgreSQL 17 容器，数据落 postgres_data 卷，跨重建不丢
+# - evidence/snapshots 落独立卷（evidence_data / snapshot_data）
 # - 依赖装入镜像；业务代码更新不重建镜像（dev 覆盖层通过 bind mount 挂载）
+# - 镜像默认走 daocloud 国内源，可用 ${XXX_IMAGE} 环境变量覆盖
 services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-docker.m.daocloud.io/library/postgres:17-alpine}
+    pull_policy: missing
+    environment:
+      POSTGRES_USER: monitor
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: monitor
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monitor -d monitor"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
   redis:
     image: ${REDIS_IMAGE:-docker.m.daocloud.io/library/redis:8-alpine}
     pull_policy: missing
@@ -24,10 +41,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.cpu
+    # 旧 Docker（如 19.03）默认 seccomp 与 Debian 13 线程创建不兼容，运行时需放开；
+    # 新环境（Docker 20.10+ / containerd）可删除本段
+    security_opt:
+      - seccomp=unconfined
     environment:
       APP_HOST: 0.0.0.0
       APP_PORT: 8100
-      DATABASE_URL: sqlite:////app/data/yolo_vlm.db
+      DATABASE_URL: postgresql+psycopg://monitor:${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}@postgres:5432/monitor
       REDIS_URL: redis://redis:6379/0
       APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:-change-this-before-production}
       YOLO_MODEL: ${YOLO_MODEL:-yolo26n.pt}
@@ -45,12 +66,13 @@ services:
     ports:
       - "8100:8100"
     volumes:
-      # 持久化：SQLite 库 + evidence + snapshots 全部在宿主 ./data，重启/更新不丢
-      - ./data:/app/data
+      - evidence_data:/app/data/evidence
+      - snapshot_data:/app/data/snapshots
       - model_cache:/root/.cache
       - ./models:/app/models:ro
       - ./yolo26n.pt:/app/yolo26n.pt:ro
     depends_on:
+      postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
     restart: unless-stopped
 
@@ -76,6 +98,9 @@ services:
     depends_on: [prometheus]
 
 volumes:
+  postgres_data:
   redis_data:
+  evidence_data:
+  snapshot_data:
   model_cache:
   grafana_data:

@@ -5,7 +5,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import case, desc, func, select
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from backend import models
