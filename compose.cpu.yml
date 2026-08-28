@@ -1,6 +1,7 @@
 services:
   postgres:
-    image: postgres:17-alpine
+    image: docker.m.daocloud.io/library/postgres:17-alpine
+    pull_policy: never
     environment:
       POSTGRES_DB: monitor
       POSTGRES_USER: monitor
@@ -15,7 +16,8 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:8-alpine
+    image: docker.m.daocloud.io/library/redis:8-alpine
+    pull_policy: never
     command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy noeviction
     volumes:
       - redis_data:/data
