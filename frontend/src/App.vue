@@ -153,7 +153,7 @@ const syncShifts=()=>{for(const d of Object.keys(editForm.schedule.weekly||{})) 
 
 const modelSettings=reactive<any>({provider:'mock',base_url:'',api_key:'',economy_model:'qwen-vl',enhanced_model:'qwen-vl-max',api_key_configured:false})
 const webhookSettings=reactive<any>({enabled:false,url:'',secret:'',secret_configured:false})
-const detectorSettings=reactive<any>({general_model:'yolo26n.pt',general_device:'cpu',fire_smoke_model:'models/fire_smoke_yolov8.pt',fire_smoke_device:'cpu',model_sha256:'',license_name:'AGPL-3.0 (internal pilot only)',runtime:{}})
+const detectorSettings=reactive<any>({general_model:'models/yolo26s.pt',general_device:'cpu',fire_smoke_model:'models/fire_smoke_yolov8.pt',fire_smoke_device:'cpu',model_sha256:'',license_name:'AGPL-3.0 (internal pilot only)',runtime:{}})
 const retentionSettings=reactive<any>({alert_retention_days:30,auto_cleanup_enabled:true})
 const loadSettings=async()=>{try{Object.assign(modelSettings,await api('/api/settings/models'));Object.assign(webhookSettings,await api('/api/settings/webhook'));Object.assign(detectorSettings,await api('/api/settings/detectors'));Object.assign(retentionSettings,await api('/api/settings/retention'))}catch(error:any){notify(error.message,'error')}}
 const saveModels=async()=>{try{

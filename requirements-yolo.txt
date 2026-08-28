@@ -1,4 +1,5 @@
 -r requirements.txt
-ultralytics>=8.3.0
+# YOLO26 系列权重（yolo26n/s/m/l/x）需要 ultralytics >= 8.4.0
+ultralytics>=8.4.0
 supervision>=0.25.1
 dill==0.4.1

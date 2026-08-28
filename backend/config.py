@@ -27,16 +27,22 @@ class Settings(BaseSettings):
     live_preview_fps: float = 2.0
     live_preview_timeout_seconds: int = 60
     frame_capture_timeout_seconds: int = 15
-    yolo_model: str = "yolo26n.pt"
+    # 通用检测模型（YOLO26s 或自训练 best.pt）。路径相对项目根目录，
+    # 切换模型只需修改此处 / .env 的 YOLO_MODEL，无需改业务代码。
+    yolo_model: str = "models/yolo26s.pt"
     yolo_device: str = "cpu"
     yolo_imgsz: int = 640
     yolo_confidence: float = 0.35
+    yolo_iou: float = 0.5
+    # 同一时刻最多并发执行的 YOLO 推理数（防止多 worker 同时压同一模型导致 CPU 过载）
+    yolo_max_concurrency: int = 2
     fire_smoke_model: str = "models/fire_smoke_yolov8.pt"
     fire_smoke_sha256: str = "ac0a10257b2bc1f20c9d957f8adeeb61dd6140322fc19d0b4a116cb491776d16"
     fire_smoke_device: str = "cpu"
     fire_smoke_imgsz: int = 640
     scheduler_enabled: bool = True
-    analysis_workers: int = 2
+    # 96 路摄像头（每路 60s 一帧 ≈ 1.6 张/秒）时建议 >= 8；小规模部署可调小
+    analysis_workers: int = 8
     fire_smoke_workers: int = 1
     shadow_mode: bool = True
     web_dist_dir: Path = ROOT / "frontend" / "dist"

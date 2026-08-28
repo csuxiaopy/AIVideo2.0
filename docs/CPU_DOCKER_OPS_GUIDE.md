@@ -111,11 +111,17 @@ APP_ENCRYPTION_KEY=请替换为足够长的随机密钥  # 加密 API Key 与 RT
 其他常用配置：
 
 ```dotenv
-YOLO_MODEL=yolo26n.pt
+# 通用检测模型：权重放 models/ 目录，切换模型（yolo26n/s/m、自训练 best.pt）只改这里
+YOLO_MODEL=models/yolo26s.pt
 YOLO_DEVICE=cpu
+YOLO_IMGSZ=640
+YOLO_CONFIDENCE=0.35
+YOLO_IOU=0.5
+YOLO_MAX_CONCURRENCY=2
 FIRE_SMOKE_MODEL=models/fire_smoke_yolov8.pt
 FIRE_SMOKE_DEVICE=cpu
-ANALYSIS_WORKERS=2
+# 96 路摄像头（每路 60s 一帧 ≈ 1.6 张/秒）建议 8；小规模部署可调小
+ANALYSIS_WORKERS=8
 FIRE_SMOKE_WORKERS=1
 SHADOW_MODE=true
 ```
@@ -150,7 +156,7 @@ sha256sum models/fire_smoke_yolov8.pt
 ac0a10257b2bc1f20c9d957f8adeeb61dd6140322fc19d0b4a116cb491776d16
 ```
 
-`models` 目录与 `yolo26n.pt` 以只读方式挂载到 app。不要在容器内修改该目录。
+`models` 目录以只读方式挂载到 app（`./models:/app/models:ro`）。通用检测模型（默认 `models/yolo26s.pt`）和烟火模型都放在该目录，切换模型只改 `YOLO_MODEL`。不要在容器内修改该目录。
 
 ## 7. 构建 app 镜像
 
@@ -560,7 +566,8 @@ docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
 
 - app、postgres、redis 均为 `Up`，健康检查为 `healthy`。
 - `/health` 返回 HTTP 200 且 `status` 为 `ok`。
-- YOLO 与火烟检测器为 `ready`。
+- YOLO（`yolo.model` 应为 `yolo26s.pt`）与火烟检测器为 `ready`，`yolo.load_error` 为空。
+- 模型文件缺失/损坏时 `/health` 中 YOLO 状态为 `degraded` 且 `load_error` 说明原因，服务不崩溃。
 - `yolo26n.pt` 与 `models/` 通过 Compose 只读挂载到 app，重建容器时不再访问 GitHub 下载。
 - 8100 只由本项目 app 占用。
 - 原有老业务容器仍然运行。

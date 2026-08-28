@@ -51,14 +51,20 @@ services:
       DATABASE_URL: postgresql+psycopg://monitor:${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}@postgres:5432/monitor
       REDIS_URL: redis://redis:6379/0
       APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:-change-this-before-production}
-      YOLO_MODEL: ${YOLO_MODEL:-yolo26n.pt}
+      # 通用检测模型统一放 models/ 目录（下方已 bind mount），切换模型只改 YOLO_MODEL
+      YOLO_MODEL: ${YOLO_MODEL:-models/yolo26s.pt}
       YOLO_DEVICE: cpu
+      YOLO_IMGSZ: ${YOLO_IMGSZ:-640}
+      YOLO_CONFIDENCE: ${YOLO_CONFIDENCE:-0.35}
+      YOLO_IOU: ${YOLO_IOU:-0.5}
+      YOLO_MAX_CONCURRENCY: ${YOLO_MAX_CONCURRENCY:-2}
       FIRE_SMOKE_MODEL: ${FIRE_SMOKE_MODEL:-models/fire_smoke_yolov8.pt}
       FIRE_SMOKE_SHA256: ${FIRE_SMOKE_SHA256:-ac0a10257b2bc1f20c9d957f8adeeb61dd6140322fc19d0b4a116cb491776d16}
       FIRE_SMOKE_DEVICE: cpu
       FIRE_SMOKE_WORKERS: ${FIRE_SMOKE_WORKERS:-1}
       SHADOW_MODE: ${SHADOW_MODE:-true}
-      ANALYSIS_WORKERS: ${ANALYSIS_WORKERS:-2}
+      # 96 路摄像头建议 8；小规模部署可调小
+      ANALYSIS_WORKERS: ${ANALYSIS_WORKERS:-8}
       MAX_LIVE_PREVIEWS: ${MAX_LIVE_PREVIEWS:-4}
       LIVE_PREVIEW_FPS: ${LIVE_PREVIEW_FPS:-2}
       LIVE_PREVIEW_TIMEOUT_SECONDS: ${LIVE_PREVIEW_TIMEOUT_SECONDS:-60}
@@ -69,8 +75,8 @@ services:
       - evidence_data:/app/data/evidence
       - snapshot_data:/app/data/snapshots
       - model_cache:/root/.cache
+      # 模型统一放 models/ 目录，切换模型只需改 YOLO_MODEL 环境变量
       - ./models:/app/models:ro
-      - ./yolo26n.pt:/app/yolo26n.pt:ro
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }

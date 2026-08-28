@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
+import statistics
+import time
+from collections import defaultdict, deque
 from dataclasses import dataclass
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -12,6 +15,9 @@ from backend.schemas import Detection
 
 
 logger = logging.getLogger(__name__)
+
+# 保留最近 N 次推理耗时用于 avg / P95 统计
+LATENCY_WINDOW = 200
 
 
 @dataclass
@@ -47,48 +53,94 @@ class CentroidFallbackTracker:
 
 
 class YoloDetector:
-    def __init__(self, model_name: str, device: str, imgsz: int, confidence: float):
+    def __init__(
+        self,
+        model_name: str,
+        device: str,
+        imgsz: int,
+        confidence: float,
+        iou: float = 0.5,
+    ):
         self.model_name = model_name
         self.device = device
         self.imgsz = imgsz
         self.confidence = confidence
+        self.iou = iou
         self.model = None
         self.available = False
         self.detail = "YOLO 依赖尚未加载"
+        self.load_ms = 0
+        self.load_error = ""
+        self.processed = 0
+        self.failures = 0
+        self.last_latency_ms = 0
+        self._latencies: deque[float] = deque(maxlen=LATENCY_WINDOW)
         self.trackers: dict[str, object] = {}
+        self._load()
+
+    def _load(self) -> None:
+        path = Path(self.model_name)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        if not path.is_file():
+            self.available = False
+            self.load_error = f"模型文件不存在: {path}"
+            self.detail = f"YOLO 不可用：{self.load_error}（请将权重文件放到该路径，或通过 YOLO_MODEL 配置切换）"
+            logger.warning("YOLO 模型加载失败：%s", self.detail)
+            return
+        started = time.perf_counter()
         try:
             from ultralytics import YOLO
 
-            self.model = YOLO(model_name)
+            self.model = YOLO(str(path))
+            self.load_ms = round((time.perf_counter() - started) * 1000, 1)
             self.available = True
-            self.detail = f"{model_name} on {device}"
+            self.detail = f"{path.name} on {self.device}"
+            logger.info(
+                "YOLO 模型加载成功 model=%s path=%s device=%s imgsz=%s conf=%s iou=%s load_ms=%.1f",
+                path.name, path, self.device, self.imgsz, self.confidence, self.iou, self.load_ms,
+            )
         except Exception as exc:
-            self.detail = f"YOLO 不可用：{type(exc).__name__}: {str(exc)[:300]}"
-            logger.warning(self.detail)
+            self.load_ms = round((time.perf_counter() - started) * 1000, 1)
+            self.load_error = f"{type(exc).__name__}: {str(exc)[:300]}"
+            self.detail = f"YOLO 不可用：{self.load_error}"
+            logger.warning("YOLO 模型加载失败 path=%s detail=%s", path, self.detail)
 
     def detect(self, camera_id: str, jpeg: bytes) -> list[Detection]:
         if not self.available or self.model is None:
             raise RuntimeError(self.detail)
-        image = decode_jpeg(jpeg)
-        results = self.model.predict(
-            source=image, imgsz=self.imgsz, conf=self.confidence, device=self.device, verbose=False
-        )
-        height, width = image.shape[:2]
-        detections: list[Detection] = []
-        result = results[0]
-        names = result.names
-        for box in result.boxes:
-            class_id = int(box.cls.item())
-            x1, y1, x2, y2 = (float(value) for value in box.xyxy[0].tolist())
-            detections.append(Detection(
-                class_id=class_id,
-                class_name=str(names[class_id]),
-                confidence=float(box.conf.item()),
-                box=(x1 / width, y1 / height, x2 / width, y2 / height),
-            ))
-        persons = [item for item in detections if item.class_name == "person"]
-        self._track(camera_id, persons, width, height)
-        return detections
+        started = time.perf_counter()
+        try:
+            image = decode_jpeg(jpeg)
+            results = self.model.predict(
+                source=image, imgsz=self.imgsz, conf=self.confidence,
+                iou=self.iou, device=self.device, verbose=False,
+            )
+            height, width = image.shape[:2]
+            detections: list[Detection] = []
+            result = results[0]
+            names = result.names
+            for box in result.boxes:
+                class_id = int(box.cls.item())
+                x1, y1, x2, y2 = (float(value) for value in box.xyxy[0].tolist())
+                detections.append(Detection(
+                    class_id=class_id,
+                    class_name=str(names[class_id]),
+                    confidence=float(box.conf.item()),
+                    box=(x1 / width, y1 / height, x2 / width, y2 / height),
+                ))
+            persons = [item for item in detections if item.class_name == "person"]
+            self._track(camera_id, persons, width, height)
+            self.processed += 1
+            return detections
+        except Exception:
+            self.failures += 1
+            logger.warning("YOLO 推理失败 camera=%s model=%s", camera_id, self.model_name, exc_info=True)
+            raise
+        finally:
+            latency_ms = (time.perf_counter() - started) * 1000
+            self.last_latency_ms = round(latency_ms, 1)
+            self._latencies.append(latency_ms)
 
     def _track(self, camera_id: str, persons: list[Detection], width: int, height: int) -> None:
         if not persons:
@@ -135,6 +187,28 @@ class YoloDetector:
             fallback = CentroidFallbackTracker()
             self.trackers[camera_id] = fallback
             fallback.update(persons)
+
+    def status(self) -> dict[str, object]:
+        latencies = list(self._latencies)
+        avg = statistics.fmean(latencies) if latencies else 0.0
+        p95 = statistics.quantiles(latencies, n=20)[18] if len(latencies) >= 20 else (max(latencies) if latencies else 0.0)
+        return {
+            "status": "ready" if self.available else "degraded",
+            "detail": self.detail,
+            "model": Path(self.model_name).name,
+            "model_path": self.model_name,
+            "device": self.device,
+            "imgsz": self.imgsz,
+            "conf": self.confidence,
+            "iou": self.iou,
+            "load_ms": self.load_ms,
+            "load_error": self.load_error,
+            "latency_ms": self.last_latency_ms,
+            "avg_latency_ms": round(avg, 1),
+            "p95_latency_ms": round(p95, 1),
+            "processed": self.processed,
+            "failures": self.failures,
+        }
 
     @staticmethod
     def people(detections: list[Detection]) -> list[Detection]:
