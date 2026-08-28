@@ -1,8 +1,11 @@
 # syntax=docker/dockerfile:1
-FROM docker.m.daocloud.io/library/node:22-alpine AS web
+# 用 bookworm-slim 而非 alpine：避免 musl/native 依赖及 overlayfs 上 pnpm 硬链接 EPERM 问题
+FROM docker.m.daocloud.io/library/node:22-bookworm-slim AS web
 USER root
 # corepack 下载 pnpm 本体也走国内源
 ENV COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
+# pnpm 在容器 overlayfs 上默认 symlink 方案易触发 EPERM，改用 hoisted 平铺安装
+ENV npm_config_node_linker=hoisted
 WORKDIR /src/frontend
 RUN corepack enable
 # 只先复制依赖清单，最大化利用层缓存（源码变动不会触发重新装依赖）

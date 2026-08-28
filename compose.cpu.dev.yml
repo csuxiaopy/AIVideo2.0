@@ -17,10 +17,12 @@ services:
 
   # 前端开发服务器：挂载源码 + node_modules 用独立卷（避免宿主机空目录覆盖/跨平台二进制冲突）
   web:
-    image: ${NODE_IMAGE:-docker.m.daocloud.io/library/node:22-alpine}
+    image: ${NODE_IMAGE:-docker.m.daocloud.io/library/node:22-bookworm-slim}
     working_dir: /src
     environment:
       COREPACK_NPM_REGISTRY: https://registry.npmmirror.com
+      # 与镜像构建一致：overlayfs 上用 hoisted 平铺安装，避免 EPERM
+      npm_config_node_linker: hoisted
       # Vite 代理目标：容器内指向 app 服务
       VITE_API_TARGET: http://app:8100
     command: sh -c "corepack enable && pnpm install --frozen-lockfile && pnpm dev --host 0.0.0.0 --port 5173"
