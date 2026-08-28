@@ -67,7 +67,7 @@ services:
       - ./alembic:/app/alembic
       - ./alembic.ini:/app/alembic.ini:ro
       - ./run.py:/app/run.py:ro
-      - ./frontend/dist:/app/frontend/dist:ro
+    
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }

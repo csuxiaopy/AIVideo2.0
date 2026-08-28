@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
 FROM docker.m.daocloud.io/library/node:22-alpine AS web
+USER root
 # corepack 下载 pnpm 本体也走国内源
 ENV COREPACK_NPM_REGISTRY=https://registry.npmmirror.com
 WORKDIR /src/frontend
