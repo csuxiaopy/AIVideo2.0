@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import case, desc, func, select
+from sqlalchemy import case, delete, desc, func, select
 from sqlalchemy.orm import Session
 
 from backend import models
@@ -299,3 +299,39 @@ class Repository:
             session.flush()
             session.refresh(row)
             return row
+
+    def get_retention_settings(self) -> models.RetentionSettings:
+        with session_scope() as session:
+            row = session.get(models.RetentionSettings, 1)
+            if not row:
+                row = models.RetentionSettings(id=1)
+                session.add(row)
+                session.flush()
+                session.refresh(row)
+            return row
+
+    def save_retention_settings(self, values: dict[str, Any]) -> models.RetentionSettings:
+        with session_scope() as session:
+            row = session.get(models.RetentionSettings, 1) or models.RetentionSettings(id=1)
+            session.add(row)
+            for key, value in values.items():
+                setattr(row, key, value)
+            row.updated_at = utc_now()
+            session.flush()
+            session.refresh(row)
+            return row
+
+    def list_alerts_before(self, cutoff: datetime, severity: str | None = None) -> list[models.Alert]:
+        with session_scope() as session:
+            stmt = select(models.Alert).where(models.Alert.created_at < cutoff)
+            if severity:
+                stmt = stmt.where(models.Alert.severity == severity)
+            return list(session.scalars(stmt))
+
+    def delete_alerts_before(self, cutoff: datetime, severity: str | None = None) -> int:
+        with session_scope() as session:
+            stmt = delete(models.Alert).where(models.Alert.created_at < cutoff)
+            if severity:
+                stmt = stmt.where(models.Alert.severity == severity)
+            result = session.execute(stmt)
+            return result.rowcount or 0

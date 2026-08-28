@@ -11,6 +11,7 @@ from prometheus_client import Counter, Gauge, Histogram
 from backend import models
 from backend.alerts import AlertService
 from backend.capabilities import CORE_CAPABILITIES, mode_is_active
+from backend.cleanup import CleanupService
 from backend.config import Settings
 from backend.database import utc_now
 from backend.detectors.black_screen import is_black_screen
@@ -81,8 +82,10 @@ class MonitoringRuntime:
         )
         self.webhook = WebhookClient()
         self.alerts = AlertService(settings, repository, cipher, self.event_bus, self.webhook)
+        self.cleanup = CleanupService(settings, repository)
         self.vlm: VisionModelClient | None = None
         self.scheduler_task: asyncio.Task | None = None
+        self.cleanup_task: asyncio.Task | None = None
         self.worker_tasks: list[asyncio.Task] = []
         self.fire_worker_tasks: list[asyncio.Task] = []
         self.running = False
@@ -106,6 +109,7 @@ class MonitoringRuntime:
         self.running = True
         if self.settings.scheduler_enabled:
             self.scheduler_task = asyncio.create_task(self._scheduler(), name="camera-scheduler")
+            self.cleanup_task = asyncio.create_task(self._cleanup_loop(), name="alert-cleanup")
             self.worker_tasks = [
                 asyncio.create_task(self._worker(index, fire_only=False), name=f"analysis-worker-{index}")
                 for index in range(self.settings.analysis_workers)
@@ -117,7 +121,7 @@ class MonitoringRuntime:
 
     async def close(self) -> None:
         self.running = False
-        tasks = [task for task in [self.scheduler_task, *self.worker_tasks, *self.fire_worker_tasks] if task]
+        tasks = [task for task in [self.scheduler_task, self.cleanup_task, *self.worker_tasks, *self.fire_worker_tasks] if task]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -213,6 +217,18 @@ class MonitoringRuntime:
                 QUEUE_GAUGE.labels(priority=f"fire_{priority}").set(depth)
             self.last_heartbeat = utc_now()
             await asyncio.sleep(0.5)
+
+    async def _cleanup_loop(self) -> None:
+        while self.running:
+            await asyncio.sleep(6 * 3600)
+            try:
+                retention = self.repository.get_retention_settings()
+                if not retention.auto_cleanup_enabled:
+                    continue
+                result = await asyncio.to_thread(self.cleanup.run)
+                logger.info("Alert cleanup finished: %s", result)
+            except Exception:
+                logger.exception("Alert cleanup failed")
 
     async def _worker(self, index: int, fire_only: bool) -> None:
         queue = self.fire_queue if fire_only else self.queue

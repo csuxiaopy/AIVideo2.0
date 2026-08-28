@@ -120,3 +120,12 @@ class DetectorSettings(Base):
     )
     license_name: Mapped[str] = mapped_column(String(100), default="AGPL-3.0 (internal pilot only)")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class RetentionSettings(Base):
+    __tablename__ = "retention_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    alert_retention_days: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
+    auto_cleanup_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)

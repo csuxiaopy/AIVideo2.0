@@ -198,6 +198,11 @@ class WebhookSettingsUpdate(BaseModel):
         return self
 
 
+class RetentionSettingsUpdate(BaseModel):
+    alert_retention_days: int = Field(default=30, ge=1, le=365)
+    auto_cleanup_enabled: bool = True
+
+
 class VLMResult(BaseModel):
     mode: Mode
     status: str = Field(pattern=r"^(confirmed|suspected|uncertain|none)$")

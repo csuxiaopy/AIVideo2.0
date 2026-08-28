@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from backend.api.context import context
-from backend.schemas import DetectorSettingsUpdate, ModelSettingsUpdate, WebhookSettingsUpdate
+from backend.schemas import DetectorSettingsUpdate, ModelSettingsUpdate, RetentionSettingsUpdate, WebhookSettingsUpdate
 from backend.webhook import WebhookClient
 
 
@@ -127,3 +127,19 @@ async def test_webhook() -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     finally:
         await client.close()
+
+
+@router.get("/retention")
+async def get_retention() -> dict[str, Any]:
+    row = context.repository.get_retention_settings()
+    return {
+        "alert_retention_days": row.alert_retention_days,
+        "auto_cleanup_enabled": row.auto_cleanup_enabled,
+        "updated_at": row.updated_at,
+    }
+
+
+@router.put("/retention")
+async def put_retention(payload: RetentionSettingsUpdate) -> dict[str, Any]:
+    context.repository.save_retention_settings(payload.model_dump())
+    return await get_retention()

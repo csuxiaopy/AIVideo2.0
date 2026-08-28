@@ -36,6 +36,20 @@ async def alerts(
     return [alert_public(row) for row in rows]
 
 
+@router.delete("/api/alerts")
+async def delete_alerts(
+    before_days: int = Query(default=30, ge=1, le=365),
+    severity: str | None = None,
+) -> dict[str, Any]:
+    runtime = context.require_runtime()
+    result = await asyncio.to_thread(runtime.cleanup.run, before_days, severity)
+    return {
+        "deleted": result["deleted"],
+        "evidence_removed": result["evidence_removed"],
+        "cutoff": result["cutoff"],
+    }
+
+
 @router.get("/api/analyses")
 async def analyses(
     limit: int = Query(default=100, ge=1, le=500), camera_id: str | None = None
