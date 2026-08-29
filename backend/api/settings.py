@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from backend.api.context import context
-from backend.schemas import DetectorSettingsUpdate, ModelSettingsUpdate, RetentionSettingsUpdate, WebhookSettingsUpdate
+from backend.schemas import DisplaySettingsUpdate, DetectorSettingsUpdate, ModelSettingsUpdate, RetentionSettingsUpdate, WebhookSettingsUpdate
 from backend.webhook import WebhookClient
 
 
@@ -143,3 +143,21 @@ async def get_retention() -> dict[str, Any]:
 async def put_retention(payload: RetentionSettingsUpdate) -> dict[str, Any]:
     context.repository.save_retention_settings(payload.model_dump())
     return await get_retention()
+
+
+@router.get("/display")
+async def get_display() -> dict[str, Any]:
+    row = context.repository.get_display_settings()
+    return {
+        "show_traffic_report": row.show_traffic_report,
+        "show_current_store_count": row.show_current_store_count,
+        "updated_at": row.updated_at,
+    }
+
+
+@router.patch("/display")
+async def patch_display(payload: DisplaySettingsUpdate) -> dict[str, Any]:
+    values = payload.model_dump(exclude_none=True)
+    if values:
+        context.repository.save_display_settings(values)
+    return await get_display()

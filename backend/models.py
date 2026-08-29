@@ -34,7 +34,7 @@ class Analysis(Base):
     __tablename__ = "analyses"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    camera_id: Mapped[str] = mapped_column(ForeignKey("cameras.id", ondelete="CASCADE"), index=True)
+    camera_id: Mapped[str] = mapped_column(ForeignKey("cameras.id", ondelete="CASCADE", onupdate="CASCADE"), index=True)
     mode: Mapped[str] = mapped_column(String(40), index=True)
     status: Mapped[str] = mapped_column(String(30), index=True)
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
@@ -57,7 +57,7 @@ class Alert(Base):
     __tablename__ = "alerts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    camera_id: Mapped[str] = mapped_column(ForeignKey("cameras.id", ondelete="CASCADE"), index=True)
+    camera_id: Mapped[str] = mapped_column(ForeignKey("cameras.id", ondelete="CASCADE", onupdate="CASCADE"), index=True)
     analysis_id: Mapped[int | None] = mapped_column(ForeignKey("analyses.id", ondelete="SET NULL"))
     mode: Mapped[str] = mapped_column(String(40), index=True)
     status: Mapped[str] = mapped_column(String(30), default="confirmed")
@@ -78,7 +78,7 @@ class TrafficAggregate(Base):
     __table_args__ = (UniqueConstraint("camera_id", "bucket_start", name="uq_traffic_bucket"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    camera_id: Mapped[str] = mapped_column(ForeignKey("cameras.id", ondelete="CASCADE"), index=True)
+    camera_id: Mapped[str] = mapped_column(ForeignKey("cameras.id", ondelete="CASCADE", onupdate="CASCADE"), index=True)
     bucket_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     current_count: Mapped[int] = mapped_column(Integer, default=0)
     entered: Mapped[int] = mapped_column(Integer, default=0)
@@ -128,4 +128,13 @@ class RetentionSettings(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     alert_retention_days: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     auto_cleanup_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class DisplaySettings(Base):
+    __tablename__ = "display_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    show_traffic_report: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    show_current_store_count: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)

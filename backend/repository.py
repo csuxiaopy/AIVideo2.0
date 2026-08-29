@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import case, delete, desc, func, select
+from sqlalchemy import case, delete, desc, func, select, update
 from sqlalchemy.orm import Session
 
 from backend import models
@@ -45,6 +45,20 @@ class Repository:
                 setattr(camera, key, value)
             camera.updated_at = utc_now()
         return camera
+
+    def rename_and_update_camera(
+        self, camera_id: str, new_camera_id: str, values: dict[str, Any]
+    ) -> models.Camera | None:
+        """Rename the business key atomically; FK ON UPDATE CASCADE preserves history."""
+        with session_scope() as session:
+            if not session.get(models.Camera, camera_id):
+                return None
+            session.execute(
+                update(models.Camera)
+                .where(models.Camera.id == camera_id)
+                .values(id=new_camera_id, updated_at=utc_now(), **values)
+            )
+        return self.get_camera(new_camera_id)
 
     def delete_camera(self, camera_id: str) -> bool:
         with session_scope() as session:
@@ -313,6 +327,27 @@ class Repository:
     def save_retention_settings(self, values: dict[str, Any]) -> models.RetentionSettings:
         with session_scope() as session:
             row = session.get(models.RetentionSettings, 1) or models.RetentionSettings(id=1)
+            session.add(row)
+            for key, value in values.items():
+                setattr(row, key, value)
+            row.updated_at = utc_now()
+            session.flush()
+            session.refresh(row)
+            return row
+
+    def get_display_settings(self) -> models.DisplaySettings:
+        with session_scope() as session:
+            row = session.get(models.DisplaySettings, 1)
+            if not row:
+                row = models.DisplaySettings(id=1)
+                session.add(row)
+                session.flush()
+                session.refresh(row)
+            return row
+
+    def save_display_settings(self, values: dict[str, Any]) -> models.DisplaySettings:
+        with session_scope() as session:
+            row = session.get(models.DisplaySettings, 1) or models.DisplaySettings(id=1)
             session.add(row)
             for key, value in values.items():
                 setattr(row, key, value)

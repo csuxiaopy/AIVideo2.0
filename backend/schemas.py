@@ -26,7 +26,7 @@ class SceneType(str, Enum):
 
 
 ALL_MODES = {mode.value for mode in Mode}
-FRAME_INTERVAL_CHOICES = {5, 10, 30, 60, 120}
+FRAME_INTERVAL_CHOICES = {5, 10, 20, 30, 60, 120}
 Point = tuple[Annotated[float, Field(ge=0, le=1)], Annotated[float, Field(ge=0, le=1)]]
 
 
@@ -107,7 +107,7 @@ class CameraCreate(BaseModel):
     @classmethod
     def valid_frame_interval(cls, value: int) -> int:
         if value not in FRAME_INTERVAL_CHOICES:
-            raise ValueError("抽帧频率必须是 5、10、30、60 或 120 秒")
+            raise ValueError("抽帧频率必须是 5、10、20、30、60 或 120 秒")
         return value
 
     @field_validator("rtsp_url")
@@ -135,10 +135,14 @@ class CameraCreate(BaseModel):
 
 
 class CameraPatch(BaseModel):
+    id: str | None = Field(default=None, min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     name: str | None = Field(default=None, min_length=1, max_length=200)
     rtsp_url: str | None = Field(default=None, min_length=1, max_length=2000)
     enabled: bool | None = None
     scene_type: SceneType | None = None
+    modes: list[Mode] | None = Field(default=None, min_length=1, max_length=len(Mode))
+    geometry: GeometrySpec | None = None
+    schedule: ScheduleSpec | None = None
     options: CameraOptions | None = None
     frame_interval_seconds: int | None = None
 
@@ -146,7 +150,7 @@ class CameraPatch(BaseModel):
     @classmethod
     def valid_frame_interval(cls, value: int | None) -> int | None:
         if value is not None and value not in FRAME_INTERVAL_CHOICES:
-            raise ValueError("抽帧频率必须是 5、10、30、60 或 120 秒")
+            raise ValueError("抽帧频率必须是 5、10、20、30、60 或 120 秒")
         return value
 
     @field_validator("rtsp_url")
@@ -155,6 +159,11 @@ class CameraPatch(BaseModel):
         if value and not value.startswith(("rtsp://", "rtsps://", "file://")):
             raise ValueError("视频源必须是 rtsp://、rtsps:// 或 file://")
         return value
+
+    @field_validator("modes")
+    @classmethod
+    def unique_modes(cls, value: list[Mode] | None) -> list[Mode] | None:
+        return list(dict.fromkeys(value)) if value is not None else None
 
 
 class ModesUpdate(BaseModel):
@@ -201,6 +210,11 @@ class WebhookSettingsUpdate(BaseModel):
 class RetentionSettingsUpdate(BaseModel):
     alert_retention_days: int = Field(default=30, ge=1, le=365)
     auto_cleanup_enabled: bool = True
+
+
+class DisplaySettingsUpdate(BaseModel):
+    show_traffic_report: bool | None = None
+    show_current_store_count: bool | None = None
 
 
 class VLMResult(BaseModel):

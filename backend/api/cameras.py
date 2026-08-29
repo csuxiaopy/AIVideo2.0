@@ -54,6 +54,21 @@ def _validate_combination(camera: models.Camera, modes: list[Mode], geometry: Ge
     )
 
 
+def _effective_patch(camera: models.Camera, payload: CameraPatch) -> CameraCreate:
+    return CameraCreate(
+        id=payload.id or camera.id,
+        name=payload.name or camera.name,
+        rtsp_url=payload.rtsp_url or context.cipher.decrypt(camera.rtsp_url_encrypted),
+        enabled=payload.enabled if payload.enabled is not None else camera.enabled,
+        scene_type=payload.scene_type or camera.scene_type,
+        modes=payload.modes if payload.modes is not None else from_json(camera.modes_json, []),
+        geometry=payload.geometry or from_json(camera.geometry_json, {}),
+        schedule=payload.schedule or from_json(camera.schedule_json, {}),
+        options=payload.options or from_json(camera.options_json, {}),
+        frame_interval_seconds=payload.frame_interval_seconds or camera.frame_interval_seconds,
+    )
+
+
 @router.get("/cameras")
 async def list_cameras() -> list[dict[str, Any]]:
     return [_public(camera) for camera in context.repository.list_cameras()]
@@ -97,13 +112,38 @@ async def get_camera(camera_id: str) -> dict[str, Any]:
 
 @router.patch("/cameras/{camera_id}")
 async def patch_camera(camera_id: str, payload: CameraPatch) -> dict[str, Any]:
-    _camera_or_404(camera_id)
-    values = payload.model_dump(exclude_none=True, exclude={"rtsp_url", "options"})
+    camera = _camera_or_404(camera_id)
+    effective = _effective_patch(camera, payload)
+    new_camera_id = effective.id
+    if new_camera_id != camera_id and context.repository.get_camera(new_camera_id):
+        raise HTTPException(status_code=409, detail="摄像头 ID 已存在")
+    values = payload.model_dump(
+        exclude_none=True,
+        exclude={"id", "rtsp_url", "options", "modes", "geometry", "schedule"},
+    )
+    if "scene_type" in values:
+        values["scene_type"] = effective.scene_type.value
     if payload.rtsp_url:
         values["rtsp_url_encrypted"] = context.cipher.encrypt(payload.rtsp_url)
     if payload.options:
         values["options_json"] = payload.options.model_dump_json()
-    updated = context.repository.update_camera(camera_id, values)
+    if payload.modes is not None:
+        values["modes_json"] = as_json([mode.value for mode in payload.modes])
+    if payload.geometry is not None:
+        values["geometry_json"] = payload.geometry.model_dump_json()
+    if payload.schedule is not None:
+        values["schedule_json"] = payload.schedule.model_dump_json()
+    if new_camera_id != camera_id:
+        runtime = context.require_runtime()
+        await runtime.media.remove(camera_id)
+        runtime.rules.remove(camera_id)
+        runtime.next_run.pop(camera_id, None)
+        runtime.next_fire_run.pop(camera_id, None)
+        runtime.queued.discard(camera_id)
+        runtime.fire_queued.discard(camera_id)
+        updated = context.repository.rename_and_update_camera(camera_id, new_camera_id, values)
+    else:
+        updated = context.repository.update_camera(camera_id, values)
     await context.require_runtime().sync_cameras()
     return _public(updated)
 

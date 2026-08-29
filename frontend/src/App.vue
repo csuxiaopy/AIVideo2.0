@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { api } from './api'
 import EvidencePreview from './components/EvidencePreview.vue'
+import CameraBasicFields from './components/CameraBasicFields.vue'
 import type { Camera, DrawLayer, Mode, Point, SceneType, SceneTemplate } from './types'
 
 const modeInfo:Record<Mode,{name:string;icon:string;note:string}> = {
@@ -22,6 +23,8 @@ const tabs = [
   ['dashboard','监控总览','▦'],['cameras','摄像头配置','◉'],['alerts','告警中心','⚠'],
   ['traffic','人流报表','⇄'],['settings','系统配置','⚙'],
 ]
+const displaySettings=reactive({show_traffic_report:true,show_current_store_count:true})
+const visibleTabs=computed(()=>tabs.filter(tab=>tab[0]!=='traffic'||displaySettings.show_traffic_report))
 const active = ref('dashboard')
 const loading = ref(false)
 const dashboard = ref<any>({runtime:{}})
@@ -44,7 +47,7 @@ let toastTimer:number|undefined
 let refreshTimer:number|undefined
 let socket:WebSocket|undefined
 let previewHeartbeatTimer:number|undefined
-const frameIntervalOptions = [5,10,30,60,120] as const
+const frameIntervalOptions = [5,10,20,30,60,120] as const
 
 const notify = (message:string, kind='ok') => {
   toast.message=message; toast.kind=kind; toast.show=true
@@ -53,11 +56,13 @@ const notify = (message:string, kind='ok') => {
 const loadAll = async (silent=false) => {
   if (!silent) loading.value=true
   try {
-    const [d,c,a,n,t,st,cp] = await Promise.all([
+    const [d,c,a,n,t,st,cp,ds] = await Promise.all([
       api('/api/dashboard'), api('/api/cameras'), api('/api/alerts?limit=100'), api('/api/analyses?limit=100'),
-      api('/api/traffic?limit=200'), api('/api/scene-templates'), api('/api/capabilities'),
+      api('/api/traffic?limit=200'), api('/api/scene-templates'), api('/api/capabilities'), api('/api/settings/display'),
     ])
     dashboard.value=d; cameras.value=c; alerts.value=a; analyses.value=n; traffic.value=t; templates.value=st; capabilities.value=cp
+    Object.assign(displaySettings,ds)
+    if(active.value==='traffic'&&!displaySettings.show_traffic_report) setTab('dashboard')
   } catch (error:any) { if(!silent) notify(error.message,'error') }
   finally { loading.value=false }
 }
@@ -65,7 +70,7 @@ const loadAll = async (silent=false) => {
 const defaultOptions = () => ({health_interval_seconds:5,yolo_fps:.1,behavior_interval_seconds:15,off_duty_seconds:300,shift_grace_seconds:60,alert_cooldown_seconds:300,black_mean_max:18,black_std_max:12,black_ratio_min:.92,fire_smoke_fps:1,fire_confidence:.55,smoke_confidence:.45,intrusion_confidence:.5,intrusion_cooldown_seconds:60})
 const emptySchedule = () => ({timezone:'Asia/Shanghai',weekly:{},holidays:[]})
 const deepCopy = <T,>(value:T):T => JSON.parse(JSON.stringify(value))
-const newCamera = reactive<any>({id:'',name:'',rtsp_url:'',scene_type:'workstation' as SceneType,modes:[] as Mode[],schedule:emptySchedule(),options:defaultOptions(),frame_interval_seconds:60})
+const newCamera = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'workstation' as SceneType,modes:[] as Mode[],schedule:emptySchedule(),options:defaultOptions(),frame_interval_seconds:60})
 const selectTemplate = (scene:SceneType) => {
   newCamera.scene_type=scene
   const item=templates.value.find(t=>t.scene_type===scene)
@@ -90,7 +95,7 @@ const createCamera = async () => {
     if(!newCamera.modes.length) throw new Error('请至少选择一种检测模式')
     const created=await api('/api/cameras',{method:'POST',body:JSON.stringify({...newCamera,geometry:defaultGeometry(newCamera.scene_type)})})
     notify('摄像头已添加，请继续校准检测区域'); await loadAll(true)
-    Object.assign(newCamera,{id:'',name:'',rtsp_url:'',scene_type:'workstation',modes:[],schedule:emptySchedule(),options:defaultOptions(),frame_interval_seconds:60}); selectTemplate('workstation')
+    Object.assign(newCamera,{id:'',name:'',rtsp_url:'',enabled:true,scene_type:'workstation',modes:[],schedule:emptySchedule(),options:defaultOptions(),frame_interval_seconds:60}); selectTemplate('workstation')
     openEditor(created)
   } catch(error:any){notify(error.message,'error')}
 }
@@ -102,10 +107,10 @@ const analyze = async (camera:Camera) => {
   try{notify(`${camera.name} 已提交即时分析`);await api(`/api/cameras/${camera.id}/analyze`,{method:'POST'});await loadAll(true)}catch(error:any){notify(error.message,'error')}
 }
 
-const editForm = reactive<any>({scene_type:'custom',modes:[],geometry:{post_roi:[],flow_line:[],intrusion_zone:null},schedule:emptySchedule(),options:defaultOptions(),zone_name:'禁区',frame_interval_seconds:60})
+const editForm = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'custom',modes:[],geometry:{post_roi:[],flow_line:[],intrusion_zone:null},schedule:emptySchedule(),options:defaultOptions(),zone_name:'禁区',frame_interval_seconds:60})
 const openEditor = (camera:Camera) => {
   editor.value=camera
-  Object.assign(editForm,{scene_type:camera.scene_type,modes:[...camera.modes],geometry:deepCopy(camera.geometry||defaultGeometry('custom')),schedule:deepCopy(camera.schedule||emptySchedule()),options:{...defaultOptions(),...(camera.options||{})},zone_name:camera.geometry?.intrusion_zone?.name||'禁区',frame_interval_seconds:camera.frame_interval_seconds||60})
+  Object.assign(editForm,{id:camera.id,name:camera.name,rtsp_url:'',enabled:camera.enabled,scene_type:camera.scene_type,modes:[...camera.modes],geometry:deepCopy(camera.geometry||defaultGeometry('custom')),schedule:deepCopy(camera.schedule||emptySchedule()),options:{...defaultOptions(),...(camera.options||{})},zone_name:camera.geometry?.intrusion_zone?.name||'禁区',frame_interval_seconds:camera.frame_interval_seconds||60})
   drawLayer.value = camera.scene_type==='customer_area'?'flow_line':camera.scene_type==='security_area'?'intrusion_zone':'post_roi'
 }
 const editorTemplate = (scene:SceneType) => {
@@ -132,16 +137,18 @@ const line = (points:Point[]) => points.length===2?{x1:points[0][0]*100,y1:point
 const saveEditor = async () => {
   if(!editor.value) return
   try {
+    if(!editForm.id||!editForm.name) throw new Error('请填写摄像头 ID 和显示名称')
+    if(!/^[A-Za-z0-9_-]+$/.test(editForm.id)) throw new Error('摄像头 ID 只能使用英文字母、数字、短横线和下划线')
+    if(editForm.rtsp_url&&!/^(rtsp|rtsps|file):\/\//.test(editForm.rtsp_url)) throw new Error('视频源必须以 rtsp://、rtsps:// 或 file:// 开头')
     if(editForm.modes.includes('off_duty')||editForm.modes.includes('phone_use')||editForm.modes.includes('on_duty')) if(pointsFor('post_roi').length<3) throw new Error('岗位区域至少需要 3 个点')
     if(editForm.modes.includes('people_flow')&&pointsFor('flow_line').length!==2) throw new Error('人员计数需要 2 个点的人流线')
     if(editForm.modes.includes('intrusion')&&pointsFor('intrusion_zone').length<3) throw new Error('区域入侵需要至少 3 个点的禁区')
     if(editForm.geometry.intrusion_zone) editForm.geometry.intrusion_zone.name=editForm.zone_name||'禁区'
     const id=editor.value.id
-    await api(`/api/cameras/${id}`,{method:'PATCH',body:JSON.stringify({scene_type:editForm.scene_type,options:editForm.options,frame_interval_seconds:editForm.frame_interval_seconds})})
-    await api(`/api/cameras/${id}/geometry`,{method:'PUT',body:JSON.stringify(editForm.geometry)})
-    await api(`/api/cameras/${id}/schedule`,{method:'PUT',body:JSON.stringify(editForm.schedule)})
-    await api(`/api/cameras/${id}/modes`,{method:'PUT',body:JSON.stringify({modes:editForm.modes})})
-    editor.value=null;notify('检测策略与区域已保存');await loadAll(true)
+    const body=deepCopy(editForm);delete body.zone_name;if(!body.rtsp_url)delete body.rtsp_url
+    const updated=await api<Camera>(`/api/cameras/${encodeURIComponent(id)}`,{method:'PATCH',body:JSON.stringify(body)})
+    const index=cameras.value.findIndex(camera=>camera.id===id);if(index>=0)cameras.value[index]=updated
+    editor.value=null;notify('修改成功');await loadAll(true)
   } catch(error:any){notify(error.message,'error')}
 }
 const weekdays=[['0','一'],['1','二'],['2','三'],['3','四'],['4','五'],['5','六'],['6','日']]
@@ -155,7 +162,8 @@ const modelSettings=reactive<any>({provider:'mock',base_url:'',api_key:'',econom
 const webhookSettings=reactive<any>({enabled:false,url:'',secret:'',secret_configured:false})
 const detectorSettings=reactive<any>({general_model:'yolo26s.pt',general_device:'cpu',fire_smoke_model:'models/fire_smoke_yolov8.pt',fire_smoke_device:'cpu',model_sha256:'',license_name:'AGPL-3.0 (internal pilot only)',runtime:{}})
 const retentionSettings=reactive<any>({alert_retention_days:30,auto_cleanup_enabled:true})
-const loadSettings=async()=>{try{Object.assign(modelSettings,await api('/api/settings/models'));Object.assign(webhookSettings,await api('/api/settings/webhook'));Object.assign(detectorSettings,await api('/api/settings/detectors'));Object.assign(retentionSettings,await api('/api/settings/retention'))}catch(error:any){notify(error.message,'error')}}
+const loadSettings=async()=>{try{const [m,w,d,r,s]=await Promise.all([api('/api/settings/models'),api('/api/settings/webhook'),api('/api/settings/detectors'),api('/api/settings/retention'),api('/api/settings/display')]);Object.assign(modelSettings,m);Object.assign(webhookSettings,w);Object.assign(detectorSettings,d);Object.assign(retentionSettings,r);Object.assign(displaySettings,s)}catch(error:any){notify(`系统配置读取失败：${error.message}`,'error')}}
+const saveDisplaySettings=async()=>{try{Object.assign(displaySettings,await api('/api/settings/display',{method:'PATCH',body:JSON.stringify(displaySettings)}));if(active.value==='traffic'&&!displaySettings.show_traffic_report)setTab('dashboard');notify('人流数据展示设置已保存')}catch(error:any){notify(error.message,'error');await loadSettings()}}
 const saveModels=async()=>{try{
   const baseUrl=String(modelSettings.base_url||'').trim().replace(/\/$/,'')
   if(modelSettings.provider!=='mock'&&baseUrl.startsWith('http://')&&!/^http:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/.test(baseUrl)){
@@ -176,7 +184,7 @@ const cleanupAlerts=async()=>{
   try{const r=await api(`/api/alerts?before_days=${n}`,{method:'DELETE'});notify(`已清理 ${r.deleted} 条告警`);await loadAll(true)}catch(error:any){notify(error.message,'error')}
 }
 const saveDetectors=async()=>{try{const body={...detectorSettings};delete body.runtime;delete body.updated_at;await api('/api/settings/detectors',{method:'PUT',body:JSON.stringify(body)});notify('本地检测器配置已保存并重新加载');await loadSettings()}catch(error:any){notify(error.message,'error')}}
-const setTab=(name:string)=>{active.value=name;if(name==='settings')loadSettings()}
+const setTab=(name:string)=>{if(name==='traffic'&&!displaySettings.show_traffic_report){notify('人流报表已在系统配置中关闭','error');name='dashboard'}active.value=name;location.hash=name;if(name==='settings')loadSettings()}
 const scrollToAdd=()=>document.getElementById('add-camera')?.scrollIntoView({behavior:'smooth'})
 const formatTime=(value?:string)=>value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'尚未抓帧'
 const modeName=(mode:Mode)=>modeInfo[mode]?.name||mode
@@ -231,7 +239,7 @@ const connectWs=()=>{
   socket.onmessage=(event)=>{try{const data=JSON.parse(event.data);if(data.type==='alert'){notify(`${data.severity==='critical'?'紧急：':''}${data.camera_name||data.camera_id} ${modeName(data.mode)}：${data.reason}`,'alert');loadAll(true)}}catch{}}
   socket.onclose=()=>window.setTimeout(connectWs,3000)
 }
-onMounted(async()=>{await loadAll();selectTemplate('workstation');connectWs();refreshTimer=window.setInterval(()=>loadAll(true),15000);window.addEventListener('beforeunload',abandonPreview)})
+onMounted(async()=>{await loadAll();const requested=location.hash.slice(1);if(tabs.some(tab=>tab[0]===requested))setTab(requested);selectTemplate('workstation');connectWs();refreshTimer=window.setInterval(()=>loadAll(true),15000);window.addEventListener('beforeunload',abandonPreview);window.addEventListener('hashchange',()=>setTab(location.hash.slice(1)||'dashboard'))})
 onUnmounted(()=>{window.clearInterval(refreshTimer);socket?.close();window.removeEventListener('beforeunload',abandonPreview);abandonPreview()})
 </script>
 
@@ -239,7 +247,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);socket?.close();window.remov
   <div class="shell">
     <aside class="sidebar">
       <div class="brand"><div class="brand-mark">JS</div><div><strong>江苏有线</strong><small>无锡广电 · AI巡检</small></div></div>
-      <nav><button v-for="tab in tabs" :key="tab[0]" :class="{active:active===tab[0]}" @click="setTab(tab[0])"><span>{{tab[2]}}</span>{{tab[1]}}</button></nav>
+      <nav><button v-for="tab in visibleTabs" :key="tab[0]" :class="{active:active===tab[0]}" @click="setTab(tab[0])"><span>{{tab[2]}}</span>{{tab[1]}}</button></nav>
       <div class="system-pill"><i :class="onlineCount?'good':'warn'"></i><div><b>{{onlineCount}} / {{cameras.length}} 路在线</b><small>安全检测持续运行</small></div></div>
       <div class="side-foot"><span>无锡广电</span><span>智能巡检平台</span></div>
     </aside>
@@ -249,7 +257,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);socket?.close();window.remov
       <section v-if="active==='dashboard'" class="page">
         <div class="metrics">
           <article><span>监控源</span><strong>{{onlineCount}}<small> / {{cameras.length}}</small></strong><em>当前在线</em></article>
-          <article><span>当前在店人数</span><strong>{{dashboard.current_people||0}}</strong><em>各入口实时合计</em></article>
+          <article v-if="displaySettings.show_current_store_count"><span>当前在店人数</span><strong>{{dashboard.current_people||0}}</strong><em>各入口实时统计</em></article>
           <article :class="{'critical-metric':dashboard.critical_alerts_today}"><span>今日烟火紧急告警</span><strong>{{dashboard.critical_alerts_today||0}}</strong><em>本地模型全天检测</em></article>
           <article><span>今日区域入侵</span><strong>{{dashboard.intrusions_today||0}}</strong><em>进入禁区即时触发</em></article>
         </div>
@@ -278,16 +286,13 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);socket?.close();window.remov
           <section id="add-camera" class="panel add-panel">
             <div class="section-head"><div><h2>添加监控源</h2><p>先选择场景，系统自动带出策略</p></div></div>
             <div class="scene-picker"><button v-for="scene in (['workstation','customer_area','security_area','custom'] as SceneType[])" :key="scene" :class="{selected:newCamera.scene_type===scene}" @click="selectTemplate(scene)"><i>{{sceneInfo[scene].icon}}</i><b>{{sceneInfo[scene].name}}</b></button></div>
-            <label>摄像头 ID<input v-model.trim="newCamera.id" placeholder="例如 hall-entrance-01"><small class="field-hint">只能使用英文字母、数字、短横线和下划线。</small></label>
-            <label>显示名称<input v-model.trim="newCamera.name" placeholder="例如 营业厅入口"></label>
-            <label>RTSP / 本地视频源<input v-model.trim="newCamera.rtsp_url" type="password" placeholder="rtsp://user:password@host/... "><small class="field-hint">正式环境需由服务器访问该地址；Windows 本机文件路径不能直接使用。</small></label>
-            <label>抽帧频率<select v-model.number="newCamera.frame_interval_seconds"><option v-for="seconds in frameIntervalOptions" :key="seconds" :value="seconds">每 {{seconds}} 秒抓取一帧</option></select><small class="field-hint">后台巡检频率；实时预览仅在人工查看时启动。</small></label>
+            <CameraBasicFields :model="newCamera" />
             <div class="field-title">启用能力 <small>可多选</small></div><div class="mode-picker"><button v-for="(info,mode) in modeInfo" :key="mode" :class="{selected:newCamera.modes.includes(mode)}" @click="toggleMode(newCamera,mode)"><i>{{info.icon}}</i><span><b>{{info.name}}</b><small>{{info.note}}</small></span></button></div>
             <button class="primary wide" @click="createCamera">添加并配置区域</button>
             <div class="config-note"><b>安全说明</b><p>烟火、入侵、黑屏始终全天运行，不受普通排班影响。视频烟火预警不能替代认证消防设备。</p></div>
           </section>
           <section class="panel source-list"><div class="section-head"><div><h2>已有监控源</h2><p>原有摄像头保持自定义场景与原配置</p></div></div>
-            <article v-for="camera in cameras" :key="camera.id"><i class="source-state" :class="camera.online?'ok':'bad'"></i><div class="source-main"><h3>{{camera.name}}<small>{{sceneInfo[camera.scene_type]?.name}} · 每 {{camera.frame_interval_seconds}} 秒</small></h3><p>{{camera.source}}</p><div class="chips"><span v-for="mode in camera.modes" :key="mode">{{modeName(mode)}}</span></div><small v-if="camera.last_error" class="error-text" :title="camera.last_error">最近抓帧失败：{{camera.last_error}}</small></div><div class="source-actions"><button @click="openPreview(camera)">查看实时视频</button><button @click="analyze(camera)">立即分析</button><button @click="openEditor(camera)">策略/区域</button><button class="danger" @click="removeCamera(camera)">删除</button></div></article>
+            <article v-for="camera in cameras" :key="camera.id"><i class="source-state" :class="camera.online?'ok':'bad'"></i><div class="source-main"><h3>{{camera.name}}<small>{{sceneInfo[camera.scene_type]?.name}} · 每 {{camera.frame_interval_seconds}} 秒</small></h3><p>{{camera.source}}</p><div class="chips"><span v-for="mode in camera.modes" :key="mode">{{modeName(mode)}}</span></div><small v-if="camera.last_error" class="error-text" :title="camera.last_error">最近抓帧失败：{{camera.last_error}}</small></div><div class="source-actions"><button @click="openPreview(camera)">查看实时视频</button><button @click="analyze(camera)">立即分析</button><button @click="openEditor(camera)">编辑</button><button class="danger" @click="removeCamera(camera)">删除</button></div></article>
           </section>
         </div>
       </section>
@@ -297,6 +302,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);socket?.close();window.remov
       <section v-else-if="active==='traffic'" class="page"><div class="metrics"><article><span>当前在店人数</span><strong>{{dashboard.current_people||0}}</strong></article><article><span>今日进入</span><strong>{{latestTraffic.reduce((n,x)=>n+x.entered,0)}}</strong></article><article><span>今日离开</span><strong>{{latestTraffic.reduce((n,x)=>n+x.exited,0)}}</strong></article><article><span>统计摄像头</span><strong>{{cameras.filter(c=>c.modes.includes('people_flow')).length}}</strong></article></div><section class="panel table-panel"><table><thead><tr><th>摄像头</th><th>时间</th><th>当前人数</th><th>进入</th><th>离开</th></tr></thead><tbody><tr v-for="row in traffic" :key="`${row.camera_id}-${row.bucket_start}`"><td>{{row.camera_id}}</td><td>{{formatTime(row.bucket_start)}}</td><td>{{row.current_count}}</td><td class="green">+{{row.entered}}</td><td>-{{row.exited}}</td></tr></tbody></table><div v-if="!traffic.length" class="empty">暂无人流数据</div></section></section>
 
       <section v-else class="page settings-grid">
+        <section class="panel"><div class="section-head"><div><h2>人流数据展示</h2><p>仅控制界面展示，不影响人员检测、统计任务和历史数据。</p></div></div><div class="display-settings"><div class="section-head inline-setting"><div><b>显示人流报表</b><small>控制左侧“人流报表”菜单及页面访问</small></div><label class="switch"><input v-model="displaySettings.show_traffic_report" type="checkbox" @change="saveDisplaySettings"><span></span></label></div><div class="section-head inline-setting"><div><b>显示当前在店人数</b><small>控制监控总览中的当前人数模块</small></div><label class="switch"><input v-model="displaySettings.show_current_store_count" type="checkbox" @change="saveDisplaySettings"><span></span></label></div></div></section>
         <section class="panel"><div class="section-head"><div><h2>外部视觉大模型</h2><p>仅用于玩手机与实验性人员吸烟复核</p></div><span class="status-dot" :class="{ready:modelSettings.api_key_configured||modelSettings.provider==='mock'}">{{modelSettings.api_key_configured?'API Key 已配置':modelSettings.provider==='mock'?'模拟模式':'未配置'}}</span></div><label>提供商<select v-model="modelSettings.provider"><option value="openai_compatible">OpenAI 兼容接口</option><option value="mock">模拟模式</option></select></label><label>Base URL<input v-model.trim="modelSettings.base_url" placeholder="https://.../v1"><small class="field-hint">公网地址必须使用 HTTPS；输入 HTTP 时会自动升级。已确认 modelrouter.js96296.com 支持 HTTPS。</small></label><label>API Key<input v-model="modelSettings.api_key" type="password" placeholder="留空表示保持现有密钥"><small class="field-hint">首次配置必须填写；保存后留空表示继续使用现有密钥。</small></label><div class="form-row"><label>经济模型<input v-model.trim="modelSettings.economy_model"></label><label>增强模型<input v-model.trim="modelSettings.enhanced_model"></label></div><div class="actions"><button class="primary" @click="saveModels">保存</button><button class="ghost" @click="testModels">测试已保存配置</button></div></section>
         <section class="panel"><div class="section-head"><div><h2>本地检测器</h2><p>通用 YOLO 与烟火模型独立加载</p></div></div><div class="detector-status"><article><span>通用 YOLO</span><b>{{detectorSettings.runtime?.general?.status||'unknown'}}</b><small>{{detectorSettings.runtime?.general?.latency_ms||0}} ms</small></article><article :class="{dangerbox:detectorSettings.runtime?.fire_smoke?.status!=='ready'}"><span>烟火模型</span><b>{{detectorSettings.runtime?.fire_smoke?.status||'unknown'}}</b><small>{{detectorSettings.runtime?.fire_smoke?.detail||detectorSettings.runtime?.fire_smoke?.latency_ms+' ms'}}</small></article></div><div class="form-row"><label>通用模型<input v-model="detectorSettings.general_model"></label><label>运行设备<input v-model="detectorSettings.general_device"></label></div><div class="form-row"><label>烟火权重路径<input v-model="detectorSettings.fire_smoke_model"></label><label>运行设备<input v-model="detectorSettings.fire_smoke_device"></label></div><label>烟火权重 SHA256<input v-model="detectorSettings.model_sha256" readonly></label><label>许可证<input v-model="detectorSettings.license_name" readonly></label><button class="primary" @click="saveDetectors">保存并重载</button>
         </section>
@@ -308,7 +314,8 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);socket?.close();window.remov
 
     <div v-if="preview" class="modal" role="dialog" aria-modal="true" @click.self="closePreview"><section class="preview-modal"><header class="modal-head"><div><h2>{{preview.name}}</h2><p>按需低帧率预览 · 关闭后立即释放 FFmpeg</p></div><button type="button" aria-label="关闭实时预览" @click.stop="closePreview">×</button></header><div class="live"><div v-if="previewLoading" class="preview-state"><b>正在连接实时视频</b><p>正在临时启动该路 FFmpeg，请稍候…</p></div><div v-else-if="previewError" class="preview-state error"><b>无法打开实时预览</b><p>{{previewError}}</p><button @click="openPreview(preview)">重新连接</button></div><img v-else-if="previewStreamUrl" :src="previewStreamUrl" :alt="`${preview.name} 实时视频`"><span v-if="previewStreamUrl">LIVE</span><span v-if="previewStreamUrl" class="person-legend">关闭窗口即释放视频资源</span></div></section></div>
 
-    <div v-if="editor" class="modal" @click.self="editor=null"><section class="editor-modal"><header class="modal-head"><div><h2>{{editor.name}} · 策略与区域</h2><p>点击画面添加归一化坐标点；图层相互独立</p></div><button type="button" @click.stop="editor=null">×</button></header><div class="editor-body"><div class="editor-left">
+    <div v-if="editor" class="modal" @click.self="editor=null"><section class="editor-modal"><header class="modal-head"><div><h2>{{editor.name}} · 编辑摄像头</h2><p>基础信息、检测能力、策略与区域可一次保存</p></div><button type="button" @click.stop="editor=null">×</button></header><div class="editor-body"><div class="editor-left">
+      <CameraBasicFields :model="editForm" editing />
       <div class="scene-picker compact-scenes"><button v-for="scene in (['workstation','customer_area','security_area','custom'] as SceneType[])" :key="scene" :class="{selected:editForm.scene_type===scene}" @click="editorTemplate(scene)"><i>{{sceneInfo[scene].icon}}</i><b>{{sceneInfo[scene].name}}</b></button></div>
       <div class="mode-picker compact"><button v-for="(info,mode) in modeInfo" :key="mode" :class="{selected:editForm.modes.includes(mode)}" @click="toggleMode(editForm,mode)"><i>{{info.icon}}</i><span><b>{{info.name}}</b></span></button></div>
       <div class="draw-actions"><button :class="{active:drawLayer==='post_roi'}" class="ghost" @click="drawLayer='post_roi'">岗位区域</button><button :class="{active:drawLayer==='flow_line'}" class="ghost" @click="drawLayer='flow_line'">人流线</button><button :class="{active:drawLayer==='intrusion_zone'}" class="ghost danger-layer" @click="drawLayer='intrusion_zone'">禁区</button><button class="danger" @click="clearLayer">清空当前图层</button></div>

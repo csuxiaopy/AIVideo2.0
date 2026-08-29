@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from backend.schemas import CameraCreate, GeometrySpec, Mode, VLMResult
+from backend.schemas import CameraCreate, CameraPatch, DisplaySettingsUpdate, GeometrySpec, Mode, VLMResult
 from backend.security import SecretCipher, redact_rtsp, sign_webhook
 from backend.vlm import extract_json
 
@@ -50,3 +50,25 @@ def test_intrusion_requires_named_zone():
         },
     )
     assert camera.geometry.intrusion_zone.name == "warehouse"
+
+
+def test_camera_patch_supports_complete_business_edit():
+    patch = CameraPatch(
+        id="hall-renamed",
+        name="新名称",
+        enabled=False,
+        scene_type="security_area",
+        modes=["black_screen", "fire_smoke", "fire_smoke"],
+        geometry={"post_roi": [], "flow_line": [], "intrusion_zone": None},
+        schedule={"timezone": "Asia/Shanghai", "weekly": {}, "holidays": []},
+        frame_interval_seconds=20,
+    )
+    assert patch.id == "hall-renamed"
+    assert [mode.value for mode in patch.modes or []] == ["black_screen", "fire_smoke"]
+    assert patch.frame_interval_seconds == 20
+
+
+def test_display_settings_accept_partial_updates():
+    assert DisplaySettingsUpdate(show_traffic_report=False).model_dump(exclude_none=True) == {
+        "show_traffic_report": False
+    }
