@@ -25,7 +25,7 @@ services:
       npm_config_node_linker: hoisted
       # Vite 代理目标：容器内指向 app 服务
       VITE_API_TARGET: http://app:8100
-    command: sh -c "corepack enable && pnpm install --frozen-lockfile && pnpm dev --host 0.0.0.0 --port 5173"
+    command: sh -c "corepack enable && pnpm config set store-dir /src/node_modules/.pnpm-store && pnpm install --frozen-lockfile && pnpm dev --host 0.0.0.0 --port 5173"
     volumes:
       - ./frontend:/src
       - web_node_modules:/src/node_modules

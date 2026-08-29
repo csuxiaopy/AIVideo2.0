@@ -54,7 +54,7 @@ yolo_vlm_monitor_redis_1
 - 烟火模型状态为 ready，运行设备为 CPU。
 - Redis 普通和安全队列可用。
 - 前端已经包含在 app 镜像中，通过8100端口提供。
-- `yolo26n.pt` 已通过 Compose 只读挂载，重建容器时不再依赖 GitHub 下载。
+- `models/yolo26s.pt` 通过 Compose 的 `models/` 目录只读挂载，重建容器时不再依赖 GitHub 下载。
 
 ## 4. 已完成的部署兼容处理
 
@@ -111,7 +111,7 @@ https://modelrouter.js96296.com/v1
 GET /api/dashboard
 ```
 
-根因是 SQLite 和 PostgreSQL 的日期类型比较规则不同。原代码将 PostgreSQL `date` 与字符串比较，导致：
+根因是 PostgreSQL 的日期列不能与字符串直接比较，导致：
 
 ```text
 operator does not exist: date = character varying
@@ -121,7 +121,7 @@ operator does not exist: date = character varying
 
 ### 5.4 YOLO重建后重新下载
 
-项目已有的 `yolo26n.pt` 现在只读挂载到 `/app/yolo26n.pt`，避免容器重建后访问 GitHub 下载失败并进入 degraded 状态。
+项目要求将 `yolo26s.pt` 放入宿主机 `models/`，并只读挂载到 `/app/models/yolo26s.pt`，避免容器重建后访问 GitHub 下载失败并进入 degraded 状态。
 
 ## 6. 当前视频源情况
 

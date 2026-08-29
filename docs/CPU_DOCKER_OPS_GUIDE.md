@@ -5,7 +5,7 @@
 - 服务器：`172.16.166.229`
 - 系统：CentOS 7
 - Docker：19.03.13（旧环境，见 §8 seccomp 兼容说明）
-- 命令形式：`docker compose`（v2）；若服务器仍装的是 `docker-compose`（v1），命令请对应改为 `docker-compose -f compose.cpu.yml ...`，其余步骤不变
+- 命令形式：`docker compose`（v2）；当前 Compose 文件不承诺兼容旧版 `docker-compose`（v1）
 - 项目目录：`/data/yolo_vlm_monitor`
 - 部署文件：`compose.cpu.yml`
 - Web/API 端口：`8100`
@@ -33,11 +33,11 @@ docker compose -f compose.cpu.yml down -v
 
 默认执行 `docker compose -f compose.cpu.yml up -d` 会运行：
 
-| 服务 | 容器名 | 用途 | 宿主机端口 |
+| 服务 | Compose 服务名 | 用途 | 宿主机端口 |
 | --- | --- | --- | --- |
-| app | `yolo_vlm_monitor_app_1` | 前端、API、YOLO 分析 | `8100` |
-| postgres | `yolo_vlm_monitor_postgres_1` | 数据库（PostgreSQL 17） | 不对外暴露 |
-| redis | `yolo_vlm_monitor_redis_1` | 队列和缓存 | 不对外暴露 |
+| app | `app` | 前端、API、YOLO 分析 | `8100` |
+| postgres | `postgres` | 数据库（PostgreSQL 17） | 不对外暴露 |
+| redis | `redis` | 队列和缓存 | 不对外暴露 |
 
 前端已编译到 app 镜像的 `/app/frontend/dist`，不需要单独启动 Node.js 容器。访问 `/` 是前端页面，访问 `/health` 是健康接口。
 
@@ -52,7 +52,7 @@ evidence_data    app 容器 /app/data/evidence 火烟检测证据
 snapshot_data    app 容器 /app/data/snapshots 场景快照
 ```
 
-> 注：数据库使用 PostgreSQL 容器（而非 SQLite），由 `compose.cpu.yml` 注入 `DATABASE_URL=postgresql+psycopg://monitor:***@postgres:5432/monitor`。后端代码中的 SQLite 分支仅用于本机裸跑开发兜底，生产环境不会命中。
+> 注：开发和生产数据库统一使用 PostgreSQL。生产环境由 `compose.cpu.yml` 注入 `DATABASE_URL=postgresql+psycopg://monitor:***@postgres:5432/monitor`。
 
 ## 3. 登录服务器
 
@@ -75,7 +75,6 @@ pwd
 cd /data/yolo_vlm_monitor
 docker --version
 docker compose version
-docker compose -f compose.cpu.yml config >/dev/null
 docker compose -f compose.cpu.yml ps
 docker ps
 ss -lntp | grep ':8100 ' || true
@@ -99,6 +98,7 @@ cd /data/yolo_vlm_monitor
 umask 077
 cp -n .env.example .env
 vi .env
+docker compose -f compose.cpu.yml config >/dev/null
 ```
 
 必须修改的两项（默认值不能用于生产）：
@@ -111,8 +111,11 @@ APP_ENCRYPTION_KEY=请替换为足够长的随机密钥  # 加密 API Key 与 RT
 其他常用配置：
 
 ```dotenv
-YOLO_MODEL=yolo26n.pt
+YOLO_MODEL_PATH=models/yolo26s.pt
 YOLO_DEVICE=cpu
+YOLO_IMGSZ=640
+YOLO_CONFIDENCE=0.35
+YOLO_IOU=0.5
 FIRE_SMOKE_MODEL=models/fire_smoke_yolov8.pt
 FIRE_SMOKE_DEVICE=cpu
 ANALYSIS_WORKERS=2
@@ -138,19 +141,23 @@ GRAFANA_PASSWORD=    # Grafana 登录密码
 
 ## 6. 检查模型文件
 
+两个模型权重均提交在项目 Git 仓库中，服务器通过 `git clone` 或 `git pull` 与代码一起取得，不需要单独下载。拉取代码后执行：
+
 ```bash
 cd /data/yolo_vlm_monitor
 ls -lh models
+sha256sum models/yolo26s.pt
 sha256sum models/fire_smoke_yolov8.pt
 ```
 
 当前预期 SHA256：
 
 ```text
-ac0a10257b2bc1f20c9d957f8adeeb61dd6140322fc19d0b4a116cb491776d16
+646f8bc3fe0a656803d95c294f7852321748cb29d13466a1af8862e2db384a1b  models/yolo26s.pt
+ac0a10257b2bc1f20c9d957f8adeeb61dd6140322fc19d0b4a116cb491776d16  models/fire_smoke_yolov8.pt
 ```
 
-`models` 目录与 `yolo26n.pt` 以只读方式挂载到 app。不要在容器内修改该目录。
+任一文件缺失或哈希不一致时停止部署。权重虽然纳入 Git，但仍被 `.dockerignore` 排除在镜像构建上下文之外；Compose 将项目 `models` 目录只读挂载到 app，不要在容器内修改该目录。
 
 ## 7. 构建 app 镜像
 
@@ -170,7 +177,7 @@ docker compose -f compose.cpu.yml build app
 成功标志：
 
 ```text
-Successfully tagged yolo_vlm_monitor_app:latest
+Image <项目名>-app Built
 ```
 
 当前 Dockerfile 两阶段构建要点：
@@ -374,7 +381,7 @@ docker compose -f compose.cpu.yml build app 2>&1 | tee build-app.log
 ```bash
 cd /data/yolo_vlm_monitor
 mkdir -p backups
-docker exec yolo_vlm_monitor_postgres_1 \
+docker compose -f compose.cpu.yml exec -T postgres \
   pg_dump -U monitor -d monitor -Fc \
   > "backups/postgres_$(date +%Y%m%d_%H%M%S).dump"
 ls -lh backups
@@ -459,7 +466,8 @@ curl -v --max-time 10 http://127.0.0.1:8100/health
 ### 17.2 app 不断重启
 
 ```bash
-docker inspect yolo_vlm_monitor_app_1 \
+docker compose -f compose.cpu.yml ps app
+docker inspect "$(docker compose -f compose.cpu.yml ps -q app)" \
   --format 'Status={{.State.Status}} ExitCode={{.State.ExitCode}} Error={{.State.Error}}'
 docker compose -f compose.cpu.yml logs --tail=200 app
 ```
@@ -470,7 +478,7 @@ docker compose -f compose.cpu.yml logs --tail=200 app
 
 ```bash
 docker compose -f compose.cpu.yml logs --tail=100 postgres
-docker exec yolo_vlm_monitor_postgres_1 pg_isready -U monitor -d monitor
+docker compose -f compose.cpu.yml exec -T postgres pg_isready -U monitor -d monitor
 ```
 
 常见原因：
@@ -509,7 +517,7 @@ RUN pip install --no-cache-dir --progress-bar off \
 验证运行中的 app：
 
 ```bash
-docker exec yolo_vlm_monitor_app_1 python -c \
+docker compose -f compose.cpu.yml exec -T app python -c \
   'import torch; print(torch.__version__); print(torch.cuda.is_available())'
 ```
 
@@ -561,8 +569,8 @@ docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
 - app、postgres、redis 均为 `Up`，健康检查为 `healthy`。
 - `/health` 返回 HTTP 200 且 `status` 为 `ok`。
 - YOLO 与火烟检测器为 `ready`。
-- `yolo26n.pt` 与 `models/` 通过 Compose 只读挂载到 app，重建容器时不再访问 GitHub 下载。
+- `models/yolo26s.pt` 与烟火权重由 Git 随代码分发，并通过 Compose 的 `models/` 只读挂载到 app；重建容器时不会联网下载模型。
 - 8100 只由本项目 app 占用。
 - 原有老业务容器仍然运行。
 - app 日志没有新的 traceback、连接失败或模型校验错误。
-- 数据库为 PostgreSQL：`docker exec yolo_vlm_monitor_postgres_1 psql -U monitor -d monitor -c '\dt'` 能列出业务表。
+- 数据库为 PostgreSQL：`docker compose -f compose.cpu.yml exec -T postgres psql -U monitor -d monitor -c '\dt'` 能列出业务表。

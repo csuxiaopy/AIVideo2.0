@@ -56,8 +56,10 @@ class MonitoringRuntime:
         self.repository = repository
         self.cipher = cipher
         self.event_bus = EventBus()
-        self.queue = AnalysisQueue(settings.redis_url)
-        self.fire_queue = AnalysisQueue(settings.redis_url, prefix="monitor:fire-tasks")
+        self.queue = AnalysisQueue(settings.redis_url, maxsize=settings.analysis_queue_maxsize)
+        self.fire_queue = AnalysisQueue(
+            settings.redis_url, maxsize=settings.analysis_queue_maxsize, prefix="monitor:fire-tasks"
+        )
         self.rules = RuleStateRegistry()
         self.media = MediaGateway(
             self.repository.set_camera_runtime,
@@ -69,10 +71,11 @@ class MonitoringRuntime:
         )
         detector_settings = self.repository.get_detector_settings()
         self.yolo = YoloDetector(
-            detector_settings.general_model or settings.yolo_model,
+            self._general_model_path(detector_settings.general_model),
             detector_settings.general_device or settings.yolo_device,
             settings.yolo_imgsz,
             settings.yolo_confidence,
+            settings.yolo_iou,
         )
         self.fire_smoke = FireSmokeDetector(
             detector_settings.fire_smoke_model or settings.fire_smoke_model,
@@ -150,10 +153,11 @@ class MonitoringRuntime:
     async def reload_detectors(self) -> None:
         detector_settings = self.repository.get_detector_settings()
         self.yolo = YoloDetector(
-            detector_settings.general_model,
+            self._general_model_path(detector_settings.general_model),
             detector_settings.general_device,
             self.settings.yolo_imgsz,
             self.settings.yolo_confidence,
+            self.settings.yolo_iou,
         )
         self.fire_smoke = FireSmokeDetector(
             detector_settings.fire_smoke_model,
@@ -161,6 +165,15 @@ class MonitoringRuntime:
             self.settings.fire_smoke_imgsz,
             detector_settings.model_sha256 or self.settings.fire_smoke_sha256,
         )
+
+    def _general_model_path(self, stored_model: str) -> str:
+        """Keep custom weights safe; configuration owns known official model choices."""
+        if stored_model and stored_model.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] not in {
+            "yolo26n.pt", "yolo26s.pt", "yolo26m.pt"
+        }:
+            logger.warning("Preserving configured custom YOLO weight: %s", stored_model)
+            return stored_model
+        return self.settings.yolo_model_path
 
     async def sync_cameras(self) -> None:
         cameras = self.repository.list_cameras()
@@ -308,7 +321,10 @@ class MonitoringRuntime:
         detections = []
         if yolo_modes:
             try:
-                detections = await asyncio.to_thread(self.yolo.detect, camera.id, frame.jpeg)
+                detections = await asyncio.wait_for(
+                    asyncio.to_thread(self.yolo.detect, camera.id, frame.jpeg),
+                    timeout=self.settings.yolo_inference_timeout_seconds,
+                )
             except Exception as exc:
                 if force or time.monotonic() - self.last_detector_error[camera.id] > 60:
                     self.last_detector_error[camera.id] = time.monotonic()
@@ -625,7 +641,7 @@ class MonitoringRuntime:
                 "failures": self.failures,
             },
             "detectors": {
-                "general": {"status": "ready" if self.yolo.available else "degraded", "detail": self.yolo.detail},
+                "general": self.yolo.status(),
                 "fire_smoke": self.fire_smoke.status(),
             },
             "shadow_mode": self.settings.shadow_mode,

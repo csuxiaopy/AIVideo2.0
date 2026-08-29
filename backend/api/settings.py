@@ -65,7 +65,7 @@ async def get_detectors() -> dict[str, Any]:
     row = context.repository.get_detector_settings()
     runtime_status = await context.require_runtime().status()
     return {
-        "general_model": row.general_model,
+        "general_model": runtime_status["detectors"]["general"].get("model", row.general_model),
         "general_device": row.general_device,
         "fire_smoke_model": row.fire_smoke_model,
         "fire_smoke_device": row.fire_smoke_device,

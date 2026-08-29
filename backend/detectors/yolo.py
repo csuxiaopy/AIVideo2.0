@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections import defaultdict
+from collections import deque
 from dataclasses import dataclass
 
 import cv2
@@ -47,15 +50,23 @@ class CentroidFallbackTracker:
 
 
 class YoloDetector:
-    def __init__(self, model_name: str, device: str, imgsz: int, confidence: float):
+    def __init__(self, model_name: str, device: str, imgsz: int, confidence: float, iou: float = 0.5):
         self.model_name = model_name
         self.device = device
         self.imgsz = imgsz
         self.confidence = confidence
+        self.iou = iou
         self.model = None
         self.available = False
         self.detail = "YOLO 依赖尚未加载"
         self.trackers: dict[str, object] = {}
+        self.load_latency_ms = 0.0
+        self.last_latency_ms = 0.0
+        self.inference_latencies_ms: deque[float] = deque(maxlen=300)
+        # A single resident Ultralytics model is intentionally shared. Serializing
+        # predict() avoids unsafe concurrent access and caps CPU inference at one.
+        self._predict_lock = threading.Lock()
+        started = time.perf_counter()
         try:
             from ultralytics import YOLO
 
@@ -65,14 +76,26 @@ class YoloDetector:
         except Exception as exc:
             self.detail = f"YOLO 不可用：{type(exc).__name__}: {str(exc)[:300]}"
             logger.warning(self.detail)
+        finally:
+            self.load_latency_ms = (time.perf_counter() - started) * 1000
+            logger.info(
+                "YOLO model=%s device=%s imgsz=%s conf=%.3f iou=%.3f load_ms=%.1f status=%s",
+                model_name, device, imgsz, confidence, iou, self.load_latency_ms,
+                "ready" if self.available else "degraded",
+            )
 
     def detect(self, camera_id: str, jpeg: bytes) -> list[Detection]:
         if not self.available or self.model is None:
             raise RuntimeError(self.detail)
         image = decode_jpeg(jpeg)
-        results = self.model.predict(
-            source=image, imgsz=self.imgsz, conf=self.confidence, device=self.device, verbose=False
-        )
+        started = time.perf_counter()
+        with self._predict_lock:
+            results = self.model.predict(
+                source=image, imgsz=self.imgsz, conf=self.confidence, iou=self.iou,
+                device=self.device, verbose=False
+            )
+        self.last_latency_ms = (time.perf_counter() - started) * 1000
+        self.inference_latencies_ms.append(self.last_latency_ms)
         height, width = image.shape[:2]
         detections: list[Detection] = []
         result = results[0]
@@ -89,6 +112,25 @@ class YoloDetector:
         persons = [item for item in detections if item.class_name == "person"]
         self._track(camera_id, persons, width, height)
         return detections
+
+    def status(self) -> dict[str, object]:
+        samples = sorted(self.inference_latencies_ms)
+        average = sum(samples) / len(samples) if samples else 0.0
+        p95 = samples[max(0, int(len(samples) * 0.95) - 1)] if samples else 0.0
+        return {
+            "status": "ready" if self.available else "degraded",
+            "detail": self.detail,
+            "model": self.model_name,
+            "device": self.device,
+            "imgsz": self.imgsz,
+            "conf": self.confidence,
+            "iou": self.iou,
+            "load_latency_ms": round(self.load_latency_ms, 1),
+            "latency_ms": round(self.last_latency_ms, 1),
+            "average_latency_ms": round(average, 1),
+            "p95_latency_ms": round(p95, 1),
+            "samples": len(samples),
+        }
 
     def _track(self, camera_id: str, persons: list[Detection], width: int, height: int) -> None:
         if not persons:

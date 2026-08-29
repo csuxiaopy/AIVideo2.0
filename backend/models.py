@@ -111,7 +111,7 @@ class DetectorSettings(Base):
     __tablename__ = "detector_settings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
-    general_model: Mapped[str] = mapped_column(String(300), default="yolo26n.pt")
+    general_model: Mapped[str] = mapped_column(String(300), default="yolo26s.pt")
     general_device: Mapped[str] = mapped_column(String(50), default="cpu")
     fire_smoke_model: Mapped[str] = mapped_column(String(500), default="models/fire_smoke_yolov8.pt")
     fire_smoke_device: Mapped[str] = mapped_column(String(50), default="cpu")

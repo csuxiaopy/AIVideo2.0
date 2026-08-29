@@ -33,7 +33,7 @@ def test_first_traffic_bucket_initializes_counters():
             session.delete(camera)
 
 
-def test_camera_delete_cascades_traffic_in_sqlite_dev_database():
+def test_camera_delete_cascades_traffic_in_postgresql_dev_database():
     Base.metadata.create_all(engine)
     camera_id = "test-traffic-cascade"
     with session_scope() as session:

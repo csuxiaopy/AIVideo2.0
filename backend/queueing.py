@@ -23,6 +23,7 @@ class AnalysisQueue:
     def __init__(self, redis_url: str, maxsize: int = 4096, prefix: str = "monitor:tasks"):
         self.redis_url = redis_url
         self.prefix = prefix
+        self.maxsize = maxsize
         self.streams = {
             "critical": f"{prefix}:critical",
             "high": f"{prefix}:high",
@@ -62,12 +63,14 @@ class AnalysisQueue:
         priority = priority if priority in self.streams else "normal"
         task_id = uuid.uuid4().hex
         if self.redis_available and self.redis is not None:
+            if sum((await self.depths()).values()) >= self.maxsize:
+                return None
             stream = self.streams[priority]
             return await self.redis.xadd(
                 stream,
                 {"task_id": task_id, "camera_id": camera_id, "priority": priority, "created_at": datetime.now(timezone.utc).isoformat()},
-                maxlen=10000,
-                approximate=True,
+                maxlen=self.maxsize,
+                approximate=False,
             )
         ranks = {"critical": 0, "high": 1, "normal": 2, "low": 3}
         self.sequence += 1

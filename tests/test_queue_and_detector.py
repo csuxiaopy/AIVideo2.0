@@ -1,6 +1,7 @@
 import pytest
 
 from backend.detectors.fire_smoke import FireSmokeDetector
+from backend.detectors.yolo import YoloDetector
 from backend.queueing import AnalysisQueue
 from backend.schemas import WebhookSettingsUpdate
 
@@ -28,3 +29,12 @@ def test_fire_detector_rejects_hash_mismatch(tmp_path):
 def test_existing_webhook_secret_can_be_kept_blank_on_update():
     payload = WebhookSettingsUpdate(enabled=True, url="https://example.com/events", secret="")
     assert payload.enabled
+
+
+def test_yolo_missing_model_is_degraded_without_crashing(monkeypatch):
+    monkeypatch.setitem(__import__("sys").modules, "ultralytics", None)
+    detector = YoloDetector("models/missing-yolo26s.pt", "cpu", 640, 0.35, 0.5)
+    assert not detector.available
+    assert detector.status()["status"] == "degraded"
+    with pytest.raises(RuntimeError):
+        detector.detect("camera-1", b"not-an-image")

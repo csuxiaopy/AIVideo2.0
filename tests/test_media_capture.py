@@ -79,3 +79,24 @@ def test_preview_session_expires_after_timeout():
     heartbeat_at = stream.sessions[session_id]
     assert stream.expire_sessions(heartbeat_at + 59) == []
     assert stream.expire_sessions(heartbeat_at + 61) == [session_id]
+
+
+def test_periodic_capture_keeps_source_resolution(monkeypatch, tmp_path):
+    captured_command = []
+
+    async def fake_subprocess(*command, **_kwargs):
+        captured_command.extend(command)
+
+        class Process:
+            returncode = 0
+
+            async def communicate(self):
+                return b"\xff\xd8full-resolution\xff\xd9", b""
+
+        return Process()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_subprocess)
+    gateway = MediaGateway(lambda *_: None, tmp_path)
+    jpeg = __import__("asyncio").run(gateway._grab_single_frame("file:///camera.mp4"))
+    assert jpeg.startswith(b"\xff\xd8")
+    assert "-vf" not in captured_command

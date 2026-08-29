@@ -10,7 +10,7 @@
 
 | 模型 | 权重/来源 | 用途 | 关键参数（默认值） |
 | --- | --- | --- | --- |
-| **通用 YOLO** | `yolo26n.pt`，COCO 公开预训练（AGPL-3.0） | person / cell phone 检测，为离岗、在岗、人流、玩手机、抽烟、闯入提供候选与跟踪 | `YOLO_IMGSZ=640`、`YOLO_CONFIDENCE=0.35`、CPU/GPU 由 `YOLO_DEVICE` 决定；人员判断再叠加 `confidence≥0.45`（脚点判定） |
+| **通用 YOLO** | `models/yolo26s.pt`，COCO 公开预训练（AGPL-3.0） | person / cell phone 检测，为离岗、在岗、人流、玩手机、抽烟、闯入提供候选与跟踪 | `YOLO_IMGSZ=640`、`YOLO_CONFIDENCE=0.35`、`YOLO_IOU=0.5`、CPU/GPU 由 `YOLO_DEVICE` 决定；人员判断再叠加 `confidence≥0.45`（脚点判定） |
 | **烟火 YOLO** | `models/fire_smoke_yolov8.pt`（来源 `mfranzon/fire-smoke-yolov8`，试点用途） | fire / smoke 检测，独立于通用模型 | 火焰置信度 `fire_confidence=0.55`、烟雾 `smoke_confidence=0.45`；启动时校验 SHA256（`ac0a1025…76d16`），不匹配拒绝加载，绝不联网下载 |
 | **视觉大模型（VLM）** | 外部 OpenAI 兼容接口（Base URL + API Key 在“系统配置”保存，密文存储） | 玩手机/抽烟的分级复核 | 经济模型（初筛）→ 非结论再交增强模型（确认） |
 | **统计黑屏检测** | 无模型，OpenCV 像素统计 | 黑屏判定 | 见下文告警逻辑 |
@@ -46,59 +46,13 @@
 - 默认 `SHADOW_MODE=true`：页面正常记录和展示告警，但**不发送 Webhook**；改为 `false` 才真正外发。
 - Webhook 请求带 `X-Monitor-Timestamp` 与 `X-Monitor-Signature`（HMAC-SHA256 签名），失败指数退避重试最多 5 次。
 
-## 本地开发
+## 启动项目
 
-需要 Python 3.11+、Node.js 20+ 和 FFmpeg。后端不安装 YOLO 时仍可运行管理页面，但检测器显示“降级”；安装 `requirements-yolo.txt` 后会加载公开预训练权重。
+完整的开发环境和生产环境启动说明见 [docs/STARTUP.md](docs/STARTUP.md)。
 
-```powershell
-cd "D:\project\AI video\yolo_vlm_monitor"
-Copy-Item .env.example .env
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+开发和生产环境均使用 PostgreSQL 且全部通过 Docker 启动。开发环境叠加 `compose.cpu.dev.yml`，一次启动前端、后端、PostgreSQL 和 Redis，并提供源码热更新；生产环境使用 `compose.cpu.yml` 启动完整服务。通用和烟火 `.pt` 权重均纳入 Git、随代码分发，运行时通过 Compose 只读挂载，不打入 Docker 镜像。
 
-cd frontend
-npm install
-npm run build
-cd ..
-
-.\.venv\Scripts\python.exe run.py
-```
-
-打开 <http://127.0.0.1:8100>。
-
-安装 CPU YOLO：
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-yolo.txt
-```
-
-`.env` 开发默认使用 SQLite；生产 Compose 自动切换 PostgreSQL 和 Redis。生产前必须修改 `APP_ENCRYPTION_KEY`，修改后既有 API Key 和 RTSP 密码将无法解密。
-
-## Docker
-
-CPU 开发环境：
-
-```powershell
-$env:APP_ENCRYPTION_KEY = "请替换为至少32位的随机值"
-docker compose -f compose.cpu.yml up --build
-```
-
-GPU 环境需要 NVIDIA 驱动与 Container Toolkit：
-
-```powershell
-$env:APP_ENCRYPTION_KEY = "请替换为至少32位的随机值"
-docker compose -f compose.cpu.yml -f compose.gpu.yml up --build
-```
-
-同时启动 Prometheus 和 Grafana：
-
-```powershell
-docker compose -f compose.cpu.yml --profile monitoring up --build
-```
-
-- 应用：<http://127.0.0.1:8100>
-- Prometheus：<http://127.0.0.1:9090>
-- Grafana：<http://127.0.0.1:3000>
+生产服务器的旧 Docker 兼容、数据备份和详细故障排查见 [docs/CPU_DOCKER_OPS_GUIDE.md](docs/CPU_DOCKER_OPS_GUIDE.md)。
 
 ## 配置流程
 
@@ -129,14 +83,15 @@ FastAPI 自动接口文档位于 <http://127.0.0.1:8100/docs>。
 
 签名原文为 `<timestamp>.<按键排序且无空格的JSON>`，使用配置密钥计算 HMAC-SHA256。失败采用指数退避，最多 5 次。
 
-## 测试与 64 路验证
+## Docker 运行验证
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest
-.\.venv\Scripts\python.exe scripts\load_test.py --video D:\videos\test.mp4 --cameras 64
+docker compose -f compose.cpu.yml -f compose.cpu.dev.yml ps
+docker compose -f compose.cpu.yml -f compose.cpu.dev.yml logs --tail=200 app web
+Invoke-RestMethod http://127.0.0.1:8100/health | ConvertTo-Json -Depth 8
 ```
 
-压测脚本用同一测试视频模拟多路输入，用于验证共享拉流、调度和 API 稳定性，不代表现场识别准确率。正式告警前应依次完成 10 路、32 路、64 路影子运行，并根据现场样本统计召回率、告警准确率和不确定率。
+正式告警前应依次完成 10 路、32 路、64 路及最终 96 路影子运行，并根据现场样本统计召回率、告警准确率、不确定率、平均推理耗时和 P95。
 
 ## 生产注意事项
 

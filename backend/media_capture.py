@@ -250,7 +250,6 @@ class MediaGateway:
         command = ["ffmpeg", "-hide_banner", "-loglevel", "error", *input_args]
         command += [
             "-i", resolved, "-an", "-frames:v", "1",
-            "-vf", "scale=-2:min(960\\,ih)",
             "-c:v", "mjpeg", "-q:v", "4", "-f", "image2pipe", "pipe:1",
         ]
         process = await asyncio.create_subprocess_exec(
