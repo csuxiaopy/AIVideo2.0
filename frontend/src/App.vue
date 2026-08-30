@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { api } from './api'
 import EvidencePreview from './components/EvidencePreview.vue'
 import CameraBasicFields from './components/CameraBasicFields.vue'
+import BatchCameraModal from './components/BatchCameraModal.vue'
 import type { Camera, DrawLayer, Mode, Point, SceneType, SceneTemplate } from './types'
 
 const modeInfo:Record<Mode,{name:string;icon:string;note:string}> = {
@@ -41,6 +42,7 @@ const previewStreamUrl = ref('')
 const previewLoading = ref(false)
 const previewError = ref('')
 const editor = ref<Camera|null>(null)
+const batchModal = ref(false)
 const drawLayer = ref<DrawLayer>('post_roi')
 const canvasRef = ref<HTMLElement|null>(null)
 let toastTimer:number|undefined
@@ -106,6 +108,7 @@ const removeCamera = async (camera:Camera) => {
 const analyze = async (camera:Camera) => {
   try{notify(`${camera.name} 已提交即时分析`);await api(`/api/cameras/${camera.id}/analyze`,{method:'POST'});await loadAll(true)}catch(error:any){notify(error.message,'error')}
 }
+const batchCreated=async(count:number)=>{batchModal.value=false;notify(`成功添加 ${count} 个视频源`);await loadAll(true)}
 
 const editForm = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'custom',modes:[],geometry:{post_roi:[],flow_line:[],intrusion_zone:null},schedule:emptySchedule(),options:defaultOptions(),zone_name:'禁区',frame_interval_seconds:60})
 const openEditor = (camera:Camera) => {
@@ -252,7 +255,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);socket?.close();window.remov
       <div class="side-foot"><span>无锡广电</span><span>智能巡检平台</span></div>
     </aside>
     <main>
-      <header class="topbar"><div class="title-stack"><div class="title-line"><h1>无锡广电AI巡检系统</h1><span>{{tabs.find(t=>t[0]===active)?.[1]}}</span></div><p>本地智能检测 + 视觉大模型复核 · 让营业厅巡检更准确、更及时</p></div><div class="top-actions"><button class="icon-btn refresh" :class="{spin:loading}" @click="loadAll()">↻</button><button v-if="active==='cameras'" class="primary" @click="scrollToAdd">＋ 添加视频源</button></div></header>
+      <header class="topbar"><div class="title-stack"><div class="title-line"><h1>无锡广电AI巡检系统</h1><span>{{tabs.find(t=>t[0]===active)?.[1]}}</span></div><p>本地智能检测 + 视觉大模型复核 · 让营业厅巡检更准确、更及时</p></div><div class="top-actions"><button class="icon-btn refresh" :class="{spin:loading}" @click="loadAll()">↻</button><button v-if="active==='cameras'" class="ghost" @click="batchModal=true">批量添加</button><button v-if="active==='cameras'" class="primary" @click="scrollToAdd">＋ 添加视频源</button></div></header>
 
       <section v-if="active==='dashboard'" class="page">
         <div class="metrics">
@@ -322,6 +325,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);socket?.close();window.remov
       <div ref="canvasRef" class="geometry-stage" @click="canvasClick"><img :src="snapshotUrl(editor)"><svg viewBox="0 0 100 100" preserveAspectRatio="none"><polygon v-if="pointsFor('post_roi').length>=3" :points="polygon(pointsFor('post_roi'))" class="post-zone"/><line v-if="line(pointsFor('flow_line'))" v-bind="line(pointsFor('flow_line'))" class="flow-line"/><polygon v-if="pointsFor('intrusion_zone').length>=3" :points="polygon(pointsFor('intrusion_zone'))" class="intrusion-zone"/><g v-for="(p,index) in pointsFor(drawLayer)" :key="index"><circle :cx="p[0]*100" :cy="p[1]*100" r="1.1"/><text :x="p[0]*100+1.5" :y="p[1]*100-1">{{index+1}}</text></g></svg></div><p class="hint">岗位/禁区至少 3 点；人流线恰好 2 点。当前图层已有 {{pointsFor(drawLayer).length}} 个点。</p>
     </div><aside class="editor-right"><label>抽帧频率<select v-model.number="editForm.frame_interval_seconds"><option v-for="seconds in frameIntervalOptions" :key="seconds" :value="seconds">每 {{seconds}} 秒抓取一帧</option></select></label><label v-if="editForm.modes.includes('intrusion')">禁区名称<input v-model="editForm.zone_name"></label><div class="field-title">普通模式排班</div><div class="weekday"><button v-for="d in weekdays" :key="d[0]" :class="{selected:dayEnabled(d[0])}" @click="toggleDay(d[0])">{{d[1]}}</button></div><div class="form-row"><label>上午开始<input v-model="firstShift.start" type="time" @change="syncShifts"></label><label>上午结束<input v-model="firstShift.end" type="time" @change="syncShifts"></label></div><div class="form-row"><label>下午开始<input v-model="secondShift.start" type="time" @change="syncShifts"></label><label>下午结束<input v-model="secondShift.end" type="time" @change="syncShifts"></label></div><label>离岗时长（秒）<input v-model.number="editForm.options.off_duty_seconds" type="number" min="30"></label><label>玩手机候选间隔（秒）<input v-model.number="editForm.options.behavior_interval_seconds" type="number" min="5"></label><div class="form-row"><label>火焰阈值<input v-model.number="editForm.options.fire_confidence" type="number" min="0" max="1" step=".05"></label><label>烟雾阈值<input v-model.number="editForm.options.smoke_confidence" type="number" min="0" max="1" step=".05"></label></div><label>入侵置信度<input v-model.number="editForm.options.intrusion_confidence" type="number" min="0" max="1" step=".05"></label><div class="config-note"><b>全天安全模式</b><p>烟火、区域入侵、黑屏忽略此处排班，始终运行。</p></div><button class="primary wide" @click="saveEditor">保存策略</button></aside></div></section></div>
 
+    <BatchCameraModal v-if="batchModal" :existing-ids="cameras.map(camera=>camera.id)" @close="batchModal=false" @created="batchCreated" @failed="notify($event,'error')" />
     <Transition name="toast"><div v-if="toast.show" class="toast" :class="toast.kind"><span>{{toast.kind==='ok'?'✓':'!'}}</span>{{toast.message}}</div></Transition>
   </div>
 </template>

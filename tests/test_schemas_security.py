@@ -1,8 +1,14 @@
-import json
-
 import pytest
 
-from backend.schemas import CameraCreate, CameraPatch, DisplaySettingsUpdate, GeometrySpec, Mode, VLMResult
+from backend.schemas import (
+    CameraBatchCreate,
+    CameraCreate,
+    CameraPatch,
+    DisplaySettingsUpdate,
+    GeometrySpec,
+    Mode,
+    VLMResult,
+)
 from backend.security import SecretCipher, redact_rtsp, sign_webhook
 from backend.vlm import extract_json
 
@@ -72,3 +78,18 @@ def test_display_settings_accept_partial_updates():
     assert DisplaySettingsUpdate(show_traffic_report=False).model_dump(exclude_none=True) == {
         "show_traffic_report": False
     }
+
+
+def test_camera_batch_limit_and_source_schemes():
+    item = {"id": "batch-1", "name": "批量摄像头", "rtsp_url": "rtmp://user:p@host/live"}
+    assert len(CameraBatchCreate(items=[item]).items) == 1
+    with pytest.raises(ValueError):
+        CameraBatchCreate(items=[item] * 501)
+
+    camera = CameraCreate(
+        id="http-stream",
+        name="HTTP 视频源",
+        rtsp_url="https://example.invalid/live.m3u8",
+        modes=[Mode.BLACK_SCREEN],
+    )
+    assert camera.rtsp_url.startswith("https://")

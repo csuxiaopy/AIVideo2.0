@@ -5,8 +5,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import case, delete, desc, func, select, update
-from sqlalchemy.orm import Session
-
 from backend import models
 from backend.database import session_scope, utc_now
 
@@ -45,6 +43,19 @@ class Repository:
                 setattr(camera, key, value)
             camera.updated_at = utc_now()
         return camera
+
+    def create_cameras(self, cameras: list[models.Camera]) -> list[models.Camera]:
+        """Insert a validated batch in one transaction."""
+        with session_scope() as session:
+            session.add_all(cameras)
+            session.flush()
+        return cameras
+
+    def existing_camera_ids(self, camera_ids: list[str]) -> set[str]:
+        if not camera_ids:
+            return set()
+        with session_scope() as session:
+            return set(session.scalars(select(models.Camera.id).where(models.Camera.id.in_(camera_ids))))
 
     def rename_and_update_camera(
         self, camera_id: str, new_camera_id: str, values: dict[str, Any]

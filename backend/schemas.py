@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Annotated, Any
+from typing import Annotated
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class Mode(str, Enum):
@@ -113,8 +113,8 @@ class CameraCreate(BaseModel):
     @field_validator("rtsp_url")
     @classmethod
     def valid_source(cls, value: str) -> str:
-        if not value.startswith(("rtsp://", "rtsps://", "file://")):
-            raise ValueError("视频源必须是 rtsp://、rtsps:// 或 file://")
+        if not value.startswith(("rtsp://", "rtsps://", "rtmp://", "http://", "https://", "file://")):
+            raise ValueError("视频源必须是 rtsp://、rtsps://、rtmp://、http://、https:// 或 file://")
         return value
 
     @field_validator("modes")
@@ -156,8 +156,8 @@ class CameraPatch(BaseModel):
     @field_validator("rtsp_url")
     @classmethod
     def valid_source(cls, value: str | None) -> str | None:
-        if value and not value.startswith(("rtsp://", "rtsps://", "file://")):
-            raise ValueError("视频源必须是 rtsp://、rtsps:// 或 file://")
+        if value and not value.startswith(("rtsp://", "rtsps://", "rtmp://", "http://", "https://", "file://")):
+            raise ValueError("视频源必须是 rtsp://、rtsps://、rtmp://、http://、https:// 或 file://")
         return value
 
     @field_validator("modes")
@@ -173,6 +173,16 @@ class ModesUpdate(BaseModel):
     @classmethod
     def unique_modes(cls, value: list[Mode]) -> list[Mode]:
         return list(dict.fromkeys(value))
+
+
+class CameraBatchItem(BaseModel):
+    id: str
+    name: str
+    rtsp_url: str
+
+
+class CameraBatchCreate(BaseModel):
+    items: list[CameraBatchItem] = Field(min_length=1, max_length=500)
 
 
 class PreviewSessionRequest(BaseModel):

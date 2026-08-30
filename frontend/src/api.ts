@@ -24,10 +24,21 @@ function errorMessage(detail: unknown, fallback: string): string {
     return messages.join('；') || fallback
   }
   if (detail && typeof detail === 'object') {
+    const errors = (detail as { errors?: unknown }).errors
+    if (Array.isArray(errors)) {
+      const messages = errors.map((item: any) => `第 ${item.row || '?'} 行：${item.message || '数据错误'}`)
+      return messages.join('；') || fallback
+    }
     const message = (detail as { message?: unknown }).message
     if (typeof message === 'string') return message
   }
   return fallback
+}
+
+export class ApiError extends Error {
+  constructor(message: string, public detail: unknown, public status: number) {
+    super(message)
+  }
 }
 
 export async function api<T = any>(path: string, options: RequestInit = {}): Promise<T> {
@@ -37,8 +48,9 @@ export async function api<T = any>(path: string, options: RequestInit = {}): Pro
   })
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`
-    try { message = errorMessage((await response.json()).detail, message) } catch {}
-    throw new Error(message)
+    let detail: unknown
+    try { detail = (await response.json()).detail; message = errorMessage(detail, message) } catch {}
+    throw new ApiError(message, detail, response.status)
   }
   if (response.status === 204) return undefined as T
   return response.json()
