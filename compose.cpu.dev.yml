@@ -20,6 +20,8 @@ services:
     image: ${NODE_IMAGE:-docker.m.daocloud.io/library/node:22-bookworm-slim}
     working_dir: /src
     environment:
+      # 禁止 pnpm 在旧 node_modules 卷存在时等待交互确认，确保 Vite 一定能启动。
+      CI: "true"
       COREPACK_NPM_REGISTRY: https://registry.npmmirror.com
       # 与镜像构建一致：overlayfs 上用 hoisted 平铺安装，避免 EPERM
       npm_config_node_linker: hoisted
