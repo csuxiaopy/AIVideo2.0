@@ -90,6 +90,27 @@ const notify = (message:string, kind='ok') => {
   toast.message=message; toast.kind=kind; toast.show=true
   window.clearTimeout(toastTimer); toastTimer=window.setTimeout(()=>toast.show=false,4200)
 }
+/* ---------- 告警筛选（服务端 mode/severity 参数，AND 组合） ---------- */
+const severityLevels = [
+  {value:'normal',label:'NORMAL'},{value:'high',label:'HIGH'},{value:'critical',label:'CRITICAL'},
+] as const
+const alertFilter = reactive({mode:'',severity:''})
+const filteredAlerts = ref<any[]|null>(null)
+let alertFilterSeq = 0
+const hasAlertFilter = computed(()=>!!alertFilter.mode||!!alertFilter.severity)
+const alertRows = computed(()=>filteredAlerts.value??alerts.value)
+const applyAlertFilter = async () => {
+  if(!hasAlertFilter.value){filteredAlerts.value=null;return}
+  const seq=++alertFilterSeq
+  try{
+    const params=new URLSearchParams({limit:'100'})
+    if(alertFilter.mode)params.set('mode',alertFilter.mode)
+    if(alertFilter.severity)params.set('severity',alertFilter.severity)
+    const rows=await api(`/api/alerts?${params.toString()}`)
+    if(seq===alertFilterSeq)filteredAlerts.value=rows
+  }catch(error:any){notify(`告警筛选加载失败：${error.message}`,'error')}
+}
+const resetAlertFilter = () => {alertFilter.mode='';alertFilter.severity='';filteredAlerts.value=null}
 const loadAll = async (silent=false) => {
   if (!silent) loading.value=true
   try {
@@ -100,6 +121,7 @@ const loadAll = async (silent=false) => {
     dashboard.value=d; cameras.value=c; alerts.value=a; analyses.value=n; traffic.value=t; templates.value=st; capabilities.value=cp
     Object.assign(displaySettings,ds)
     if(active.value==='traffic'&&!displaySettings.show_traffic_report) setTab('dashboard')
+    if(hasAlertFilter.value) void applyAlertFilter()
   } catch (error:any) { if(!silent) notify(error.message,'error') }
   finally { loading.value=false }
 }
@@ -206,11 +228,10 @@ const visibleTabs=computed(()=>tabs.filter(tab=>tab.key!=='traffic'||displaySett
 const loadSettings=async()=>{try{const [m,w,d,r,s]=await Promise.all([api('/api/settings/models'),api('/api/settings/webhook'),api('/api/settings/detectors'),api('/api/settings/retention'),api('/api/settings/display')]);Object.assign(modelSettings,m);Object.assign(webhookSettings,w);Object.assign(detectorSettings,d);Object.assign(retentionSettings,r);Object.assign(displaySettings,s)}catch(error:any){notify(`系统配置读取失败：${error.message}`,'error')}}
 const saveDisplaySettings=async()=>{try{Object.assign(displaySettings,await api('/api/settings/display',{method:'PATCH',body:JSON.stringify(displaySettings)}));if(active.value==='traffic'&&!displaySettings.show_traffic_report)setTab('dashboard');notify('人流数据展示设置已保存')}catch(error:any){notify(error.message,'error');await loadSettings()}}
 const saveModels=async()=>{try{
-  const baseUrl=String(modelSettings.base_url||'').trim().replace(/\/$/,'')
-  if(modelSettings.provider!=='mock'&&baseUrl.startsWith('http://')&&!/^http:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/.test(baseUrl)){
-    modelSettings.base_url=`https://${baseUrl.slice('http://'.length)}`
-    notify('公网模型地址已自动切换为 HTTPS，正在保存')
-  }
+  const baseUrl=String(modelSettings.base_url||'').trim().replace(/\/+$/,'')
+  if(modelSettings.provider!=='mock'&&!baseUrl){notify('外部模型必须填写 Base URL 和 API Key','error');return}
+  if(baseUrl&&!/^https?:\/\//i.test(baseUrl)){notify('Base URL 必须以 http:// 或 https:// 开头','error');return}
+  if(baseUrl){try{new URL(baseUrl)}catch{notify('Base URL 不是合法的 URL','error');return}}
   await api('/api/settings/models',{method:'PUT',body:JSON.stringify(modelSettings)});notify('视觉大模型配置已保存');await loadSettings()
 }catch(error:any){notify(error.message,'error')}}
 const testModels=async()=>{testing.value=true;try{const r=await api('/api/settings/models/test',{method:'POST'});notify(`模型连接成功，延迟 ${r.latency_ms||0}ms`)}catch(error:any){notify(error.message,'error')}finally{testing.value=false}}
@@ -456,13 +477,29 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
       <section v-else-if="active==='alerts'" class="page">
         <section class="panel table-panel">
           <div class="section-head">
-            <div><h2>告警中心</h2><span class="head-en">AI ALERT CENTER</span><p>烟火紧急告警置顶；仅确认违规才告警 · 共 {{alerts.length}} 条</p></div>
+            <div><h2>告警中心</h2><span class="head-en">AI ALERT CENTER</span><p>烟火紧急告警置顶；仅确认违规才告警</p></div>
             <button class="link" @click="cleanupAlerts"><TechIcon name="trash" :size="13"/>清理历史</button>
           </div>
-          <table v-if="alerts.length">
+          <div class="filter-bar">
+            <label class="filter-item"><span class="filter-label">事件类型 / EVENT</span>
+              <select v-model="alertFilter.mode" @change="applyAlertFilter">
+                <option value="">全部事件</option>
+                <option v-for="(info,mode) in modeInfo" :key="mode" :value="mode">{{info.name}}</option>
+              </select>
+            </label>
+            <label class="filter-item"><span class="filter-label">告警级别 / LEVEL</span>
+              <select v-model="alertFilter.severity" @change="applyAlertFilter">
+                <option value="">全部级别</option>
+                <option v-for="lv in severityLevels" :key="lv.value" :value="lv.value">{{lv.label}}</option>
+              </select>
+            </label>
+            <button class="ghost filter-reset" :disabled="!hasAlertFilter" @click="resetAlertFilter"><TechIcon name="refresh" :size="13"/>清除筛选</button>
+            <span class="filter-count"><b>{{alertRows.length}}</b> / {{alerts.length}} <small>MATCHED / TOTAL</small></span>
+          </div>
+          <table v-if="alertRows.length">
             <thead><tr><th>级别</th><th>证据</th><th>摄像头 / 场景</th><th>事件</th><th>区域</th><th>原因</th><th>时间</th></tr></thead>
             <tbody>
-              <tr v-for="item in alerts" :key="item.id" :class="`severity-${item.severity}`">
+              <tr v-for="item in alertRows" :key="item.id" :class="`severity-${item.severity}`">
                 <td><span class="severity-badge" :class="item.severity">{{item.severity||'normal'}}</span></td>
                 <td><EvidencePreview :src="item.evidence_url" alt="告警证据" /></td>
                 <td>{{item.camera_id}}<br><small>{{sceneInfo[cameras.find(c=>c.id===item.camera_id)?.scene_type||'custom'].name}}</small></td>
@@ -473,6 +510,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
               </tr>
             </tbody>
           </table>
+          <div v-else-if="alerts.length" class="empty"><b>NO MATCHED ALERTS</b><p>当前筛选条件下没有匹配的告警</p><button class="link" @click="resetAlertFilter">清除筛选</button></div>
           <div v-else class="empty"><b>NO ALERTS</b><p>暂无告警记录</p></div>
         </section>
       </section>
@@ -508,7 +546,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         <section class="panel">
           <div class="section-head"><div><h2>外部视觉大模型</h2><span class="head-en">VISION LANGUAGE MODEL</span><p>仅用于玩手机与实验性人员吸烟复核</p></div><span class="status-dot" :class="{ready:modelSettings.api_key_configured||modelSettings.provider==='mock',warn:!modelSettings.api_key_configured&&modelSettings.provider!=='mock'}">{{modelSettings.api_key_configured?'● CONFIGURED':modelSettings.provider==='mock'?'● MOCK 模式':'● 未配置'}}</span></div>
           <label>提供商<select v-model="modelSettings.provider"><option value="openai_compatible">OpenAI 兼容接口</option><option value="mock">模拟模式</option></select></label>
-          <label>Base URL<input v-model.trim="modelSettings.base_url" placeholder="https://.../v1"><small class="field-hint">公网地址必须使用 HTTPS；输入 HTTP 时会自动升级。已确认 modelrouter.js96296.com 支持 HTTPS。</small></label>
+          <label>Base URL<input v-model.trim="modelSettings.base_url" placeholder="http://192.168.1.100:8000/v1"><small class="field-hint">支持 HTTP / HTTPS：内网模型服务可使用 HTTP，公网服务建议 HTTPS。地址需包含 /v1，末尾斜杠可省略。HTTP 明文传输存在 API Key 泄露风险，建议仅用于受信内网。</small></label>
           <label>API Key<input v-model="modelSettings.api_key" type="password" placeholder="留空表示保持现有密钥"><small class="field-hint">首次配置必须填写；保存后留空表示继续使用现有密钥。密钥不会回显。</small></label>
           <div class="form-row"><label>经济模型<input v-model.trim="modelSettings.economy_model"></label><label>增强模型<input v-model.trim="modelSettings.enhanced_model"></label></div>
           <div class="actions"><button class="primary" @click="saveModels">保存</button><button class="ghost" :disabled="testing" @click="testModels"><TechIcon name="zap" :size="13"/>{{testing?'TESTING…':'测试已保存配置'}}</button></div>
