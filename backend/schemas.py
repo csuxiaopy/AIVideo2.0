@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 from typing import Annotated
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -200,8 +201,10 @@ class ModelSettingsUpdate(BaseModel):
     @classmethod
     def secure_url(cls, value: str) -> str:
         value = value.strip().rstrip("/")
-        if value and not value.startswith(("https://", "http://127.0.0.1", "http://localhost")):
-            raise ValueError("模型 Base URL 必须使用 HTTPS，本机地址除外")
+        if value:
+            parsed = urlparse(value)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                raise ValueError("模型 Base URL 必须是合法的 http:// 或 https:// 地址")
         return value
 
 

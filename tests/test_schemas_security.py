@@ -7,6 +7,7 @@ from backend.schemas import (
     DisplaySettingsUpdate,
     GeometrySpec,
     Mode,
+    ModelSettingsUpdate,
     VLMResult,
 )
 from backend.security import SecretCipher, redact_rtsp, sign_webhook
@@ -93,3 +94,33 @@ def test_camera_batch_limit_and_source_schemes():
         modes=[Mode.BLACK_SCREEN],
     )
     assert camera.rtsp_url.startswith("https://")
+
+
+def test_model_base_url_allows_http_and_https():
+    for url in [
+        "http://192.168.1.100:8000/v1",
+        "http://172.16.1.20:8080/v1",
+        "https://modelrouter.example.com/v1",
+        "http://127.0.0.1:11434/v1/",
+    ]:
+        model = ModelSettingsUpdate(
+            provider="openai_compatible", base_url=url, api_key="k",
+            economy_model="qwen-vl", enhanced_model="qwen-vl-max",
+        )
+        assert model.base_url == url.rstrip("/")
+
+
+@pytest.mark.parametrize("bad_url", [
+    "ftp://host/v1",
+    "file:///etc/x",
+    "ws://host/v1",
+    "modelrouter.example.com/v1",
+    "abc",
+    "http://",
+])
+def test_model_base_url_rejects_non_http(bad_url):
+    with pytest.raises(ValueError):
+        ModelSettingsUpdate(
+            provider="openai_compatible", base_url=bad_url, api_key="k",
+            economy_model="qwen-vl", enhanced_model="qwen-vl-max",
+        )
