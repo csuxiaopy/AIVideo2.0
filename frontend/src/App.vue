@@ -410,16 +410,18 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         <div class="split-layout">
           <section id="add-camera" class="panel add-panel">
             <div class="section-head"><div><h2>添加监控源</h2><span class="head-en">ADD CAMERA SOURCE</span><p>先选择场景，系统自动带出策略</p></div></div>
-            <div class="scene-picker">
-              <button v-for="scene in (['workstation','customer_area','security_area','custom'] as SceneType[])" :key="scene" :class="{selected:newCamera.scene_type===scene}" @click="selectTemplate(scene)"><TechIcon :name="sceneInfo[scene].icon" :size="20"/><b>{{sceneInfo[scene].name}}</b></button>
+            <div class="camera-config-scroll">
+              <div class="scene-picker">
+                <button v-for="scene in (['workstation','customer_area','security_area','custom'] as SceneType[])" :key="scene" :class="{selected:newCamera.scene_type===scene}" @click="selectTemplate(scene)"><TechIcon :name="sceneInfo[scene].icon" :size="20"/><b>{{sceneInfo[scene].name}}</b></button>
+              </div>
+              <CameraBasicFields :model="newCamera" />
+              <div class="field-title">启用能力 <small>可多选</small></div>
+              <div class="mode-picker">
+                <button v-for="(info,mode) in modeInfo" :key="mode" :class="{selected:newCamera.modes.includes(mode)}" @click="toggleMode(newCamera,mode)"><TechIcon :name="info.icon" :size="17"/><span><b>{{info.name}}</b><small>{{info.note}}</small></span></button>
+              </div>
+              <button class="primary wide" @click="createCamera"><TechIcon name="plus" :size="14"/>添加并配置区域</button>
+              <div class="config-note"><b>安全说明</b><p>烟火、入侵、黑屏始终全天运行，不受普通排班影响。视频烟火预警不能替代认证消防设备。</p></div>
             </div>
-            <CameraBasicFields :model="newCamera" />
-            <div class="field-title">启用能力 <small>可多选</small></div>
-            <div class="mode-picker">
-              <button v-for="(info,mode) in modeInfo" :key="mode" :class="{selected:newCamera.modes.includes(mode)}" @click="toggleMode(newCamera,mode)"><TechIcon :name="info.icon" :size="17"/><span><b>{{info.name}}</b><small>{{info.note}}</small></span></button>
-            </div>
-            <button class="primary wide" @click="createCamera"><TechIcon name="plus" :size="14"/>添加并配置区域</button>
-            <div class="config-note"><b>安全说明</b><p>烟火、入侵、黑屏始终全天运行，不受普通排班影响。视频烟火预警不能替代认证消防设备。</p></div>
           </section>
 
           <section class="panel source-list">
