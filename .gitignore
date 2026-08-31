@@ -14,3 +14,4 @@ data/*
 *.db
 *.engine
 *.onnx
+/yolo26n.pt

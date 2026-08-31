@@ -79,9 +79,9 @@ async function submit() {
 <template>
   <div class="modal batch-modal-wrap" role="dialog" aria-modal="true" @click.self="emit('close')">
     <section class="batch-modal">
-      <header class="modal-head"><div><h2>批量添加视频源</h2><p>可直接从 Excel 复制“名称、ID、视频流地址”三列数据粘贴到下方。</p></div><button type="button" aria-label="关闭" @click="emit('close')">×</button></header>
+      <header class="modal-head"><div><h2>批量添加视频源</h2><span class="head-en">BATCH IMPORT</span><p>可直接从 Excel 复制“名称、ID、视频流地址”三列数据粘贴到下方。</p></div><button type="button" aria-label="关闭" @click="emit('close')">×</button></header>
       <textarea v-model="text" class="batch-input" spellcheck="false" placeholder="摄像头名称&#9;摄像头ID&#9;视频流地址&#10;员工工位01&#9;camera001&#9;rtsp://admin:password@192.168.1.101:554/xxx&#10;员工工位02&#9;camera002&#9;rtsp://admin:password@192.168.1.102:554/xxx"></textarea>
-      <div class="batch-summary"><span>共解析 <b>{{ rows.length }}</b> 条</span><span class="green">可创建 <b>{{ validCount }}</b> 条</span><span :class="{ 'error-text': invalidCount }">异常 <b>{{ invalidCount }}</b> 条</span><span v-if="rows.length > 500" class="error-text">单次最多 500 条</span></div>
+      <div class="batch-summary"><span>TOTAL 共解析 <b>{{ rows.length }}</b></span><span class="green">VALID 可创建 <b>{{ validCount }}</b></span><span :class="{ 'error-text': invalidCount }">INVALID 异常 <b>{{ invalidCount }}</b></span><span v-if="rows.length > 500" class="error-text">单次最多 500 条</span></div>
       <div class="batch-table-wrap">
         <table><thead><tr><th>序号</th><th>名称</th><th>摄像头 ID</th><th>视频流地址</th><th>状态</th></tr></thead><tbody><tr v-for="row in rows" :key="row.row" :class="{ 'batch-invalid': !row.valid }"><td>{{ row.row }}</td><td>{{ row.name || '—' }}</td><td>{{ row.id || '—' }}</td><td class="batch-source" :title="row.rtsp_url">{{ maskedSource(row.rtsp_url) || '—' }}</td><td><span :class="row.valid ? 'batch-ok' : 'error-text'">{{ row.status }}</span></td></tr></tbody></table>
         <div v-if="!rows.length" class="empty">粘贴 Excel 数据后将在这里预览</div>

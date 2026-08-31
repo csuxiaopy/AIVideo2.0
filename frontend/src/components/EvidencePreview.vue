@@ -141,22 +141,36 @@ const onPointerUp = () => {
 
 <style scoped>
 .evidence-cell{display:inline-flex;align-items:center}
-.evidence-thumb{display:block;width:80px;height:50px;padding:0;overflow:hidden;cursor:pointer;background:#f6f9fc;border:1px solid var(--line);border-radius:6px;transition:transform .15s,box-shadow .15s,border-color .15s}
-.evidence-thumb:hover{transform:translateY(-1px);border-color:#9bc9ed;box-shadow:0 5px 14px #24587833}
+.evidence-thumb{
+  position:relative;display:block;width:80px;height:50px;padding:0;overflow:hidden;cursor:pointer;
+  background:rgba(4,18,32,.7);border:1px solid var(--border-dim);border-radius:5px;
+  transition:transform .15s,box-shadow .15s,border-color .15s;
+}
+.evidence-thumb:hover{transform:translateY(-1px);border-color:var(--border-highlight);box-shadow:0 0 14px rgba(0,229,255,.2)}
+/* HUD 角标 */
+.evidence-thumb::after{
+  content:'';position:absolute;inset:3px;pointer-events:none;opacity:.6;
+  background:
+    linear-gradient(var(--cyan),var(--cyan)) left 0 top 0/8px 1px,
+    linear-gradient(var(--cyan),var(--cyan)) left 0 top 0/1px 8px,
+    linear-gradient(var(--cyan),var(--cyan)) right 0 bottom 0/8px 1px,
+    linear-gradient(var(--cyan),var(--cyan)) right 0 bottom 0/1px 8px;
+  background-repeat:no-repeat;
+}
 .evidence-thumb-img{width:100%;height:100%;object-fit:cover;display:block;pointer-events:none}
-.evidence-none{color:var(--muted);font-size:10px}
+.evidence-none{color:var(--text-muted);font-size:10px}
 
-.lightbox{position:fixed;inset:0;z-index:60;background:#0b2f50b3;backdrop-filter:blur(6px);display:grid;place-items:center;padding:24px}
-.lightbox-img{max-width:90vw;max-height:90vh;object-fit:contain;border-radius:6px;box-shadow:0 25px 75px #0007;user-select:none;-webkit-user-drag:none;touch-action:none;cursor:grab}
+.lightbox{position:fixed;inset:0;z-index:60;background:rgba(1,6,14,.85);backdrop-filter:blur(8px);display:grid;place-items:center;padding:24px}
+.lightbox-img{max-width:90vw;max-height:90vh;object-fit:contain;border-radius:5px;box-shadow:0 0 50px rgba(0,140,255,.15),0 25px 75px #000a;user-select:none;-webkit-user-drag:none;touch-action:none;cursor:grab}
 .lightbox-img.dragging{cursor:grabbing;transition:none}
 .lightbox-toolbar{position:fixed;top:18px;right:20px;z-index:3;display:flex;gap:6px;align-items:center}
-.lightbox-toolbar button{background:#ffffffe6;color:#17324d;border:1px solid #cbdcea;padding:6px 10px;font-size:13px;border-radius:7px;line-height:1}
-.lightbox-toolbar button:hover{filter:brightness(.96);border-color:#9bc9ed}
+.lightbox-toolbar button{background:rgba(3,19,38,.92);color:var(--text-primary);border:1px solid var(--border-primary);padding:6px 10px;font-size:13px;border-radius:6px;line-height:1}
+.lightbox-toolbar button:hover{border-color:var(--border-highlight);color:var(--cyan);filter:none}
 .lightbox-toolbar .reset{font-size:11px;font-variant-numeric:tabular-nums}
-.lightbox-toolbar .close{font-size:17px;padding:6px 12px;color:#fff;background:#e34d59;border-color:#e34d59}
-.lightbox-scale{background:#ffffffe6;color:#17324d;border:1px solid #cbdcea;padding:6px 10px;border-radius:7px;font-size:11px;font-variant-numeric:tabular-nums;min-width:46px;text-align:center}
-.lightbox-error{background:#fff;border:1px solid #edb8bd;color:#98343c;border-radius:9px;padding:22px 30px;text-align:center}
+.lightbox-toolbar .close{font-size:17px;padding:6px 12px;color:#fff;background:rgba(200,30,48,.85);border-color:rgba(255,77,90,.7)}
+.lightbox-scale{background:rgba(3,19,38,.92);color:var(--text-secondary);border:1px solid var(--border-dim);padding:6px 10px;border-radius:6px;font-size:11px;font-variant-numeric:tabular-nums;min-width:46px;text-align:center}
+.lightbox-error{background:rgba(38,10,18,.7);border:1px solid rgba(255,77,90,.5);color:#FF8B95;border-radius:9px;padding:22px 30px;text-align:center}
 .lightbox-error b{font-size:14px}
-.lightbox-error p{margin:8px 0 0;font-size:12px;color:#7d91a4}
-.lightbox-tip{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);margin:0;color:#eaf3fc;background:#062c4dcc;border:1px solid #1786d7;padding:6px 13px;border-radius:20px;font-size:11px;pointer-events:none}
+.lightbox-error p{margin:8px 0 0;font-size:12px;color:var(--text-secondary)}
+.lightbox-tip{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);margin:0;color:var(--text-secondary);background:rgba(2,12,24,.85);border:1px solid var(--border-primary);padding:6px 13px;border-radius:20px;font-size:11px;pointer-events:none}
 </style>
