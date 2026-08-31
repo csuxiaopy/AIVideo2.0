@@ -36,6 +36,68 @@ class SafetyOverlay:
     confidence: float
 
 
+@dataclass(frozen=True)
+class ObjectOverlay:
+    kind: str
+    box: tuple[float, float, float, float]
+    confidence: float
+
+
+PHONE_CLASSES = {"cell phone", "mobile phone"}
+
+
+def phone_overlays(detections: list[Detection]) -> list[ObjectOverlay]:
+    return [
+        ObjectOverlay("phone", item.box, item.confidence)
+        for item in detections
+        if item.class_name.lower() in PHONE_CLASSES
+    ]
+
+
+def draw_object_overlays(jpeg: bytes, overlays: list[ObjectOverlay]) -> bytes:
+    """Draw preview-only generic object boxes without changing analysis frames."""
+    if not overlays:
+        return jpeg
+    try:
+        import cv2
+        import numpy as np
+
+        image = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            return jpeg
+        height, width = image.shape[:2]
+        thickness = max(2, round(min(width, height) / 260))
+        font_scale = max(0.45, min(width, height) / 900)
+        color = (0, 205, 255)  # BGR amber/cyan, distinct from person green.
+        text_color = (8, 23, 16)
+
+        for overlay in overlays:
+            x1, y1, x2, y2 = overlay.box
+            left = max(0, min(width - 1, round(x1 * width)))
+            top = max(0, min(height - 1, round(y1 * height)))
+            right = max(left + 1, min(width - 1, round(x2 * width)))
+            bottom = max(top + 1, min(height - 1, round(y2 * height)))
+            cv2.rectangle(image, (left, top), (right, bottom), color, thickness, cv2.LINE_AA)
+            label = f"PHONE {overlay.confidence:.0%}"
+            (text_width, text_height), baseline = cv2.getTextSize(
+                label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
+            )
+            label_left = min(left, max(0, width - text_width - 12))
+            label_top = max(0, top - text_height - baseline - 8)
+            label_right = min(width - 1, label_left + text_width + 12)
+            cv2.rectangle(image, (label_left, label_top), (label_right, top), color, -1)
+            cv2.putText(
+                image, label, (label_left + 6, max(text_height + 1, top - baseline - 4)),
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness, cv2.LINE_AA,
+            )
+
+        ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 88])
+        return encoded.tobytes() if ok else jpeg
+    except Exception:
+        logger.exception("Failed to draw object overlays")
+        return jpeg
+
+
 def draw_person_overlays(jpeg: bytes, overlays: list[PersonOverlay]) -> bytes:
     """Draw preview-only person boxes while leaving the analysis frame untouched."""
     if not overlays:
@@ -178,6 +240,8 @@ class CameraStream:
         self.overlay_updated_at = 0.0
         self.safety_overlays: list[SafetyOverlay] = []
         self.safety_updated_at = 0.0
+        self.object_overlays: list[ObjectOverlay] = []
+        self.object_updated_at = 0.0
         self.intrusion_zone: list[tuple[float, float]] = []
         self.intruding_ids: set[int] = set()
 
@@ -214,7 +278,9 @@ class CameraStream:
     def preview_jpeg(self, frame: FramePacket) -> bytes:
         people = self.person_overlays if time.monotonic() - self.overlay_updated_at <= 3.0 else []
         safety = self.safety_overlays if time.monotonic() - self.safety_updated_at <= 3.0 else []
+        objects = self.object_overlays if time.monotonic() - self.object_updated_at <= 3.0 else []
         preview = draw_person_overlays(frame.jpeg, people)
+        preview = draw_object_overlays(preview, objects)
         return draw_safety_overlays(
             preview, safety, self.intrusion_zone, people, self.intruding_ids
         )
@@ -222,6 +288,10 @@ class CameraStream:
     def set_safety_detections(self, detections: list[Detection]) -> None:
         self.safety_overlays = [SafetyOverlay(item.class_name, item.box, item.confidence) for item in detections]
         self.safety_updated_at = time.monotonic()
+
+    def set_object_detections(self, detections: list[Detection]) -> None:
+        self.object_overlays = phone_overlays(detections)
+        self.object_updated_at = time.monotonic()
 
     def set_intrusion(self, zone: list[tuple[float, float]], track_ids: set[int]) -> None:
         self.intrusion_zone = zone
@@ -347,6 +417,11 @@ class MediaGateway:
         stream = self.streams.get(camera_id)
         if stream:
             stream.set_safety_detections(detections)
+
+    def set_object_detections(self, camera_id: str, detections: list[Detection]) -> None:
+        stream = self.streams.get(camera_id)
+        if stream:
+            stream.set_object_detections(detections)
 
     def set_intrusion(self, camera_id: str, zone: list[tuple[float, float]], track_ids: set[int]) -> None:
         stream = self.streams.get(camera_id)

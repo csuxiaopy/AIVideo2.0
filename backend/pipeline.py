@@ -339,6 +339,7 @@ class MonitoringRuntime:
 
         people = self.yolo.people(detections)
         self.media.set_person_detections(camera.id, people)
+        self.media.set_object_detections(camera.id, detections)
         post_people = [item for item in people if item.confidence >= 0.45]
         foot_points = [((item.box[0] + item.box[2]) / 2, item.box[3]) for item in post_people]
         occupied = any(point_in_polygon(point, geometry.post_roi) for point in foot_points)

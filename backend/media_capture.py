@@ -12,10 +12,13 @@ from typing import AsyncIterator, Callable
 
 from backend.media import (
     FramePacket,
+    ObjectOverlay,
     PersonOverlay,
     SafetyOverlay,
+    draw_object_overlays,
     draw_person_overlays,
     draw_safety_overlays,
+    phone_overlays,
 )
 from backend.schemas import Detection
 from backend.security import redact_rtsp
@@ -182,6 +185,7 @@ class MediaGateway:
         self.preview_lock = asyncio.Lock()
         self.sweeper_task: asyncio.Task | None = None
         self.person_overlays: dict[str, tuple[float, list[PersonOverlay]]] = {}
+        self.object_overlays: dict[str, tuple[float, list[ObjectOverlay]]] = {}
         self.safety_overlays: dict[str, tuple[float, list[SafetyOverlay]]] = {}
         self.intrusions: dict[str, tuple[list[tuple[float, float]], set[int]]] = {}
 
@@ -211,6 +215,7 @@ class MediaGateway:
         self.snapshots.pop(camera_id, None)
         self.capture_locks.pop(camera_id, None)
         self.person_overlays.pop(camera_id, None)
+        self.object_overlays.pop(camera_id, None)
         self.safety_overlays.pop(camera_id, None)
         self.intrusions.pop(camera_id, None)
         path = self._snapshot_path(camera_id)
@@ -299,6 +304,9 @@ class MediaGateway:
             time.monotonic(),
             [PersonOverlay(item.box, item.confidence, item.track_id) for item in detections],
         )
+
+    def set_object_detections(self, camera_id: str, detections: list[Detection]) -> None:
+        self.object_overlays[camera_id] = (time.monotonic(), phone_overlays(detections))
 
     def set_safety_detections(self, camera_id: str, detections: list[Detection]) -> None:
         self.safety_overlays[camera_id] = (
@@ -418,11 +426,14 @@ class MediaGateway:
     def _decorate(self, camera_id: str, jpeg: bytes) -> bytes:
         now = time.monotonic()
         people_at, people = self.person_overlays.get(camera_id, (0.0, []))
+        objects_at, objects = self.object_overlays.get(camera_id, (0.0, []))
         safety_at, safety = self.safety_overlays.get(camera_id, (0.0, []))
         zone, intruding_ids = self.intrusions.get(camera_id, ([], set()))
         people = people if now - people_at <= 3.0 else []
+        objects = objects if now - objects_at <= 3.0 else []
         safety = safety if now - safety_at <= 3.0 else []
         rendered = draw_person_overlays(jpeg, people)
+        rendered = draw_object_overlays(rendered, objects)
         return draw_safety_overlays(rendered, safety, zone, people, intruding_ids)
 
     def _snapshot_path(self, camera_id: str) -> Path:

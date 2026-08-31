@@ -5,6 +5,7 @@ import pytest
 from backend.media_capture import LivePreviewStream, MediaGateway, PreviewLimitError
 from backend.pipeline import staggered_capture_times
 from backend.schemas import CameraCreate, CameraOptions
+from backend.schemas import Detection
 
 
 def test_frame_interval_defaults_and_preserves_legacy_detector_options():
@@ -100,3 +101,19 @@ def test_periodic_capture_keeps_source_resolution(monkeypatch, tmp_path):
     jpeg = __import__("asyncio").run(gateway._grab_single_frame("file:///camera.mp4"))
     assert jpeg.startswith(b"\xff\xd8")
     assert "-vf" not in captured_command
+
+
+def test_phone_overlay_expires_after_three_seconds(tmp_path, monkeypatch):
+    gateway = MediaGateway(lambda *_: None, tmp_path)
+    gateway.set_object_detections(
+        "camera-1",
+        [Detection(class_id=73, class_name="cell phone", confidence=0.8, box=(0.1, 0.1, 0.3, 0.4))],
+    )
+    created_at = gateway.object_overlays["camera-1"][0]
+    monkeypatch.setattr("backend.media_capture.time.monotonic", lambda: created_at + 3.01)
+
+    image = __import__("numpy").full((120, 160, 3), 24, dtype=__import__("numpy").uint8)
+    ok, encoded = __import__("cv2").imencode(".jpg", image)
+    assert ok
+    jpeg = encoded.tobytes()
+    assert gateway._decorate("camera-1", jpeg) == jpeg
