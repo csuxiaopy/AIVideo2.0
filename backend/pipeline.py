@@ -22,7 +22,7 @@ from backend.eventbus import EventBus
 from backend.media_capture import MediaGateway
 from backend.queueing import AnalysisQueue
 from backend.repository import Repository, as_json, from_json
-from backend.rules import RuleStateRegistry, is_scheduled, point_in_polygon
+from backend.rules import RuleStateRegistry, box_intersects_polygon, is_scheduled, point_in_polygon
 from backend.schemas import CameraOptions, Detection, GeometrySpec, Mode, ScheduleSpec
 from backend.security import SecretCipher
 from backend.vlm import VLMError, VisionModelClient
@@ -341,8 +341,7 @@ class MonitoringRuntime:
         self.media.set_person_detections(camera.id, people)
         self.media.set_object_detections(camera.id, detections)
         post_people = [item for item in people if item.confidence >= 0.45]
-        foot_points = [((item.box[0] + item.box[2]) / 2, item.box[3]) for item in post_people]
-        occupied = any(point_in_polygon(point, geometry.post_roi) for point in foot_points)
+        occupied = any(box_intersects_polygon(item.box, geometry.post_roi) for item in post_people)
 
         if Mode.ON_DUTY.value in modes and mode_is_active(Mode.ON_DUTY.value, schedule, now) and self._mode_due(camera.id, Mode.ON_DUTY.value, 15, force):
             analysis = self.repository.add_analysis(

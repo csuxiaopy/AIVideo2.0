@@ -25,6 +25,65 @@ def point_in_polygon(point: tuple[float, float], polygon: list[tuple[float, floa
     return inside
 
 
+def box_intersects_polygon(
+    box: tuple[float, float, float, float], polygon: list[tuple[float, float]]
+) -> bool:
+    """Return true when any part of an axis-aligned detection box touches the ROI."""
+    if len(polygon) < 3:
+        return False
+    x1, y1, x2, y2 = box
+    if x2 < x1 or y2 < y1:
+        return False
+
+    def on_segment(
+        point: tuple[float, float], start: tuple[float, float], end: tuple[float, float]
+    ) -> bool:
+        px, py = point
+        ax, ay = start
+        bx, by = end
+        cross = (px - ax) * (by - ay) - (py - ay) * (bx - ax)
+        return (
+            abs(cross) <= 1e-9
+            and min(ax, bx) - 1e-9 <= px <= max(ax, bx) + 1e-9
+            and min(ay, by) - 1e-9 <= py <= max(ay, by) + 1e-9
+        )
+
+    def orientation(
+        a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]
+    ) -> float:
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+    def segments_intersect(
+        a: tuple[float, float], b: tuple[float, float], c: tuple[float, float], d: tuple[float, float]
+    ) -> bool:
+        ab_c, ab_d = orientation(a, b, c), orientation(a, b, d)
+        cd_a, cd_b = orientation(c, d, a), orientation(c, d, b)
+        if ((ab_c > 0 > ab_d) or (ab_d > 0 > ab_c)) and (
+            (cd_a > 0 > cd_b) or (cd_b > 0 > cd_a)
+        ):
+            return True
+        return (
+            (abs(ab_c) <= 1e-9 and on_segment(c, a, b))
+            or (abs(ab_d) <= 1e-9 and on_segment(d, a, b))
+            or (abs(cd_a) <= 1e-9 and on_segment(a, c, d))
+            or (abs(cd_b) <= 1e-9 and on_segment(b, c, d))
+        )
+
+    corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+    if any(point_in_polygon(corner, polygon) for corner in corners):
+        return True
+    if any(x1 <= x <= x2 and y1 <= y <= y2 for x, y in polygon):
+        return True
+
+    box_edges = list(zip(corners, corners[1:] + corners[:1]))
+    polygon_edges = list(zip(polygon, polygon[1:] + polygon[:1]))
+    return any(
+        segments_intersect(box_start, box_end, roi_start, roi_end)
+        for box_start, box_end in box_edges
+        for roi_start, roi_end in polygon_edges
+    )
+
+
 def line_side(point: tuple[float, float], line: list[tuple[float, float]]) -> float:
     if len(line) != 2:
         return 0.0

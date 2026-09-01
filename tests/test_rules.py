@@ -1,6 +1,12 @@
 from datetime import datetime, timedelta, timezone
 
-from backend.rules import CameraRuleState, is_scheduled, line_side, point_in_polygon
+from backend.rules import (
+    CameraRuleState,
+    box_intersects_polygon,
+    is_scheduled,
+    line_side,
+    point_in_polygon,
+)
 from backend.schemas import ScheduleSpec
 
 
@@ -8,6 +14,18 @@ def test_point_in_polygon():
     square = [(0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9)]
     assert point_in_polygon((0.5, 0.5), square)
     assert not point_in_polygon((0.95, 0.5), square)
+
+
+def test_person_box_any_overlap_counts_as_inside_post_roi():
+    roi = [(0.3, 0.3), (0.7, 0.3), (0.7, 0.7), (0.3, 0.7)]
+    assert box_intersects_polygon((0.1, 0.1, 0.4, 0.4), roi)  # box corner enters ROI
+    assert box_intersects_polygon((0.4, 0.4, 0.6, 0.6), roi)  # box fully inside ROI
+    assert box_intersects_polygon((0.2, 0.45, 0.8, 0.55), roi)  # edges cross
+    assert box_intersects_polygon((0.1, 0.1, 0.9, 0.9), roi)  # box contains ROI
+    assert box_intersects_polygon((0.1, 0.3, 0.3, 0.6), roi)  # boundary touch
+    assert not box_intersects_polygon((0.0, 0.0, 0.2, 0.2), roi)
+    assert not box_intersects_polygon((0.7, 0.7, 0.6, 0.8), roi)
+    assert not box_intersects_polygon((0.1, 0.1, 0.4, 0.4), [])
 
 
 def test_cross_midnight_schedule():
