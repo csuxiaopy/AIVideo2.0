@@ -9,7 +9,7 @@ import type { Camera, DrawLayer, Mode, Point, SceneType, SceneTemplate } from '.
 
 const modeInfo:Record<Mode,{name:string;icon:string;note:string}> = {
   off_duty:{name:'离岗检测',icon:'offDuty',note:'排班内持续无人'},
-  phone_use:{name:'玩手机检测',icon:'phone',note:'本地候选＋云端复核'},
+  phone_use:{name:'玩手机检测',icon:'phone',note:'每 3 分钟单帧大模型直检'},
   people_flow:{name:'人员计数',icon:'traffic',note:'跨线进出统计'},
   fire_smoke:{name:'烟火检测',icon:'flame',note:'本地安全模型'},
   intrusion:{name:'区域入侵',icon:'intrusion',note:'进入禁区立即告警'},
@@ -643,7 +643,8 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <div class="form-row"><label>上午开始<input v-model="firstShift.start" type="time" @change="syncShifts"></label><label>上午结束<input v-model="firstShift.end" type="time" @change="syncShifts"></label></div>
             <div class="form-row"><label>下午开始<input v-model="secondShift.start" type="time" @change="syncShifts"></label><label>下午结束<input v-model="secondShift.end" type="time" @change="syncShifts"></label></div>
             <label>离岗时长（秒）<input v-model.number="editForm.options.off_duty_seconds" type="number" min="30"></label>
-            <label>玩手机候选间隔（秒）<input v-model.number="editForm.options.behavior_interval_seconds" type="number" min="5"></label>
+            <label v-if="editForm.modes.includes('smoking')">吸烟复核间隔（秒）<input v-model.number="editForm.options.behavior_interval_seconds" type="number" min="5"></label>
+            <div v-if="editForm.modes.includes('phone_use')" class="config-note"><b>玩手机检测</b><p>每 3 分钟抽取当前单帧，直接交由经济模型初筛和增强模型复核。</p></div>
             <div class="form-row"><label>火焰阈值<input v-model.number="editForm.options.fire_confidence" type="number" min="0" max="1" step=".05"></label><label>烟雾阈值<input v-model.number="editForm.options.smoke_confidence" type="number" min="0" max="1" step=".05"></label></div>
             <label>入侵置信度<input v-model.number="editForm.options.intrusion_confidence" type="number" min="0" max="1" step=".05"></label>
             <div class="config-note"><b>全天安全模式</b><p>烟火、区域入侵、黑屏忽略此处排班，始终运行。</p></div>

@@ -35,6 +35,12 @@ ANALYSIS_LATENCY = Histogram("monitor_analysis_seconds", "Camera task latency")
 ONLINE_GAUGE = Gauge("monitor_cameras_online", "Online cameras")
 QUEUE_GAUGE = Gauge("monitor_queue_depth", "Queue depth", ["priority"])
 VLM_CALLS = Counter("monitor_vlm_calls_total", "VLM calls", ["mode", "status"])
+PHONE_USE_INTERVAL_SECONDS = 180
+
+
+def yolo_required_modes(modes: set[str]) -> set[str]:
+    """Return modes that still depend on the general object detector."""
+    return modes - {Mode.BLACK_SCREEN.value, Mode.PHONE_USE.value}
 
 
 def staggered_capture_times(cameras: list[models.Camera], now: float) -> dict[str, float]:
@@ -317,7 +323,7 @@ class MonitoringRuntime:
             if triggered:
                 await self.alerts.create(camera, analysis, frame.jpeg)
 
-        yolo_modes = modes - {Mode.BLACK_SCREEN.value}
+        yolo_modes = yolo_required_modes(modes)
         detections = []
         if yolo_modes:
             try:
@@ -380,21 +386,11 @@ class MonitoringRuntime:
             self.repository.upsert_traffic(camera.id, len(people), entered, exited)
             results.append({"mode": Mode.PEOPLE_FLOW.value, "current": len(people), "entered": entered, "exited": exited})
 
-        if Mode.PHONE_USE.value in modes and mode_is_active(Mode.PHONE_USE.value, schedule, now) and self._mode_due(camera.id, Mode.PHONE_USE.value, options.behavior_interval_seconds, force):
-            roi_people = [item for item in people if point_in_polygon(((item.box[0] + item.box[2]) / 2, item.box[3]), geometry.post_roi)]
-            roi_ids = {id(item) for item in roi_people}
-            phone_candidates = roi_people + [item for item in detections if item.class_name in {"cell phone", "mobile phone"}]
-            if roi_ids and self.yolo.phone_candidate(phone_candidates):
-                result = await self._behavior(
-                    camera, Mode.PHONE_USE, state, options, frame.jpeg, evidence_detections=phone_candidates
-                )
-                results.append(result)
-            else:
-                self.repository.add_analysis(
-                    camera_id=camera.id, mode=Mode.PHONE_USE.value, status="none", confidence=0.9,
-                    reason="YOLO 未发现人员附近的手机候选", latency_ms=0,
-                )
-                results.append({"mode": Mode.PHONE_USE.value, "status": "none"})
+        if Mode.PHONE_USE.value in modes and mode_is_active(Mode.PHONE_USE.value, schedule, now) and self._mode_due(camera.id, Mode.PHONE_USE.value, PHONE_USE_INTERVAL_SECONDS, force):
+            result = await self._behavior(
+                camera, Mode.PHONE_USE, state, options, frame.jpeg, current_frame_only=True
+            )
+            results.append(result)
 
         if Mode.SMOKING.value in modes and people and mode_is_active(Mode.SMOKING.value, schedule, now) and self._mode_due(camera.id, Mode.SMOKING.value, options.behavior_interval_seconds, force):
             result = await self._behavior(
@@ -572,8 +568,13 @@ class MonitoringRuntime:
         options: CameraOptions,
         fallback_jpeg: bytes,
         evidence_detections: list[Detection] | None = None,
+        current_frame_only: bool = False,
     ) -> dict[str, Any]:
-        frames = [packet.jpeg for packet in self.media.sample(camera.id, 8)] or [fallback_jpeg]
+        frames = (
+            [fallback_jpeg]
+            if current_frame_only
+            else ([packet.jpeg for packet in self.media.sample(camera.id, 8)] or [fallback_jpeg])
+        )
         if not self.vlm:
             analysis = self.repository.add_analysis(
                 camera_id=camera.id, mode=mode.value, status="uncertain", confidence=0,
@@ -591,9 +592,13 @@ class MonitoringRuntime:
                 request_id=response.request_id, provider=response.provider, model=response.model,
                 usage_json=as_json(response.usage), latency_ms=response.latency_ms,
             )
-            confirmed = state.behavior_confirmed(mode.value, response.result.status == "confirmed", utc_now())
+            confirmed = response.result.status == "confirmed" if mode == Mode.PHONE_USE else state.behavior_confirmed(
+                mode.value, response.result.status == "confirmed", utc_now()
+            )
             if confirmed:
-                evidence = annotate_detections(fallback_jpeg, evidence_detections or [])
+                evidence = fallback_jpeg if mode == Mode.PHONE_USE else annotate_detections(
+                    fallback_jpeg, evidence_detections or []
+                )
                 await self.alerts.create(camera, analysis, evidence)
             return {
                 "mode": mode.value, "status": response.result.status,
