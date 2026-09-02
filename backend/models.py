@@ -69,7 +69,7 @@ class Alert(Base):
     reason: Mapped[str] = mapped_column(Text, default="")
     evidence_path: Mapped[str | None] = mapped_column(Text)
     webhook_status: Mapped[str] = mapped_column(String(30), default="pending")
-    shadow: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    shadow: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
 
@@ -105,6 +105,35 @@ class WebhookSettings(Base):
     url: Mapped[str] = mapped_column(Text, default="")
     secret_encrypted: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class WebhookTarget(Base):
+    __tablename__ = "webhook_targets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    url: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    secret_encrypted: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    auto_severities_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
+
+class WebhookDelivery(Base):
+    __tablename__ = "webhook_deliveries"
+    __table_args__ = (UniqueConstraint("alert_id", "webhook_target_id", name="uq_alert_webhook_target"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    alert_id: Mapped[int] = mapped_column(ForeignKey("alerts.id", ondelete="CASCADE"), nullable=False, index=True)
+    webhook_target_id: Mapped[int | None] = mapped_column(ForeignKey("webhook_targets.id", ondelete="SET NULL"), index=True)
+    target_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    target_url: Mapped[str] = mapped_column(Text, nullable=False)
+    trigger: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
 
 
 class DetectorSettings(Base):

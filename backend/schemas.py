@@ -220,6 +220,40 @@ class WebhookSettingsUpdate(BaseModel):
         return self
 
 
+class WebhookTargetCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    enabled: bool = False
+    url: str
+    auto_severities: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_target(self):
+        self.name = self.name.strip()
+        self.url = self.url.strip()
+        allowed = {"normal", "high", "critical"}
+        if len(set(self.auto_severities)) != len(self.auto_severities) or not set(self.auto_severities) <= allowed:
+            raise ValueError("自动发送级别只能选择 normal、high、critical")
+        parsed = urlparse(self.url) if self.url else None
+        if self.url and (not self.url.startswith("https://") or not parsed or not parsed.netloc):
+            raise ValueError("Webhook URL 必须使用 HTTPS")
+        return self
+
+
+class WebhookTargetUpdate(WebhookTargetCreate):
+    pass
+
+
+class WebhookManualSend(BaseModel):
+    alert_ids: list[int] = Field(min_length=1, max_length=100)
+    webhook_target_ids: list[int] = Field(min_length=1, max_length=50)
+
+    @model_validator(mode="after")
+    def unique_ids(self):
+        if len(set(self.alert_ids)) != len(self.alert_ids) or len(set(self.webhook_target_ids)) != len(self.webhook_target_ids):
+            raise ValueError("告警和 Webhook 目标不能重复")
+        return self
+
+
 class RetentionSettingsUpdate(BaseModel):
     alert_retention_days: int = Field(default=30, ge=1, le=365)
     auto_cleanup_enabled: bool = True
@@ -237,6 +271,20 @@ class VLMResult(BaseModel):
     evidence_frames: list[int] = Field(default_factory=list)
     reason: str = Field(default="", max_length=1000)
     need_review: bool = False
+
+
+class BehaviorVLMResult(BaseModel):
+    results: list[VLMResult] = Field(min_length=1, max_length=2)
+
+    @model_validator(mode="after")
+    def valid_behavior_modes(self):
+        modes = [item.mode for item in self.results]
+        allowed = {Mode.PHONE_USE, Mode.SMOKING}
+        if not set(modes) <= allowed:
+            raise ValueError("联合行为检测只能返回玩手机或吸烟模式")
+        if len(set(modes)) != len(modes):
+            raise ValueError("联合行为检测不能返回重复模式")
+        return self
 
 
 class Detection(BaseModel):

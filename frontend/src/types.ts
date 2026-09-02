@@ -41,3 +41,32 @@ export interface SceneTemplate {
   options: any
   required_geometry: string[]
 }
+
+export interface TrafficTrendPoint {
+  time: string
+  current_people: number
+}
+
+export interface TrafficCameraSummary {
+  camera_id: string
+  camera_name: string
+  online: boolean
+  current_count: number
+  entered_today: number
+  exited_today: number
+  last_stat_at?: string
+}
+
+export interface TrafficSummary {
+  date: string
+  timezone: string
+  total_flow_today: number
+  current_people: number
+  entered_today: number
+  exited_today: number
+  flow_camera_count: number
+  store_trend: TrafficTrendPoint[]
+  cameras: TrafficCameraSummary[]
+  current_ranking: TrafficCameraSummary[]
+  flow_ranking: TrafficCameraSummary[]
+}

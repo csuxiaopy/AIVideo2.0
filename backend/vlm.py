@@ -9,13 +9,14 @@ from typing import Any
 
 import httpx
 
-from backend.schemas import Mode, VLMResult
+from backend.schemas import BehaviorVLMResult, Mode, VLMResult
 
 
-SYSTEM_PROMPT = """你是监控视频行为复核器，只判断指定模式。输入图片按时间顺序排列。
+SYSTEM_PROMPT = """你是监控视频行为检测器，只判断请求中指定的行为。每次输入一张当前监控图片。
 不得根据身份、服装或画面外信息推断。画面模糊、遮挡或证据不足必须返回 uncertain。
-status 只能是 confirmed、suspected、uncertain、none。只输出 JSON：
-mode,status,confidence,evidence_frames,reason,need_review。
+status 只能是 confirmed、suspected、uncertain、none。只输出 JSON 对象，格式为：
+{"results":[{"mode":"请求的模式","status":"...","confidence":0到1,"evidence_frames":[0],"reason":"...","need_review":false}]}。
+results 必须且只能包含请求中列出的每个模式一次，不能缺少、重复或增加模式。
 phone_use 只有明确看到人员正在操作或注视手机才可 confirmed；仅看到手机不能确认。
 smoking 只有明确看到持烟、吸食动作或可关联的烟雾证据才可 confirmed。
 不要把喝水、吃东西、摸脸、打电话或普通手部动作误判为抽烟。"""
@@ -23,7 +24,7 @@ smoking 只有明确看到持烟、吸食动作或可关联的烟雾证据才可
 
 @dataclass
 class VLMResponse:
-    result: VLMResult
+    results: dict[Mode, VLMResult]
     request_id: str | None
     usage: dict[str, Any]
     latency_ms: int
@@ -61,17 +62,21 @@ class VisionModelClient:
     async def close(self) -> None:
         await self.client.aclose()
 
-    async def analyze(self, mode: Mode, frames: list[bytes], enhanced: bool = False) -> VLMResponse:
+    async def analyze_behaviors(
+        self, modes: set[Mode], frame: bytes, enhanced: bool = False
+    ) -> VLMResponse:
+        allowed = {Mode.PHONE_USE, Mode.SMOKING}
+        if not modes or not modes <= allowed:
+            raise ValueError("联合行为检测模式必须是玩手机或吸烟")
         model = self.enhanced_model if enhanced else self.economy_model
         if not self.base_url or not self.api_key:
             raise VLMError("视觉大模型尚未配置")
         content: list[dict[str, Any]] = [{
             "type": "text",
-            "text": f"复核模式：{mode.value}。请按顺序检查 {len(frames)} 帧并严格返回 JSON。",
+            "text": "检测模式：" + "、".join(sorted(mode.value for mode in modes)) + "。请检查当前单帧并严格返回 JSON。",
         }]
-        for frame in frames:
-            encoded = base64.b64encode(frame).decode("ascii")
-            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}})
+        encoded = base64.b64encode(frame).decode("ascii")
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}})
         body = {
             "model": model,
             "messages": [
@@ -121,13 +126,14 @@ class VisionModelClient:
         if isinstance(message, list):
             message = "".join(str(item.get("text", "")) for item in message if isinstance(item, dict))
         try:
-            result = VLMResult.model_validate(extract_json(str(message)))
+            combined = BehaviorVLMResult.model_validate(extract_json(str(message)))
         except Exception as exc:
             raise VLMError(f"大模型返回格式错误：{str(exc)[:300]}", request_id) from exc
-        if result.mode != mode:
-            raise VLMError("大模型返回了错误的检测模式", request_id)
+        results = {item.mode: item for item in combined.results}
+        if set(results) != modes:
+            raise VLMError("大模型返回的检测模式与请求不一致", request_id)
         return VLMResponse(
-            result=result,
+            results=results,
             request_id=request_id,
             usage=payload.get("usage", {}),
             latency_ms=latency_ms,
@@ -135,11 +141,11 @@ class VisionModelClient:
             model=model,
         )
 
-    async def tiered_analyze(self, mode: Mode, frames: list[bytes]) -> VLMResponse:
-        economy = await self.analyze(mode, frames, enhanced=False)
-        if economy.result.status == "none":
+    async def tiered_analyze_behaviors(self, modes: set[Mode], frame: bytes) -> VLMResponse:
+        economy = await self.analyze_behaviors(modes, frame, enhanced=False)
+        if all(result.status == "none" for result in economy.results.values()):
             return economy
-        return await self.analyze(mode, frames, enhanced=True)
+        return await self.analyze_behaviors(modes, frame, enhanced=True)
 
     async def test(self) -> dict[str, Any]:
         started = time.perf_counter()

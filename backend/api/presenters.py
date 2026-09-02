@@ -36,7 +36,9 @@ def camera_public(
     }
 
 
-def alert_public(alert: models.Alert) -> dict[str, Any]:
+def alert_public(alert: models.Alert, deliveries: list[models.WebhookDelivery] | None = None) -> dict[str, Any]:
+    delivery_rows = deliveries or []
+    delivered = sum(row.status == "delivered" for row in delivery_rows)
     return {
         "id": alert.id,
         "camera_id": alert.camera_id,
@@ -52,6 +54,19 @@ def alert_public(alert: models.Alert) -> dict[str, Any]:
         "evidence_path": alert.evidence_path,
         "evidence_url": f"/evidence/{alert.evidence_path}" if alert.evidence_path else None,
         "webhook_status": alert.webhook_status,
+        "webhook_delivery": {
+            "delivered": delivered,
+            "total": len(delivery_rows),
+            "items": [{
+                "id": row.id,
+                "webhook_target_id": row.webhook_target_id,
+                "target_name": row.target_name,
+                "trigger": row.trigger,
+                "status": row.status,
+                "error": row.error,
+                "updated_at": row.updated_at,
+            } for row in delivery_rows],
+        },
         "shadow": alert.shadow,
         "created_at": alert.created_at,
     }

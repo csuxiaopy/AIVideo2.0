@@ -53,7 +53,7 @@ pydantic-settings 的覆盖顺序（高 → 低）：
 
 **A. `Settings` 对象（每次进程启动重新加载，属"配置重读"而非"丢失"）：**
 
-字段全量清单（`backend/config.py` L17–42）：`app_host`、`app_port`、`app_reload`、`database_url`、`redis_url`、`app_encryption_key`、`evidence_dir`、`snapshot_dir`、`evidence_retention_days`、`max_live_previews`、`live_preview_fps`、`live_preview_timeout_seconds`、`frame_capture_timeout_seconds`、`yolo_model`、`yolo_device`、`yolo_imgsz`、`yolo_confidence`、`fire_smoke_model`、`fire_smoke_sha256`、`fire_smoke_device`、`fire_smoke_imgsz`、`scheduler_enabled`、`analysis_workers`、`fire_smoke_workers`、`shadow_mode`、`web_dist_dir`。
+字段全量清单（`backend/config.py` L17–42）：`app_host`、`app_port`、`app_reload`、`database_url`、`redis_url`、`app_encryption_key`、`evidence_dir`、`snapshot_dir`、`evidence_retention_days`、`max_live_previews`、`live_preview_fps`、`live_preview_timeout_seconds`、`frame_capture_timeout_seconds`、`yolo_model`、`yolo_device`、`yolo_imgsz`、`yolo_confidence`、`fire_smoke_model`、`fire_smoke_sha256`、`fire_smoke_device`、`fire_smoke_imgsz`、`scheduler_enabled`、`analysis_workers`、`fire_smoke_workers`、`web_dist_dir`。
 
 **B. `MonitoringRuntime` 运行时过程状态（纯内存，重启后彻底丢失）：**
 
@@ -111,7 +111,7 @@ pydantic-settings 的覆盖顺序（高 → 低）：
 
 | 文件 | 用途 |
 | --- | --- |
-| `D:\project\yolo_vlm_monitor\.env`（模板 `.env.example`） | 启动参数（数据库、Redis、YOLO、火烟、影子模式、worker 数等） |
+| `D:\project\yolo_vlm_monitor\.env`（模板 `.env.example`） | 启动参数（数据库、Redis、YOLO、火烟、worker 数等） |
 | `D:\project\yolo_vlm_monitor\compose.cpu.yml` | 生产基线编排：端口、环境变量注入、命名卷、健康检查、`restart: unless-stopped` |
 | `D:\project\yolo_vlm_monitor\compose.cpu.dev.yml` | dev 覆盖层：backend/alembic/run.py bind mount + `APP_RELOAD=true` + Vite web 服务 |
 | `D:\project\yolo_vlm_monitor\deploy\prometheus.yml` | Prometheus 抓取配置（仅 `--profile monitoring` 启动） |
@@ -140,14 +140,15 @@ pydantic-settings 的覆盖顺序（高 → 低）：
 | `online` / `last_seen_at` / `last_frame_at` / `last_analysis_at` / `last_error` | 运行时状态（每次心跳写库） |
 | `created_at` / `updated_at` | 时间戳 |
 
-`options_json` 全量字段（`backend/schemas.py` `CameraOptions`）：`health_interval_seconds=5`、`yolo_fps=0.1`、`behavior_interval_seconds=15`、`off_duty_seconds=300`、`shift_grace_seconds=60`、`alert_cooldown_seconds=300`、`black_mean_max=18`、`black_std_max=12`、`black_ratio_min=0.92`、`fire_smoke_fps=1.0`、`fire_confidence=0.55`、`smoke_confidence=0.45`、`intrusion_confidence=0.50`、`intrusion_cooldown_seconds=60`。
+`options_json` 全量字段（`backend/schemas.py` `CameraOptions`）：`health_interval_seconds=5`、`yolo_fps=0.1`、`behavior_interval_seconds=15`（兼容保留，玩手机/吸烟不再读取）、`off_duty_seconds=300`、`shift_grace_seconds=60`、`alert_cooldown_seconds=300`、`black_mean_max=18`、`black_std_max=12`、`black_ratio_min=0.92`、`fire_smoke_fps=1.0`、`fire_confidence=0.55`、`smoke_confidence=0.45`、`intrusion_confidence=0.50`、`intrusion_cooldown_seconds=60`。玩手机与吸烟在配置排班内共用固定 180 秒节流，以同一当前帧进行联合 VLM 检测。
 
-**（2）告警规则 / 系统级设置（单行表，id=1）**
+**（2）告警规则 / 系统级设置（Webhook 为多行，其余设置为单行表）**
 
 | 表 | 列 | 内容 |
 | --- | --- | --- |
 | `model_settings` | `provider`、`base_url`、`api_key_encrypted`、`economy_model`、`enhanced_model` | 视觉大模型（玩手机/抽烟复核）：Provider、Base URL、API Key（密文）、经济/增强模型 |
-| `webhook_settings` | `enabled`、`url`、`secret_encrypted` | 告警 Webhook 外发开关、URL、签名密钥（密文） |
+| `webhook_targets` | 名称、启用状态、URL、密钥密文、自动告警级别 | 多个 Webhook 外发目标；旧单条配置升级时自动迁入 |
+| `webhook_deliveries` | 告警、目标快照、自动/手动、状态、错误 | 每条告警到每个目标的最新投递结果 |
 | `detector_settings` | `general_model`、`general_device`、`fire_smoke_model`、`fire_smoke_device`、`model_sha256`、`license_name` | 检测器模型路径/设备/SHA256 |
 | `retention_settings` | `alert_retention_days`、`auto_cleanup_enabled` | 告警保留天数与自动清理开关 |
 
@@ -165,13 +166,13 @@ pydantic-settings 的覆盖顺序（高 → 低）：
 | 维度 | 编译时 / 启动时配置 | UI 动态配置 |
 | --- | --- | --- |
 | 存储位置 | 代码默认值（`backend/config.py` `Settings`、`schemas.py` `CameraOptions`、`capabilities.py` 模板）+ 环境变量 + `.env` 文件 | PostgreSQL（卷 `postgres_data`）/ SQLite（`data\yolo_vlm.db`） |
-| 对应表 | 无（不在数据库） | `cameras`、`model_settings`、`webhook_settings`、`detector_settings`、`retention_settings` |
+| 对应表 | 无（不在数据库） | `cameras`、`model_settings`、`webhook_targets`、`webhook_deliveries`、`detector_settings`、`retention_settings` |
 | 修改方式 | 编辑 `.env` / 改 Compose `environment:` / 改代码后重启 | 前端页面 → API（`POST/PATCH /api/cameras*`、`PUT /api/settings/*`） |
 | 生效时机 | **重启进程/容器后生效**（`get_settings()` lru_cache 单例） | **立即生效**：`sync_cameras()` 重建调度、`reload_models()` 重载 VLM、`reload_detectors()` 重载检测器 |
 | 重启后 | 每次启动重新读入内存 | 从数据库恢复，**不丢失** |
-| 典型项 | `YOLO_IMGSZ`、`YOLO_CONFIDENCE`、`SHADOW_MODE`、`ANALYSIS_WORKERS`、`FRAME_CAPTURE_TIMEOUT_SECONDS`、端口、数据库地址、加密密钥 | 摄像头增删改、模式勾选、ROI/统计线/禁区绘制、排班、离岗阈值、告警冷却、模型配置、Webhook、保留天数 |
+| 典型项 | `YOLO_IMGSZ`、`YOLO_CONFIDENCE`、`ANALYSIS_WORKERS`、`FRAME_CAPTURE_TIMEOUT_SECONDS`、端口、数据库地址、加密密钥 | 摄像头增删改、模式勾选、ROI/统计线/禁区绘制、排班、离岗阈值、告警冷却、模型配置、Webhook、保留天数 |
 
-> 注意：UI 中"系统配置"保存的 VLM / Webhook / 检测器 / 保留天数，落的是上述 4 张 settings 表；`SHADOW_MODE`、worker 数、抽帧超时等**只能**通过 `.env` / Compose 修改。
+> 注意：UI 中“系统配置”保存 VLM、检测器和保留天数；独立“Webhook 管理”模块保存多个目标及告警级别。worker 数、抽帧超时等**只能**通过 `.env` / Compose 修改。
 
 ---
 
@@ -187,7 +188,7 @@ docker compose -f compose.cpu.yml exec -T postgres psql -U monitor -d monitor -c
 docker compose -f compose.cpu.yml exec -T postgres psql -U monitor -d monitor \
   -c "SELECT id, name, enabled, frame_interval_seconds, modes_json, options_json FROM cameras;"
 docker compose -f compose.cpu.yml exec -T postgres psql -U monitor -d monitor \
-  -c "SELECT * FROM model_settings; SELECT * FROM webhook_settings; SELECT * FROM detector_settings; SELECT * FROM retention_settings;"
+  -c "SELECT * FROM model_settings; SELECT * FROM webhook_targets; SELECT * FROM webhook_deliveries; SELECT * FROM detector_settings; SELECT * FROM retention_settings;"
 
 # 裸跑（SQLite）
 sqlite3 "D:\project\yolo_vlm_monitor\data\yolo_vlm.db" ".tables"
@@ -203,7 +204,6 @@ sqlite3 "D:\project\yolo_vlm_monitor\data\yolo_vlm.db" \
 curl -s http://127.0.0.1:8100/health
 # 关键字段：
 #   queue.mode        = "redis"（队列持久化） 或 "in_memory"（内存回退，重启丢）
-#   shadow_mode       = Settings 内存值（env 决定）
 #   workers.processed / failures = 内存计数器，重启归零
 #   detectors.*       = 当前检测器状态
 curl -s http://127.0.0.1:8100/api/runtime/workers
@@ -253,7 +253,7 @@ docker volume ls | grep yolo_vlm_monitor
 3. **`.env` 文件一致性（最容易踩的坑）**
    - 宿主机项目根目录 `.env` 必须存在（当前工作区只有 `.env.example`，直接 `up` 会因 `POSTGRES_PASSWORD:?` 报错）。
    - `POSTGRES_PASSWORD` 只在 **postgres_data 卷首次初始化**时生效；之后修改 `.env` 不会改已初始化的数据库密码，需同步改库内密码。
-   - **`APP_ENCRYPTION_KEY` 必须保持不变**：更换密钥后，`cameras.rtsp_url_encrypted`、`model_settings.api_key_encrypted`、`webhook_settings.secret_encrypted` 全部无法解密，需重新配置。
+   - **`APP_ENCRYPTION_KEY` 必须保持不变**：更换密钥后，`cameras.rtsp_url_encrypted`、`model_settings.api_key_encrypted` 无法解密，需重新配置。`webhook_targets.secret_encrypted` 是旧版自定义 HMAC Webhook 的兼容字段，企业微信机器人不再读取它。
 
 4. **dev 覆盖层（compose.cpu.dev.yml）注意**
    - bind mount 只覆盖 `backend/`、`alembic/`、`alembic.ini`、`run.py`、`frontend/`，**不挂载 `./data`**；Compose 下数据库始终是 PostgreSQL（`DATABASE_URL` 已注入），SQLite 分支（`data/yolo_vlm.db`）只在裸跑时使用。
@@ -298,7 +298,7 @@ docker volume ls | grep yolo_vlm_monitor
 
 **数据库表（Compose → 库 `monitor`；裸跑 → `data\yolo_vlm.db`）**
 
-配置类：`cameras`、`model_settings`、`webhook_settings`、`detector_settings`、`retention_settings`
+配置类：`cameras`、`model_settings`、`webhook_targets`、`detector_settings`、`retention_settings`；投递记录：`webhook_deliveries`
 记录类：`analyses`、`alerts`、`traffic_aggregates`；迁移版本：`alembic_version`
 
 **Redis 键（Compose）**

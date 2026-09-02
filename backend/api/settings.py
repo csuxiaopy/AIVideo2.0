@@ -5,7 +5,9 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from backend.api.context import context
-from backend.schemas import DisplaySettingsUpdate, DetectorSettingsUpdate, ModelSettingsUpdate, RetentionSettingsUpdate, WebhookSettingsUpdate
+from backend.repository import as_json, from_json
+from backend.schemas import (DisplaySettingsUpdate, DetectorSettingsUpdate, ModelSettingsUpdate,
+    RetentionSettingsUpdate, WebhookTargetCreate, WebhookTargetUpdate)
 from backend.webhook import WebhookClient
 
 
@@ -83,44 +85,63 @@ async def put_detectors(payload: DetectorSettingsUpdate) -> dict[str, Any]:
     return await get_detectors()
 
 
-@router.get("/webhook")
-async def get_webhook() -> dict[str, Any]:
-    row = context.repository.get_webhook_settings()
+def webhook_target_public(row) -> dict[str, Any]:
     return {
-        "enabled": row.enabled,
-        "url": row.url,
-        "secret_configured": bool(row.secret_encrypted),
-        "updated_at": row.updated_at,
+        "id": row.id, "name": row.name, "enabled": row.enabled, "url": row.url,
+        # Compatibility for cached pre-WeCom frontends that required an HMAC secret.
+        # WeCom robot URLs contain their own key and do not use a separate secret.
+        "secret_configured": bool(row.url),
+        "auto_severities": from_json(row.auto_severities_json, []),
+        "created_at": row.created_at, "updated_at": row.updated_at,
     }
 
 
-@router.put("/webhook")
-async def put_webhook(payload: WebhookSettingsUpdate) -> dict[str, Any]:
-    existing = context.repository.get_webhook_settings()
-    effective_secret = payload.secret or (
-        context.cipher.decrypt(existing.secret_encrypted) if existing.secret_encrypted else ""
-    )
-    if payload.enabled and (not payload.url.startswith("https://") or not effective_secret):
-        raise HTTPException(status_code=400, detail="启用 Webhook 时必须配置 HTTPS URL 和密钥")
-    values: dict[str, Any] = {"enabled": payload.enabled, "url": payload.url}
-    if payload.secret:
-        values["secret_encrypted"] = context.cipher.encrypt(payload.secret)
-    context.repository.save_webhook_settings(values)
-    return await get_webhook()
+@router.get("/webhooks")
+async def get_webhooks() -> dict[str, Any]:
+    return {
+        "items": [webhook_target_public(row) for row in context.repository.list_webhook_targets()],
+    }
 
 
-@router.post("/webhook/test")
-async def test_webhook() -> dict[str, Any]:
-    row = context.repository.get_webhook_settings()
-    if not row.url or not row.secret_encrypted:
-        raise HTTPException(status_code=400, detail="Webhook 尚未完整配置")
+@router.post("/webhooks", status_code=201)
+async def create_webhook(payload: WebhookTargetCreate) -> dict[str, Any]:
+    if payload.enabled and not payload.url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="启用企业微信机器人时必须配置 HTTPS URL")
+    values = payload.model_dump(exclude={"auto_severities"})
+    values["secret_encrypted"] = ""
+    values["auto_severities_json"] = as_json(payload.auto_severities)
+    return webhook_target_public(context.repository.create_webhook_target(values))
+
+
+@router.put("/webhooks/{target_id}")
+async def update_webhook(target_id: int, payload: WebhookTargetUpdate) -> dict[str, Any]:
+    existing = context.repository.get_webhook_target(target_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Webhook 目标不存在")
+    if payload.enabled and not payload.url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="启用企业微信机器人时必须配置 HTTPS URL")
+    values = payload.model_dump(exclude={"auto_severities"})
+    values["auto_severities_json"] = as_json(payload.auto_severities)
+    row = context.repository.update_webhook_target(target_id, values)
+    return webhook_target_public(row)
+
+
+@router.delete("/webhooks/{target_id}")
+async def delete_webhook(target_id: int) -> dict[str, bool]:
+    if not context.repository.delete_webhook_target(target_id):
+        raise HTTPException(status_code=404, detail="Webhook 目标不存在")
+    return {"deleted": True}
+
+
+@router.post("/webhooks/{target_id}/test")
+async def test_webhook_target(target_id: int) -> dict[str, bool]:
+    row = context.repository.get_webhook_target(target_id)
+    if not row or not row.url:
+        raise HTTPException(status_code=400, detail="Webhook 目标不存在或配置不完整")
     client = WebhookClient()
     try:
-        await client.send(
-            row.url,
-            context.cipher.decrypt(row.secret_encrypted),
-            {"type": "test", "message": "YOLO VLM monitor webhook test"},
-            attempts=1,
+        await client.send_markdown(
+            row.url, "### AI 视频监控\n> 企业微信机器人连接测试成功", attempts=1
         )
         return {"ok": True}
     except Exception as exc:

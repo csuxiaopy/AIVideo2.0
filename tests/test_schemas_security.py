@@ -1,6 +1,7 @@
 import pytest
 
 from backend.schemas import (
+    BehaviorVLMResult,
     CameraBatchCreate,
     CameraCreate,
     CameraPatch,
@@ -37,6 +38,21 @@ def test_vlm_json_and_mode_validation():
     payload = extract_json('```json\n{"mode":"smoking","status":"confirmed","confidence":0.9}\n```')
     result = VLMResult.model_validate(payload)
     assert result.mode == Mode.SMOKING
+
+
+def test_combined_vlm_result_rejects_duplicate_and_non_behavior_modes():
+    duplicate = {
+        "results": [
+            {"mode": "smoking", "status": "none", "confidence": 0.9},
+            {"mode": "smoking", "status": "confirmed", "confidence": 0.9},
+        ]
+    }
+    with pytest.raises(ValueError):
+        BehaviorVLMResult.model_validate(duplicate)
+    with pytest.raises(ValueError):
+        BehaviorVLMResult.model_validate({
+            "results": [{"mode": "intrusion", "status": "none", "confidence": 0.9}]
+        })
 
 
 def test_intrusion_requires_named_zone():

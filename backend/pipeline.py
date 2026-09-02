@@ -35,12 +35,12 @@ ANALYSIS_LATENCY = Histogram("monitor_analysis_seconds", "Camera task latency")
 ONLINE_GAUGE = Gauge("monitor_cameras_online", "Online cameras")
 QUEUE_GAUGE = Gauge("monitor_queue_depth", "Queue depth", ["priority"])
 VLM_CALLS = Counter("monitor_vlm_calls_total", "VLM calls", ["mode", "status"])
-PHONE_USE_INTERVAL_SECONDS = 180
+BEHAVIOR_INTERVAL_SECONDS = 180
 
 
 def yolo_required_modes(modes: set[str]) -> set[str]:
     """Return modes that still depend on the general object detector."""
-    return modes - {Mode.BLACK_SCREEN.value, Mode.PHONE_USE.value}
+    return modes - {Mode.BLACK_SCREEN.value, Mode.PHONE_USE.value, Mode.SMOKING.value}
 
 
 def staggered_capture_times(cameras: list[models.Camera], now: float) -> dict[str, float]:
@@ -386,17 +386,14 @@ class MonitoringRuntime:
             self.repository.upsert_traffic(camera.id, len(people), entered, exited)
             results.append({"mode": Mode.PEOPLE_FLOW.value, "current": len(people), "entered": entered, "exited": exited})
 
-        if Mode.PHONE_USE.value in modes and mode_is_active(Mode.PHONE_USE.value, schedule, now) and self._mode_due(camera.id, Mode.PHONE_USE.value, PHONE_USE_INTERVAL_SECONDS, force):
-            result = await self._behavior(
-                camera, Mode.PHONE_USE, state, options, frame.jpeg, current_frame_only=True
-            )
-            results.append(result)
-
-        if Mode.SMOKING.value in modes and people and mode_is_active(Mode.SMOKING.value, schedule, now) and self._mode_due(camera.id, Mode.SMOKING.value, options.behavior_interval_seconds, force):
-            result = await self._behavior(
-                camera, Mode.SMOKING, state, options, frame.jpeg, evidence_detections=people
-            )
-            results.append(result)
+        behavior_modes = {
+            mode for mode in (Mode.PHONE_USE, Mode.SMOKING)
+            if mode.value in modes and mode_is_active(mode.value, schedule, now)
+        }
+        if behavior_modes and self._mode_due(
+            camera.id, "behavior", BEHAVIOR_INTERVAL_SECONDS, force
+        ):
+            results.extend(await self._behaviors(camera, behavior_modes, frame.jpeg))
 
         if Mode.INTRUSION.value in modes and geometry.intrusion_zone:
             intrusion_people = [item for item in people if item.confidence >= options.intrusion_confidence and item.track_id is not None]
@@ -560,59 +557,55 @@ class MonitoringRuntime:
         self.last_mode_run[key] = now
         return True
 
-    async def _behavior(
+    async def _behaviors(
         self,
         camera: models.Camera,
-        mode: Mode,
-        state,
-        options: CameraOptions,
-        fallback_jpeg: bytes,
-        evidence_detections: list[Detection] | None = None,
-        current_frame_only: bool = False,
-    ) -> dict[str, Any]:
-        frames = (
-            [fallback_jpeg]
-            if current_frame_only
-            else ([packet.jpeg for packet in self.media.sample(camera.id, 8)] or [fallback_jpeg])
-        )
+        modes: set[Mode],
+        frame_jpeg: bytes,
+    ) -> list[dict[str, Any]]:
         if not self.vlm:
-            analysis = self.repository.add_analysis(
-                camera_id=camera.id, mode=mode.value, status="uncertain", confidence=0,
-                severity="normal",
-                reason="视觉大模型尚未配置", error="model_not_configured", latency_ms=0,
-            )
-            return {"mode": mode.value, "status": "uncertain", "reason": analysis.reason}
-        try:
-            response = await self.vlm.tiered_analyze(mode, frames)
-            VLM_CALLS.labels(mode=mode.value, status=response.result.status).inc()
-            analysis = self.repository.add_analysis(
-                camera_id=camera.id, mode=mode.value, status=response.result.status,
-                confidence=response.result.confidence, reason=response.result.reason,
-                severity="normal",
-                request_id=response.request_id, provider=response.provider, model=response.model,
-                usage_json=as_json(response.usage), latency_ms=response.latency_ms,
-            )
-            confirmed = response.result.status == "confirmed" if mode == Mode.PHONE_USE else state.behavior_confirmed(
-                mode.value, response.result.status == "confirmed", utc_now()
-            )
-            if confirmed:
-                evidence = fallback_jpeg if mode == Mode.PHONE_USE else annotate_detections(
-                    fallback_jpeg, evidence_detections or []
+            output = []
+            for mode in sorted(modes, key=lambda item: item.value):
+                analysis = self.repository.add_analysis(
+                    camera_id=camera.id, mode=mode.value, status="uncertain", confidence=0,
+                    severity="normal", reason="视觉大模型尚未配置",
+                    error="model_not_configured", latency_ms=0,
                 )
-                await self.alerts.create(camera, analysis, evidence)
-            return {
-                "mode": mode.value, "status": response.result.status,
-                "confirmed_window": confirmed, "reason": response.result.reason,
-            }
+                output.append({"mode": mode.value, "status": "uncertain", "reason": analysis.reason})
+            return output
+        try:
+            response = await self.vlm.tiered_analyze_behaviors(modes, frame_jpeg)
+            VLM_CALLS.labels(mode="behavior_combined", status="completed").inc()
+            output = []
+            for mode in sorted(modes, key=lambda item: item.value):
+                result = response.results[mode]
+                VLM_CALLS.labels(mode=mode.value, status=result.status).inc()
+                analysis = self.repository.add_analysis(
+                    camera_id=camera.id, mode=mode.value, status=result.status,
+                    confidence=result.confidence, reason=result.reason, severity="normal",
+                    request_id=response.request_id, provider=response.provider, model=response.model,
+                    usage_json=as_json(response.usage), latency_ms=response.latency_ms,
+                )
+                confirmed = result.status == "confirmed"
+                if confirmed:
+                    await self.alerts.create(camera, analysis, frame_jpeg)
+                output.append({
+                    "mode": mode.value, "status": result.status,
+                    "confirmed_window": confirmed, "reason": result.reason,
+                })
+            return output
         except VLMError as exc:
-            VLM_CALLS.labels(mode=mode.value, status="error").inc()
-            self.repository.add_analysis(
-                camera_id=camera.id, mode=mode.value, status="uncertain", confidence=0,
-                severity="normal",
-                reason="视觉大模型分析失败", request_id=exc.request_id,
-                error=f"{type(exc).__name__}: {str(exc)[:500]}", latency_ms=0,
-            )
-            return {"mode": mode.value, "status": "uncertain", "error": str(exc)}
+            VLM_CALLS.labels(mode="behavior_combined", status="error").inc()
+            output = []
+            for mode in sorted(modes, key=lambda item: item.value):
+                VLM_CALLS.labels(mode=mode.value, status="error").inc()
+                self.repository.add_analysis(
+                    camera_id=camera.id, mode=mode.value, status="uncertain", confidence=0,
+                    severity="normal", reason="视觉大模型分析失败", request_id=exc.request_id,
+                    error=f"{type(exc).__name__}: {str(exc)[:500]}", latency_ms=0,
+                )
+                output.append({"mode": mode.value, "status": "uncertain", "error": str(exc)})
+            return output
 
     async def status(self) -> dict[str, Any]:
         general_depth = await self.queue.depths()
@@ -649,5 +642,4 @@ class MonitoringRuntime:
                 "general": self.yolo.status(),
                 "fire_smoke": self.fire_smoke.status(),
             },
-            "shadow_mode": self.settings.shadow_mode,
         }

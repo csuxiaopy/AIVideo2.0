@@ -67,8 +67,8 @@ class AlertService:
             local_model=analysis.local_model,
             model_version=analysis.model_version,
             evidence_path=filename,
-            webhook_status="shadow" if self.settings.shadow_mode else "pending",
-            shadow=self.settings.shadow_mode,
+            webhook_status="not_sent",
+            shadow=False,
         )
         payload = self._payload(camera, alert, filename)
         await self.event_bus.publish(payload)
@@ -96,26 +96,69 @@ class AlertService:
         }
 
     def _schedule_delivery(self, alert_id: int, payload: dict[str, Any]) -> None:
-        if self.settings.shadow_mode:
-            return
-        webhook_settings = self.repository.get_webhook_settings()
-        if (
-            webhook_settings.enabled
-            and webhook_settings.url
-            and webhook_settings.secret_encrypted
-        ):
-            secret = self.cipher.decrypt(webhook_settings.secret_encrypted)
+        targets = [target for target in self.repository.list_webhook_targets(enabled_only=True)
+                   if payload["severity"] in from_json(target.auto_severities_json, [])
+                   and target.url]
+        for target in targets:
+            delivery = self.repository.upsert_webhook_delivery(alert_id, target, "automatic")
             asyncio.create_task(
-                self._deliver(alert_id, webhook_settings.url, secret, payload),
-                name=f"alert-webhook-{alert_id}",
+                self._deliver(alert_id, delivery.id, target.url, payload),
+                name=f"alert-webhook-{alert_id}-{target.id}",
             )
+        if targets:
+            self._refresh_alert_status(alert_id)
+
+    async def manual_send(self, alert_ids: list[int], target_ids: list[int]) -> dict[str, int]:
+        targets = []
+        for target_id in target_ids:
+            target = self.repository.get_webhook_target(target_id)
+            if not target or not target.enabled or not target.url:
+                raise ValueError(f"Webhook 目标 {target_id} 不存在、未启用或配置不完整")
+            targets.append(target)
+        alert_payloads = []
+        for alert_id in alert_ids:
+            alert = self.repository.get_alert(alert_id)
+            if not alert:
+                raise ValueError(f"告警 {alert_id} 不存在")
+            camera = self.repository.get_camera(alert.camera_id)
+            if not camera:
+                raise ValueError(f"告警 {alert_id} 对应摄像头不存在")
+            alert_payloads.append((alert, self._payload(camera, alert, alert.evidence_path or "")))
+        jobs = []
+        for alert, payload in alert_payloads:
+            for target in targets:
+                delivery = self.repository.upsert_webhook_delivery(alert.id, target, "manual")
+                jobs.append(self._deliver(alert.id, delivery.id, target.url, payload))
+        await asyncio.gather(*jobs)
+        return {"alerts": len(alert_ids), "targets": len(targets), "deliveries": len(jobs)}
 
     async def _deliver(
-        self, alert_id: int, url: str, secret: str, payload: dict[str, Any]
+        self, alert_id: int, delivery_id: int, url: str, payload: dict[str, Any]
     ) -> None:
         try:
-            await self.webhook.send(url, secret, payload)
-            self.repository.update_alert_webhook(alert_id, "delivered")
-        except Exception:
-            self.repository.update_alert_webhook(alert_id, "failed")
+            evidence_dir = self.settings.evidence_dir.resolve()
+            filename = str(payload.get("evidence_url", "")).rsplit("/", 1)[-1]
+            evidence_path = (evidence_dir / filename).resolve()
+            evidence_path.relative_to(evidence_dir)
+            await self.webhook.send(url, payload, evidence_path)
+            self.repository.update_webhook_delivery(delivery_id, "delivered")
+        except Exception as exc:
+            self.repository.update_webhook_delivery(delivery_id, "failed", str(exc)[:1000])
             logger.exception("Webhook delivery failed for alert %s", alert_id)
+        self._refresh_alert_status(alert_id)
+
+    def _refresh_alert_status(self, alert_id: int) -> None:
+        rows = self.repository.webhook_deliveries(alert_id)
+        delivered = sum(row.status == "delivered" for row in rows)
+        failed = sum(row.status == "failed" for row in rows)
+        if not rows:
+            status = "not_sent"
+        elif delivered == len(rows):
+            status = "delivered"
+        elif failed == len(rows):
+            status = "failed"
+        elif delivered and failed:
+            status = "partial"
+        else:
+            status = "pending"
+        self.repository.update_alert_webhook(alert_id, status)

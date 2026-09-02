@@ -41,7 +41,6 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = True
     analysis_workers: int = 2
     fire_smoke_workers: int = 1
-    shadow_mode: bool = True
     web_dist_dir: Path = ROOT / "frontend" / "dist"
 
     def prepare(self) -> None:

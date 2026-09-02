@@ -74,7 +74,6 @@ ANALYSIS_WORKERS=2
 FIRE_SMOKE_WORKERS=1
 ANALYSIS_QUEUE_MAXSIZE=256
 FRAME_CAPTURE_TIMEOUT_SECONDS=15
-SHADOW_MODE=true
 ```
 
 开发环境中的 `DATABASE_URL` 和 `REDIS_URL` 由 `compose.cpu.yml` 自动注入，分别指向容器网络内的 `postgres` 和 `redis`，无需改成本机地址。
@@ -218,14 +217,13 @@ ANALYSIS_WORKERS=2
 FIRE_SMOKE_WORKERS=1
 ANALYSIS_QUEUE_MAXSIZE=256
 FRAME_CAPTURE_TIMEOUT_SECONDS=15
-SHADOW_MODE=true
 ```
 
 注意：
 
 - Compose 会覆盖 `.env` 中的 `DATABASE_URL` 和 `REDIS_URL`，app 使用容器内 PostgreSQL、Redis。
 - `APP_ENCRYPTION_KEY` 用于加密 RTSP 密码和外部模型 API Key。投入使用后不能随意更换。
-- 首次上线保持 `SHADOW_MODE=true`，验证告警质量后再改为 `false` 开启 Webhook 外发。
+- 首次上线先使用企业微信机器人的连接测试和告警中心手动发送验证，再勾选需要自动发送的告警级别。
 - `POSTGRES_PASSWORD` 只在首次创建数据库卷时用于初始化。已有数据库不能只改 `.env` 密码。
 
 ### 3.3 检查 Git 中的模型

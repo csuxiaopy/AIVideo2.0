@@ -5,17 +5,17 @@ import TechIcon from './components/TechIcon.vue'
 import EvidencePreview from './components/EvidencePreview.vue'
 import CameraBasicFields from './components/CameraBasicFields.vue'
 import BatchCameraModal from './components/BatchCameraModal.vue'
-import type { Camera, DrawLayer, Mode, Point, SceneType, SceneTemplate } from './types'
+import type { Camera, DrawLayer, Mode, Point, SceneType, SceneTemplate, TrafficCameraSummary, TrafficSummary } from './types'
 
 const modeInfo:Record<Mode,{name:string;icon:string;note:string}> = {
   off_duty:{name:'离岗检测',icon:'offDuty',note:'排班内持续无人'},
-  phone_use:{name:'玩手机检测',icon:'phone',note:'每 3 分钟单帧大模型直检'},
+  phone_use:{name:'玩手机检测',icon:'phone',note:'每 3 分钟单帧大模型联合检测'},
   people_flow:{name:'人员计数',icon:'traffic',note:'跨线进出统计'},
   fire_smoke:{name:'烟火检测',icon:'flame',note:'本地安全模型'},
   intrusion:{name:'区域入侵',icon:'intrusion',note:'进入禁区立即告警'},
   black_screen:{name:'屏幕黑屏',icon:'blackScreen',note:'亮度与内容变化'},
   on_duty:{name:'在岗判定',icon:'onDuty',note:'高级模式'},
-  smoking:{name:'人员吸烟',icon:'smoking',note:'实验模式'},
+  smoking:{name:'人员吸烟',icon:'smoking',note:'每 3 分钟单帧大模型联合检测'},
 }
 const sceneInfo:Record<SceneType,{name:string;icon:string;en:string}> = {
   workstation:{name:'员工工位',icon:'workstation',en:'WORKSTATION'},
@@ -25,9 +25,10 @@ const sceneInfo:Record<SceneType,{name:string;icon:string;en:string}> = {
 }
 const tabs = [
   {key:'dashboard',name:'监控总览',icon:'dashboard',en:'MONITORING CENTER'},
-  {key:'cameras',name:'摄像头配置',icon:'video',en:'CAMERA MANAGEMENT'},
-  {key:'alerts',name:'告警中心',icon:'alert',en:'AI ALERT CENTER'},
   {key:'traffic',name:'人流报表',icon:'traffic',en:'PEOPLE FLOW'},
+  {key:'alerts',name:'告警中心',icon:'alert',en:'AI ALERT CENTER'},
+  {key:'cameras',name:'摄像头配置',icon:'video',en:'CAMERA MANAGEMENT'},
+  {key:'webhooks',name:'企业微信机器人',icon:'webhook',en:'WECOM DELIVERY'},
   {key:'settings',name:'系统配置',icon:'settings',en:'SYSTEM SETTINGS'},
 ]
 const active = ref('dashboard')
@@ -36,7 +37,8 @@ const dashboard = ref<any>({runtime:{}})
 const cameras = ref<Camera[]>([])
 const alerts = ref<any[]>([])
 const analyses = ref<any[]>([])
-const traffic = ref<any[]>([])
+const emptyTrafficSummary = ():TrafficSummary => ({date:'',timezone:'Asia/Shanghai',total_flow_today:0,current_people:0,entered_today:0,exited_today:0,flow_camera_count:0,store_trend:[],cameras:[],current_ranking:[],flow_ranking:[]})
+const trafficSummary = ref<TrafficSummary>(emptyTrafficSummary())
 const templates = ref<SceneTemplate[]>([])
 const capabilities = ref<any[]>([])
 const toast = reactive({show:false,message:'',kind:'ok'})
@@ -99,6 +101,16 @@ const filteredAlerts = ref<any[]|null>(null)
 let alertFilterSeq = 0
 const hasAlertFilter = computed(()=>!!alertFilter.mode||!!alertFilter.severity)
 const alertRows = computed(()=>filteredAlerts.value??alerts.value)
+const selectedAlertIds=ref<number[]>([])
+const expandedDeliveryIds=ref<number[]>([])
+const webhookTargets=ref<any[]>([])
+const webhookForm=reactive<any>({id:null,name:'',enabled:false,url:'',auto_severities:[]})
+const sendModal=ref(false)
+const selectedTargetIds=ref<number[]>([])
+const enabledWebhookTargets=computed(()=>webhookTargets.value.filter(target=>target.enabled&&target.url))
+const allAlertsSelected=computed(()=>alertRows.value.length>0&&alertRows.value.every(row=>selectedAlertIds.value.includes(row.id)))
+const toggleAllAlerts=()=>{selectedAlertIds.value=allAlertsSelected.value?[]:alertRows.value.map(row=>row.id)}
+const toggleDeliveryDetails=(id:number)=>{expandedDeliveryIds.value=expandedDeliveryIds.value.includes(id)?expandedDeliveryIds.value.filter(x=>x!==id):[...expandedDeliveryIds.value,id]}
 const applyAlertFilter = async () => {
   if(!hasAlertFilter.value){filteredAlerts.value=null;return}
   const seq=++alertFilterSeq
@@ -116,9 +128,9 @@ const loadAll = async (silent=false) => {
   try {
     const [d,c,a,n,t,st,cp,ds] = await Promise.all([
       api('/api/dashboard'), api('/api/cameras'), api('/api/alerts?limit=100'), api('/api/analyses?limit=100'),
-      api('/api/traffic?limit=200'), api('/api/scene-templates'), api('/api/capabilities'), api('/api/settings/display'),
+      api<TrafficSummary>('/api/traffic/summary'), api('/api/scene-templates'), api('/api/capabilities'), api('/api/settings/display'),
     ])
-    dashboard.value=d; cameras.value=c; alerts.value=a; analyses.value=n; traffic.value=t; templates.value=st; capabilities.value=cp
+    dashboard.value=d; cameras.value=c; alerts.value=a; analyses.value=n; trafficSummary.value=t; templates.value=st; capabilities.value=cp
     Object.assign(displaySettings,ds)
     if(active.value==='traffic'&&!displaySettings.show_traffic_report) setTab('dashboard')
     if(hasAlertFilter.value) void applyAlertFilter()
@@ -220,12 +232,12 @@ const secondShift = computed(()=>{const d=Object.keys(editForm.schedule.weekly||
 const syncShifts=()=>{for(const d of Object.keys(editForm.schedule.weekly||{})) editForm.schedule.weekly[d]=[deepCopy(firstShift.value),deepCopy(secondShift.value)]}
 
 const modelSettings=reactive<any>({provider:'mock',base_url:'',api_key:'',economy_model:'qwen-vl',enhanced_model:'qwen-vl-max',api_key_configured:false})
-const webhookSettings=reactive<any>({enabled:false,url:'',secret:'',secret_configured:false})
 const detectorSettings=reactive<any>({general_model:'yolo26s.pt',general_device:'cpu',fire_smoke_model:'models/fire_smoke_yolov8.pt',fire_smoke_device:'cpu',model_sha256:'',license_name:'AGPL-3.0 (internal pilot only)',runtime:{}})
 const retentionSettings=reactive<any>({alert_retention_days:30,auto_cleanup_enabled:true})
 const displaySettings=reactive({show_traffic_report:true,show_current_store_count:true})
 const visibleTabs=computed(()=>tabs.filter(tab=>tab.key!=='traffic'||displaySettings.show_traffic_report))
-const loadSettings=async()=>{try{const [m,w,d,r,s]=await Promise.all([api('/api/settings/models'),api('/api/settings/webhook'),api('/api/settings/detectors'),api('/api/settings/retention'),api('/api/settings/display')]);Object.assign(modelSettings,m);Object.assign(webhookSettings,w);Object.assign(detectorSettings,d);Object.assign(retentionSettings,r);Object.assign(displaySettings,s)}catch(error:any){notify(`系统配置读取失败：${error.message}`,'error')}}
+const loadSettings=async()=>{try{const [m,d,r,s]=await Promise.all([api('/api/settings/models'),api('/api/settings/detectors'),api('/api/settings/retention'),api('/api/settings/display')]);Object.assign(modelSettings,m);Object.assign(detectorSettings,d);Object.assign(retentionSettings,r);Object.assign(displaySettings,s)}catch(error:any){notify(`系统配置读取失败：${error.message}`,'error')}}
+const loadWebhooks=async()=>{try{const result=await api('/api/settings/webhooks');webhookTargets.value=result.items}catch(error:any){notify(`Webhook 配置读取失败：${error.message}`,'error')}}
 const saveDisplaySettings=async()=>{try{Object.assign(displaySettings,await api('/api/settings/display',{method:'PATCH',body:JSON.stringify(displaySettings)}));if(active.value==='traffic'&&!displaySettings.show_traffic_report)setTab('dashboard');notify('人流数据展示设置已保存')}catch(error:any){notify(error.message,'error');await loadSettings()}}
 const saveModels=async()=>{try{
   const baseUrl=String(modelSettings.base_url||'').trim().replace(/\/+$/,'')
@@ -235,7 +247,13 @@ const saveModels=async()=>{try{
   await api('/api/settings/models',{method:'PUT',body:JSON.stringify(modelSettings)});notify('视觉大模型配置已保存');await loadSettings()
 }catch(error:any){notify(error.message,'error')}}
 const testModels=async()=>{testing.value=true;try{const r=await api('/api/settings/models/test',{method:'POST'});notify(`模型连接成功，延迟 ${r.latency_ms||0}ms`)}catch(error:any){notify(error.message,'error')}finally{testing.value=false}}
-const saveWebhook=async()=>{try{await api('/api/settings/webhook',{method:'PUT',body:JSON.stringify(webhookSettings)});notify('Webhook 配置已保存');await loadSettings()}catch(error:any){notify(error.message,'error')}}
+const resetWebhookForm=()=>Object.assign(webhookForm,{id:null,name:'',enabled:false,url:'',auto_severities:[]})
+const editWebhook=(target:any)=>Object.assign(webhookForm,{...target,auto_severities:[...target.auto_severities]})
+const saveWebhook=async()=>{try{const id=webhookForm.id;const path=id?`/api/settings/webhooks/${id}`:'/api/settings/webhooks';await api(path,{method:id?'PUT':'POST',body:JSON.stringify(webhookForm)});notify(`Webhook 已${id?'更新':'新增'}`);resetWebhookForm();await loadWebhooks()}catch(error:any){notify(error.message,'error')}}
+const removeWebhook=async(target:any)=>{const ok=await dialogConfirm({title:'删除 Webhook',message:`确定删除「${target.name}」？历史投递记录仍会保留。`,confirmText:'删除',danger:true});if(!ok)return;try{await api(`/api/settings/webhooks/${target.id}`,{method:'DELETE'});notify('Webhook 已删除');if(webhookForm.id===target.id)resetWebhookForm();await loadWebhooks()}catch(error:any){notify(error.message,'error')}}
+const testWebhook=async(target:any)=>{try{await api(`/api/settings/webhooks/${target.id}/test`,{method:'POST'});notify(`${target.name} 连接测试成功`)}catch(error:any){notify(error.message,'error')}}
+const openWebhookSend=()=>{if(!selectedAlertIds.value.length){notify('请先选择告警','error');return}selectedTargetIds.value=[];sendModal.value=true}
+const manualSend=async()=>{if(!selectedTargetIds.value.length){notify('请选择至少一个 Webhook','error');return}try{const result=await api('/api/alerts/webhook-send',{method:'POST',body:JSON.stringify({alert_ids:selectedAlertIds.value,webhook_target_ids:selectedTargetIds.value})});notify(`已完成 ${result.deliveries} 次投递`);sendModal.value=false;selectedAlertIds.value=[];await loadAll(true)}catch(error:any){notify(error.message,'error')}}
 const saveRetention=async()=>{try{await api('/api/settings/retention',{method:'PUT',body:JSON.stringify(retentionSettings)});notify('数据保留策略已保存');await loadSettings()}catch(error:any){notify(error.message,'error')}}
 const cleanupAlerts=async()=>{
   const answer=await dialogConfirm({title:'清理历史告警',message:'删除多少天前的告警记录及证据图片？范围 1-365 天。',input:true,inputLabel:'保留天数',inputValue:String(retentionSettings.alert_retention_days||30),confirmText:'继续',danger:true})
@@ -247,14 +265,24 @@ const cleanupAlerts=async()=>{
   try{const r=await api(`/api/alerts?before_days=${n}`,{method:'DELETE'});notify(`已清理 ${r.deleted} 条告警`);await loadAll(true)}catch(error:any){notify(error.message,'error')}
 }
 const saveDetectors=async()=>{try{const body={...detectorSettings};delete body.runtime;delete body.updated_at;await api('/api/settings/detectors',{method:'PUT',body:JSON.stringify(body)});notify('本地检测器配置已保存并重新加载');await loadSettings()}catch(error:any){notify(error.message,'error')}}
-const setTab=(name:string)=>{if(name==='traffic'&&!displaySettings.show_traffic_report){notify('人流报表已在系统配置中关闭','error');name='dashboard'}active.value=name;location.hash=name;if(name==='settings')loadSettings()}
+const setTab=(name:string)=>{if(name==='traffic'&&!displaySettings.show_traffic_report){notify('人流报表已在系统配置中关闭','error');name='dashboard'}active.value=name;location.hash=name;if(name==='settings')loadSettings();if(name==='webhooks')loadWebhooks()}
 const scrollToAdd=()=>document.getElementById('add-camera')?.scrollIntoView({behavior:'smooth'})
 const formatTime=(value?:string)=>value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'尚未抓帧'
 const shortTime=(value?:string)=>value?new Date(value).toLocaleTimeString('zh-CN',{hour12:false}):'--:--:--'
 const modeName=(mode:Mode)=>modeInfo[mode]?.name||mode
 const maskedSource=(source:string)=>source?source.replace(/(\/\/[^/:@]+:)[^@]*(?=@)/,'$1****'):''
 const onlineCount=computed(()=>cameras.value.filter(c=>c.online).length)
-const latestTraffic=computed(()=>{const seen=new Set<string>();return traffic.value.filter(x=>{if(seen.has(x.camera_id))return false;seen.add(x.camera_id);return true})})
+const chartMax=computed(()=>Math.max(1,...trafficSummary.value.store_trend.map(point=>point.current_people)))
+const chartPoints=computed(()=>trafficSummary.value.store_trend.map((point,index,rows)=>{
+  const x=rows.length===1?500:44+index*912/(rows.length-1)
+  const y=220-point.current_people/chartMax.value*176
+  return {x,y,...point}
+}))
+const chartPolyline=computed(()=>chartPoints.value.map(point=>`${point.x},${point.y}`).join(' '))
+const chartArea=computed(()=>chartPoints.value.length?`44,220 ${chartPolyline.value} ${chartPoints.value.at(-1)?.x||44},220`:'')
+const chartTicks=computed(()=>[chartMax.value,Math.round(chartMax.value/2),0])
+const trendTime=(value?:string)=>value?new Date(value).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false}):'--:--'
+const podiumRows=(rows:TrafficCameraSummary[])=>([rows[1]||null,rows[0]||null,rows[2]||null])
 const snapshotUrl=(camera:Camera)=>`/api/cameras/${encodeURIComponent(camera.id)}/snapshot?v=${encodeURIComponent(camera.last_frame_at||'none')}`
 
 const clearPreviewHeartbeat=()=>{
@@ -305,7 +333,7 @@ const connectWs=()=>{
   socket.onmessage=(event)=>{try{const data=JSON.parse(event.data);if(data.type==='alert'){notify(`${data.severity==='critical'?'紧急：':''}${data.camera_name||data.camera_id} ${modeName(data.mode)}：${data.reason}`,'alert');loadAll(true)}}catch{}}
   socket.onclose=()=>{wsOnline.value=false;window.setTimeout(connectWs,3000)}
 }
-onMounted(async()=>{await loadAll();const requested=location.hash.slice(1);if(tabs.some(tab=>tab.key===requested))setTab(requested);selectTemplate('workstation');connectWs();refreshTimer=window.setInterval(()=>loadAll(true),15000);clockTimer=window.setInterval(()=>now.value=new Date(),1000);window.addEventListener('beforeunload',abandonPreview);window.addEventListener('hashchange',()=>setTab(location.hash.slice(1)||'dashboard'))})
+onMounted(async()=>{await Promise.all([loadAll(),loadWebhooks()]);const requested=location.hash.slice(1);if(tabs.some(tab=>tab.key===requested))setTab(requested);selectTemplate('workstation');connectWs();refreshTimer=window.setInterval(()=>loadAll(true),15000);clockTimer=window.setInterval(()=>now.value=new Date(),1000);window.addEventListener('beforeunload',abandonPreview);window.addEventListener('hashchange',()=>setTab(location.hash.slice(1)||'dashboard'))})
 onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTimer);socket?.close();window.removeEventListener('beforeunload',abandonPreview);abandonPreview()})
 </script>
 
@@ -478,7 +506,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         <section class="panel table-panel">
           <div class="section-head">
             <div><h2>告警中心</h2><span class="head-en">AI ALERT CENTER</span><p>烟火紧急告警置顶；仅确认违规才告警</p></div>
-            <button class="link" @click="cleanupAlerts"><TechIcon name="trash" :size="13"/>清理历史</button>
+            <div class="actions"><button class="primary" :disabled="!selectedAlertIds.length" @click="openWebhookSend"><TechIcon name="webhook" :size="13"/>发送企业微信 ({{selectedAlertIds.length}})</button><button class="link" @click="cleanupAlerts"><TechIcon name="trash" :size="13"/>清理历史</button></div>
           </div>
           <div class="filter-bar">
             <label class="filter-item"><span class="filter-label">事件类型 / EVENT</span>
@@ -497,17 +525,21 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <span class="filter-count"><b>{{alertRows.length}}</b> / {{alerts.length}} <small>MATCHED / TOTAL</small></span>
           </div>
           <table v-if="alertRows.length">
-            <thead><tr><th>级别</th><th>证据</th><th>摄像头 / 场景</th><th>事件</th><th>区域</th><th>原因</th><th>时间</th></tr></thead>
+            <thead><tr><th><input type="checkbox" :checked="allAlertsSelected" @change="toggleAllAlerts"></th><th>级别</th><th>证据</th><th>摄像头 / 场景</th><th>事件</th><th>原因</th><th>Webhook</th><th>时间</th></tr></thead>
             <tbody>
-              <tr v-for="item in alertRows" :key="item.id" :class="`severity-${item.severity}`">
+              <template v-for="item in alertRows" :key="item.id">
+              <tr :class="`severity-${item.severity}`">
+                <td><input v-model="selectedAlertIds" type="checkbox" :value="item.id"></td>
                 <td><span class="severity-badge" :class="item.severity">{{item.severity||'normal'}}</span></td>
                 <td><EvidencePreview :src="item.evidence_url" alt="告警证据" /></td>
                 <td>{{item.camera_id}}<br><small>{{sceneInfo[cameras.find(c=>c.id===item.camera_id)?.scene_type||'custom'].name}}</small></td>
                 <td><span class="event-type">{{modeName(item.mode)}}</span></td>
-                <td>{{item.zone_name||'—'}}</td>
                 <td class="reason">{{item.reason}}</td>
+                <td><button v-if="item.webhook_delivery?.total" class="delivery-summary" @click="toggleDeliveryDetails(item.id)">{{item.webhook_delivery.delivered}}/{{item.webhook_delivery.total}} 成功</button><span v-else class="muted">未发送</span></td>
                 <td>{{formatTime(item.created_at)}}</td>
               </tr>
+              <tr v-if="expandedDeliveryIds.includes(item.id)" class="delivery-detail-row"><td colspan="8"><div class="delivery-list"><span v-for="delivery in item.webhook_delivery.items" :key="delivery.id" :class="delivery.status"><b>{{delivery.target_name}}</b><em>{{delivery.trigger==='manual'?'手动':'自动'}}</em><strong>{{delivery.status}}</strong><small v-if="delivery.error">{{delivery.error}}</small></span></div></td></tr>
+              </template>
             </tbody>
           </table>
           <div v-else-if="alerts.length" class="empty"><b>NO MATCHED ALERTS</b><p>当前筛选条件下没有匹配的告警</p><button class="link" @click="resetAlertFilter">清除筛选</button></div>
@@ -515,27 +547,84 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         </section>
       </section>
 
-      <!-- ============ 人流报表 PEOPLE FLOW ============ -->
-      <section v-else-if="active==='traffic'" class="page">
-        <div class="metrics">
-          <article><span>当前在店人数</span><span class="metric-en">IN-STORE NOW</span><strong>{{dashboard.current_people||0}}</strong><em>入口实时统计</em></article>
-          <article><span>今日进入</span><span class="metric-en">ENTERED TODAY</span><strong>{{latestTraffic.reduce((n,x)=>n+x.entered,0)}}</strong><em>跨线进入累计</em></article>
-          <article><span>今日离开</span><span class="metric-en">EXITED TODAY</span><strong>{{latestTraffic.reduce((n,x)=>n+x.exited,0)}}</strong><em>跨线离开累计</em></article>
-          <article><span>统计摄像头</span><span class="metric-en">FLOW CAMERAS</span><strong>{{cameras.filter(c=>c.modes.includes('people_flow')).length}}</strong><em>启用人员计数</em></article>
+      <!-- ============ 企业微信机器人 WECOM DELIVERY ============ -->
+      <section v-else-if="active==='webhooks'" class="page webhook-page">
+        <div class="webhook-layout">
+          <section class="panel webhook-form">
+            <div class="section-head"><div><h2>{{webhookForm.id?'编辑':'新增'}}企业微信机器人</h2><span class="head-en">WECOM BOT CONFIGURATION</span><p>告警将发送 Markdown 摘要和证据图片</p></div></div>
+            <label>名称<input v-model.trim="webhookForm.name" placeholder="值班告警群"></label>
+            <label>机器人 Webhook URL<input v-model.trim="webhookForm.url" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."></label>
+            <div class="field-title">自动发送告警级别</div>
+            <div class="severity-options"><label v-for="level in severityLevels" :key="level.value"><input v-model="webhookForm.auto_severities" type="checkbox" :value="level.value"><span :class="level.value">{{level.label}}</span></label></div>
+            <div class="inline-setting"><div><b>启用目标</b><small>关闭后不参与自动或手动发送</small></div><label class="switch"><input v-model="webhookForm.enabled" type="checkbox"><span></span></label></div>
+            <div class="actions"><button class="primary" @click="saveWebhook">{{webhookForm.id?'保存修改':'新增 Webhook'}}</button><button v-if="webhookForm.id" class="ghost" @click="resetWebhookForm">取消编辑</button></div>
+          </section>
+          <section class="webhook-cards">
+            <article v-for="target in webhookTargets" :key="target.id" class="panel webhook-card" :class="{disabled:!target.enabled}">
+              <div class="section-head"><div><h2>{{target.name}}</h2><span class="head-en">TARGET #{{target.id}}</span></div><span class="status-dot" :class="{ready:target.enabled,warn:!target.enabled}">{{target.enabled?'● ENABLED':'● DISABLED'}}</span></div>
+              <code>{{target.url}}</code>
+              <div class="webhook-levels"><span v-for="level in target.auto_severities" :key="level" :class="level">{{level}}</span><small v-if="!target.auto_severities.length">不自动发送</small></div>
+              <p>企业微信机器人 · 更新于 {{formatTime(target.updated_at)}}</p>
+              <div class="actions"><button class="ghost" @click="editWebhook(target)"><TechIcon name="edit" :size="12"/>编辑</button><button class="ghost" @click="testWebhook(target)"><TechIcon name="zap" :size="12"/>测试</button><button class="danger" @click="removeWebhook(target)"><TechIcon name="trash" :size="12"/>删除</button></div>
+            </article>
+            <div v-if="!webhookTargets.length" class="panel empty"><b>NO WEBHOOK TARGET</b><p>尚未配置 Webhook</p></div>
+          </section>
         </div>
-        <section class="panel table-panel">
-          <div class="section-head"><div><h2>人流明细</h2><span class="head-en">PEOPLE FLOW RECORDS</span></div></div>
-          <table v-if="traffic.length">
-            <thead><tr><th>摄像头</th><th>时间</th><th>当前人数</th><th>进入</th><th>离开</th></tr></thead>
-            <tbody><tr v-for="row in traffic" :key="`${row.camera_id}-${row.bucket_start}`"><td>{{row.camera_id}}</td><td>{{formatTime(row.bucket_start)}}</td><td>{{row.current_count}}</td><td class="green">+{{row.entered}}</td><td>-{{row.exited}}</td></tr></tbody>
-          </table>
-          <div v-else class="empty"><b>NO FLOW DATA</b><p>暂无人流数据</p></div>
+      </section>
+
+      <!-- ============ 人流报表 PEOPLE FLOW ============ -->
+      <section v-else-if="active==='traffic'" class="page traffic-dashboard">
+        <div class="metrics">
+          <article><span>今日总人流</span><span class="metric-en">TOTAL FLOW TODAY</span><strong>{{trafficSummary.total_flow_today}}</strong><em>跨线进入累计</em></article>
+          <article><span>当前在店人数</span><span class="metric-en">IN-STORE NOW</span><strong>{{trafficSummary.current_people}}</strong><em>各统计点最新人数</em></article>
+          <article><span>今日离店</span><span class="metric-en">EXITED TODAY</span><strong>{{trafficSummary.exited_today}}</strong><em>跨线离开累计</em></article>
+          <article><span>统计摄像头</span><span class="metric-en">FLOW CAMERAS</span><strong>{{trafficSummary.flow_camera_count}}</strong><em>启用人员计数</em></article>
+        </div>
+        <section class="panel traffic-trend-panel">
+          <div class="section-head"><div><h2>今日在店人数趋势</h2><span class="head-en">IN-STORE TREND · {{trafficSummary.date}}</span></div><div class="trend-current"><small>当前人数</small><strong>{{trafficSummary.current_people}}</strong></div></div>
+          <div v-if="chartPoints.length" class="traffic-chart">
+            <svg viewBox="0 0 1000 260" preserveAspectRatio="none" role="img" aria-label="今日在店人数趋势折线图">
+              <defs><linearGradient id="trafficArea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#00e5ff" stop-opacity=".34"/><stop offset="1" stop-color="#008cff" stop-opacity="0"/></linearGradient></defs>
+              <g class="chart-grid"><line v-for="y in [44,132,220]" :key="y" x1="44" x2="956" :y1="y" :y2="y"/></g>
+              <text v-for="(tick,index) in chartTicks" :key="tick+index" x="34" :y="[48,136,224][index]" text-anchor="end" class="chart-axis-label">{{tick}}</text>
+              <polygon :points="chartArea" fill="url(#trafficArea)"/>
+              <polyline :points="chartPolyline" class="chart-line"/>
+              <circle :cx="chartPoints.at(-1)?.x" :cy="chartPoints.at(-1)?.y" r="5" class="chart-current-dot"/>
+            </svg>
+            <div class="chart-time-axis"><span>{{trendTime(trafficSummary.store_trend[0]?.time)}}</span><span>{{trendTime(trafficSummary.store_trend[Math.floor(trafficSummary.store_trend.length/2)]?.time)}}</span><span>{{trendTime(trafficSummary.store_trend.at(-1)?.time)}}</span></div>
+          </div>
+          <div v-else class="empty trend-empty"><b>NO FLOW DATA TODAY</b><p>今日尚未产生人流统计数据</p></div>
+        </section>
+
+        <div class="ranking-grid">
+          <section v-for="ranking in [{title:'当前在店人数排名',en:'IN-STORE RANKING',rows:trafficSummary.current_ranking,key:'current_count'},{title:'今日人流排名',en:'DAILY FLOW RANKING',rows:trafficSummary.flow_ranking,key:'entered_today'}]" :key="ranking.en" class="panel podium-panel">
+            <div class="section-head"><div><h2>{{ranking.title}}</h2><span class="head-en">{{ranking.en}}</span></div></div>
+            <div class="podium">
+              <article v-for="(row,index) in podiumRows(ranking.rows)" :key="row?.camera_id||index" :class="`place-${[2,1,3][index]}`">
+                <div class="podium-person"><span>{{[2,1,3][index]}}</span><b>{{row?.camera_name||'暂无'}}</b><small>{{row?.camera_id||'—'}}</small><strong>{{row ? row[ranking.key as keyof TrafficCameraSummary] : 0}}</strong></div>
+                <div class="podium-step">NO.{{[2,1,3][index]}}</div>
+              </article>
+            </div>
+          </section>
+        </div>
+
+        <section class="traffic-camera-section">
+          <div class="section-head"><div><h2>摄像头统计</h2><span class="head-en">CAMERA FLOW OVERVIEW</span><p>按今日总人流从高到低排列</p></div></div>
+          <div v-if="trafficSummary.cameras.length" class="traffic-camera-grid">
+            <article v-for="camera in trafficSummary.cameras" :key="camera.camera_id" class="panel traffic-camera-card">
+              <header><div><h3>{{camera.camera_name}}</h3><code>{{camera.camera_id}}</code></div><span class="status-dot" :class="camera.online?'ready':'bad'">{{camera.online?'在线':'离线'}}</span></header>
+              <div class="camera-flow-main"><div><small>今日总人流</small><strong>{{camera.entered_today}}</strong></div><div><small>当前人数</small><strong>{{camera.current_count}}</strong></div></div>
+              <div class="camera-flow-detail"><span>进入 <b class="green">+{{camera.entered_today}}</b></span><span>离开 <b>-{{camera.exited_today}}</b></span></div>
+              <footer>最后统计：{{camera.last_stat_at?formatTime(camera.last_stat_at):'暂无数据'}}</footer>
+            </article>
+          </div>
+          <div v-else class="panel empty"><b>NO FLOW CAMERA</b><p>尚未配置人员计数摄像头</p></div>
         </section>
       </section>
 
       <!-- ============ 系统配置 SYSTEM SETTINGS ============ -->
-      <section v-else class="page settings-grid">
-        <section class="panel">
+      <section v-else-if="active==='settings'" class="page settings-grid">
+        <section class="panel settings-card settings-card-display">
           <div class="section-head"><div><h2>人流数据展示</h2><span class="head-en">DATA DISPLAY SETTINGS</span><p>仅控制界面展示，不影响人员检测、统计任务和历史数据。</p></div></div>
           <div class="display-settings">
             <div class="inline-setting"><div><b>显示人流报表</b><small>控制左侧“人流报表”菜单及页面访问</small><span class="switch-label">{{displaySettings.show_traffic_report?'ENABLED':'DISABLED'}}</span></div><label class="switch"><input v-model="displaySettings.show_traffic_report" type="checkbox" @change="saveDisplaySettings"><span></span></label></div>
@@ -543,8 +632,14 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
           </div>
         </section>
 
-        <section class="panel">
-          <div class="section-head"><div><h2>外部视觉大模型</h2><span class="head-en">VISION LANGUAGE MODEL</span><p>仅用于玩手机与实验性人员吸烟复核</p></div><span class="status-dot" :class="{ready:modelSettings.api_key_configured||modelSettings.provider==='mock',warn:!modelSettings.api_key_configured&&modelSettings.provider!=='mock'}">{{modelSettings.api_key_configured?'● CONFIGURED':modelSettings.provider==='mock'?'● MOCK 模式':'● 未配置'}}</span></div>
+        <section class="panel settings-card settings-card-retention">
+          <div class="section-head"><div><h2>数据保留</h2><span class="head-en">DATA RETENTION</span><p>到期自动清理告警记录与证据图片</p></div><label class="switch"><input v-model="retentionSettings.auto_cleanup_enabled" type="checkbox"><span></span></label></div>
+          <label>告警保留天数<input v-model.number="retentionSettings.alert_retention_days" type="number" min="1" max="365"><small class="field-hint">超过该天数的告警与证据会被自动清理；也可在告警中心手动清理</small></label>
+          <button class="primary" @click="saveRetention">保存保留策略</button>
+        </section>
+
+        <section class="panel settings-card settings-card-model">
+          <div class="section-head"><div><h2>外部视觉大模型</h2><span class="head-en">VISION LANGUAGE MODEL</span><p>用于玩手机与人员吸烟单帧联合检测</p></div><span class="status-dot" :class="{ready:modelSettings.api_key_configured||modelSettings.provider==='mock',warn:!modelSettings.api_key_configured&&modelSettings.provider!=='mock'}">{{modelSettings.api_key_configured?'● CONFIGURED':modelSettings.provider==='mock'?'● MOCK 模式':'● 未配置'}}</span></div>
           <label>提供商<select v-model="modelSettings.provider"><option value="openai_compatible">OpenAI 兼容接口</option><option value="mock">模拟模式</option></select></label>
           <label>Base URL<input v-model.trim="modelSettings.base_url" placeholder="http://192.168.1.100:8000/v1"><small class="field-hint">支持 HTTP / HTTPS：内网模型服务可使用 HTTP，公网服务建议 HTTPS。地址需包含 /v1，末尾斜杠可省略。HTTP 明文传输存在 API Key 泄露风险，建议仅用于受信内网。</small></label>
           <label>API Key<input v-model="modelSettings.api_key" type="password" placeholder="留空表示保持现有密钥"><small class="field-hint">首次配置必须填写；保存后留空表示继续使用现有密钥。密钥不会回显。</small></label>
@@ -552,7 +647,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
           <div class="actions"><button class="primary" @click="saveModels">保存</button><button class="ghost" :disabled="testing" @click="testModels"><TechIcon name="zap" :size="13"/>{{testing?'TESTING…':'测试已保存配置'}}</button></div>
         </section>
 
-        <section class="panel">
+        <section class="panel settings-card settings-card-detector">
           <div class="section-head"><div><h2>本地检测器</h2><span class="head-en">LOCAL DETECTORS</span><p>通用 YOLO 与烟火模型独立加载</p></div></div>
           <div class="detector-status">
             <article><span>通用 YOLO</span><b>{{detectorSettings.runtime?.general?.status||'unknown'}}</b><small>{{detectorSettings.runtime?.general?.latency_ms||0}} ms</small></article>
@@ -565,20 +660,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
           <button class="primary" @click="saveDetectors">保存并重载</button>
         </section>
 
-        <section class="panel">
-          <div class="section-head"><div><h2>Webhook</h2><span class="head-en">WEBHOOK NOTIFICATION</span><p>HMAC-SHA256 签名，失败最多重试 5 次</p></div><label class="switch"><input v-model="webhookSettings.enabled" type="checkbox"><span></span></label></div>
-          <label>HTTPS URL<input v-model="webhookSettings.url" placeholder="https://your-service/events"></label>
-          <label>签名密钥<input v-model="webhookSettings.secret" type="password" placeholder="留空表示保持现有密钥"></label>
-          <button class="primary" @click="saveWebhook">保存 Webhook</button>
-        </section>
-
-        <section class="panel">
-          <div class="section-head"><div><h2>数据保留</h2><span class="head-en">DATA RETENTION</span><p>到期自动清理告警记录与证据图片</p></div><label class="switch"><input v-model="retentionSettings.auto_cleanup_enabled" type="checkbox"><span></span></label></div>
-          <label>告警保留天数<input v-model.number="retentionSettings.alert_retention_days" type="number" min="1" max="365"><small class="field-hint">超过该天数的告警与证据会被自动清理；也可在告警中心手动清理</small></label>
-          <button class="primary" @click="saveRetention">保存保留策略</button>
-        </section>
-
-        <section class="panel">
+        <section class="panel settings-card settings-card-capabilities">
           <div class="section-head"><div><h2>能力注册表</h2><span class="head-en">CAPABILITY REGISTRY</span><p>计划能力只展示，不会进入检测任务</p></div></div>
           <div class="capability-list"><span v-for="item in capabilities" :key="item.id"><b>{{item.name}}</b><em :class="item.availability">{{item.availability}}</em></span></div>
         </section>
@@ -643,14 +725,25 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <div class="form-row"><label>上午开始<input v-model="firstShift.start" type="time" @change="syncShifts"></label><label>上午结束<input v-model="firstShift.end" type="time" @change="syncShifts"></label></div>
             <div class="form-row"><label>下午开始<input v-model="secondShift.start" type="time" @change="syncShifts"></label><label>下午结束<input v-model="secondShift.end" type="time" @change="syncShifts"></label></div>
             <label>离岗时长（秒）<input v-model.number="editForm.options.off_duty_seconds" type="number" min="30"></label>
-            <label v-if="editForm.modes.includes('smoking')">吸烟复核间隔（秒）<input v-model.number="editForm.options.behavior_interval_seconds" type="number" min="5"></label>
-            <div v-if="editForm.modes.includes('phone_use')" class="config-note"><b>玩手机检测</b><p>每 3 分钟抽取当前单帧，直接交由经济模型初筛和增强模型复核。</p></div>
+            <div v-if="editForm.modes.includes('phone_use') || editForm.modes.includes('smoking')" class="config-note"><b>行为联合检测</b><p>上班时间内每 3 分钟抽取当前单帧，一次检测已启用的玩手机和吸烟行为；经济模型发现疑点时统一交由增强模型复核。</p></div>
             <div class="form-row"><label>火焰阈值<input v-model.number="editForm.options.fire_confidence" type="number" min="0" max="1" step=".05"></label><label>烟雾阈值<input v-model.number="editForm.options.smoke_confidence" type="number" min="0" max="1" step=".05"></label></div>
             <label>入侵置信度<input v-model.number="editForm.options.intrusion_confidence" type="number" min="0" max="1" step=".05"></label>
             <div class="config-note"><b>全天安全模式</b><p>烟火、区域入侵、黑屏忽略此处排班，始终运行。</p></div>
             <button class="primary wide" @click="saveEditor">保存策略</button>
           </aside>
         </div>
+      </section>
+    </div>
+
+    <!-- ============ 手动发送 Webhook ============ -->
+    <div v-if="sendModal" class="modal" role="dialog" aria-modal="true" @click.self="sendModal=false">
+      <section class="confirm-modal">
+        <header class="modal-head"><div><h2>发送告警到企业微信</h2><span class="head-en">MANUAL DELIVERY</span><p>已选择 {{selectedAlertIds.length}} 条告警</p></div><button @click="sendModal=false"><TechIcon name="close" :size="16"/></button></header>
+        <div class="confirm-body target-picker">
+          <label v-for="target in enabledWebhookTargets" :key="target.id"><input v-model="selectedTargetIds" type="checkbox" :value="target.id"><span><b>{{target.name}}</b><small>{{target.url}}</small></span></label>
+          <p v-if="!enabledWebhookTargets.length">没有已启用且配置完整的企业微信机器人。</p>
+        </div>
+        <footer class="confirm-foot"><button class="ghost" @click="sendModal=false">取消</button><button class="primary" :disabled="!selectedTargetIds.length" @click="manualSend">确认发送</button></footer>
       </section>
     </div>
 

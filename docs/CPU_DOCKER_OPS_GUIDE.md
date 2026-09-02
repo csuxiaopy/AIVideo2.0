@@ -120,7 +120,6 @@ FIRE_SMOKE_MODEL=models/fire_smoke_yolov8.pt
 FIRE_SMOKE_DEVICE=cpu
 ANALYSIS_WORKERS=2
 FIRE_SMOKE_WORKERS=1
-SHADOW_MODE=true
 ```
 
 镜像源变量（均有 daocloud 国内默认值，一般无需设置，仅在特殊网络环境覆盖）：

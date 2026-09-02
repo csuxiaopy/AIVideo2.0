@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 
 from backend.api.context import context
 from backend.api.presenters import alert_public, analysis_public
+from backend.schemas import WebhookManualSend
 
 
 router = APIRouter()
@@ -33,7 +34,15 @@ async def alerts(
     severity: str | None = None,
 ) -> list[dict[str, Any]]:
     rows = context.repository.list_alerts(limit, camera_id, mode, severity)
-    return [alert_public(row) for row in rows]
+    return [alert_public(row, context.repository.webhook_deliveries(row.id)) for row in rows]
+
+
+@router.post("/api/alerts/webhook-send")
+async def send_alerts_to_webhooks(payload: WebhookManualSend) -> dict[str, int]:
+    try:
+        return await context.require_runtime().alerts.manual_send(payload.alert_ids, payload.webhook_target_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.delete("/api/alerts")
@@ -71,6 +80,11 @@ async def traffic(
         }
         for row in context.repository.traffic(camera_id, limit)
     ]
+
+
+@router.get("/api/traffic/summary")
+async def traffic_summary() -> dict[str, Any]:
+    return context.repository.traffic_summary()
 
 
 @router.get("/api/runtime/workers")
