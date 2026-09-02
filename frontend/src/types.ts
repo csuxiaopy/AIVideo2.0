@@ -19,7 +19,7 @@ export interface Camera {
   enabled: boolean
   online: boolean
   camera_online: boolean
-  frame_interval_seconds: 5 | 10 | 20 | 30 | 60 | 120
+  frame_interval_seconds: 1 | 5 | 10 | 20 | 30 | 60 | 120
   last_frame_at?: string
   last_analysis_at?: string
   preview_active: boolean

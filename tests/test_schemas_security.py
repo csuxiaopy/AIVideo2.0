@@ -91,6 +91,18 @@ def test_camera_patch_supports_complete_business_edit():
     assert patch.frame_interval_seconds == 20
 
 
+def test_camera_frame_interval_supports_one_second():
+    camera = CameraCreate(
+        id="fast-camera",
+        name="高频分析摄像头",
+        rtsp_url="rtsp://host/live",
+        modes=[Mode.BLACK_SCREEN],
+        frame_interval_seconds=1,
+    )
+    assert camera.frame_interval_seconds == 1
+    assert CameraPatch(frame_interval_seconds=1).frame_interval_seconds == 1
+
+
 def test_display_settings_accept_partial_updates():
     assert DisplaySettingsUpdate(show_traffic_report=False).model_dump(exclude_none=True) == {
         "show_traffic_report": False

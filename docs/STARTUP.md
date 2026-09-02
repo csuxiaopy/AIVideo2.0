@@ -78,6 +78,8 @@ FRAME_CAPTURE_TIMEOUT_SECONDS=15
 
 开发环境中的 `DATABASE_URL` 和 `REDIS_URL` 由 `compose.cpu.yml` 自动注入，分别指向容器网络内的 `postgres` 和 `redis`，无需改成本机地址。
 
+摄像头的 YOLO 抽帧频率在前端“摄像头配置”中逐路设置，支持每 1、5、10、20、30、60、120 秒抓取一帧，保存后调度器立即按新频率重排。每 1 秒一帧会明显增加 FFmpeg 连接、CPU/GPU 推理和分析记录写入压力，建议只给少量重点摄像头使用，并观察 `/api/runtime/workers`、`/metrics` 与容器资源占用后再逐步扩大。
+
 ### 2.3 检查模型
 
 ```powershell
@@ -225,6 +227,7 @@ FRAME_CAPTURE_TIMEOUT_SECONDS=15
 - `APP_ENCRYPTION_KEY` 用于加密 RTSP 密码和外部模型 API Key。投入使用后不能随意更换。
 - 首次上线先使用企业微信机器人的连接测试和告警中心手动发送验证，再勾选需要自动发送的告警级别。
 - `POSTGRES_PASSWORD` 只在首次创建数据库卷时用于初始化。已有数据库不能只改 `.env` 密码。
+- 摄像头抽帧频率支持 1、5、10、20、30、60、120 秒。生产环境使用 1 秒档前必须先做现场压测；它表示每秒启动一次单帧抓取与分析任务，并不等同于连续视频流的 1 FPS 解码。
 
 ### 3.3 检查 Git 中的模型
 
@@ -366,4 +369,3 @@ docker compose -f compose.cpu.yml logs --tail=100 redis
 
 从服务器宿主机确认 RTSP 地址和端口可达，并注意密码中的 `@` 应编码为 `%40`。系统周期任务使用短生命周期 FFmpeg 抓取单帧；单路超时不会阻塞其他摄像头。
 
-更多 CentOS 7、旧 Docker、备份及故障处理细节见 [CPU_DOCKER_OPS_GUIDE.md](CPU_DOCKER_OPS_GUIDE.md)。

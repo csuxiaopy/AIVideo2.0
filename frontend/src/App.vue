@@ -59,7 +59,7 @@ let refreshTimer:number|undefined
 let clockTimer:number|undefined
 let socket:WebSocket|undefined
 let previewHeartbeatTimer:number|undefined
-const frameIntervalOptions = [5,10,20,30,60,120] as const
+const frameIntervalOptions = [1,5,10,20,30,60,120] as const
 
 /* ---------- 顶栏时钟 / 全屏 / 系统状态 ---------- */
 const dateStr = computed(()=>now.value.toLocaleDateString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit'}).replace(/\//g,'-'))

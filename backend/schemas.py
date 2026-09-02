@@ -27,7 +27,7 @@ class SceneType(str, Enum):
 
 
 ALL_MODES = {mode.value for mode in Mode}
-FRAME_INTERVAL_CHOICES = {5, 10, 20, 30, 60, 120}
+FRAME_INTERVAL_CHOICES = {1, 5, 10, 20, 30, 60, 120}
 Point = tuple[Annotated[float, Field(ge=0, le=1)], Annotated[float, Field(ge=0, le=1)]]
 
 
@@ -108,7 +108,7 @@ class CameraCreate(BaseModel):
     @classmethod
     def valid_frame_interval(cls, value: int) -> int:
         if value not in FRAME_INTERVAL_CHOICES:
-            raise ValueError("抽帧频率必须是 5、10、20、30、60 或 120 秒")
+            raise ValueError("抽帧频率必须是 1、5、10、20、30、60 或 120 秒")
         return value
 
     @field_validator("rtsp_url")
@@ -151,7 +151,7 @@ class CameraPatch(BaseModel):
     @classmethod
     def valid_frame_interval(cls, value: int | None) -> int | None:
         if value is not None and value not in FRAME_INTERVAL_CHOICES:
-            raise ValueError("抽帧频率必须是 5、10、20、30、60 或 120 秒")
+            raise ValueError("抽帧频率必须是 1、5、10、20、30、60 或 120 秒")
         return value
 
     @field_validator("rtsp_url")
