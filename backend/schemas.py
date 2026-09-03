@@ -264,6 +264,31 @@ class DisplaySettingsUpdate(BaseModel):
     show_current_store_count: bool | None = None
 
 
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class PasswordChange(BaseModel):
+    old_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class UserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9._-]+$")
+    display_name: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class UserUpdate(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=100)
+    enabled: bool | None = None
+
+
+class PasswordReset(BaseModel):
+    new_password: str = Field(min_length=8, max_length=128)
+
+
 class VLMResult(BaseModel):
     mode: Mode
     status: str = Field(pattern=r"^(confirmed|suspected|uncertain|none)$")

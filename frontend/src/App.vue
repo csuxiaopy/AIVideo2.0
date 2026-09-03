@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { api } from './api'
+import { api, setCsrfToken, setUnauthorizedHandler } from './api'
 import TechIcon from './components/TechIcon.vue'
 import EvidencePreview from './components/EvidencePreview.vue'
 import CameraBasicFields from './components/CameraBasicFields.vue'
@@ -30,7 +30,19 @@ const tabs = [
   {key:'cameras',name:'摄像头配置',icon:'video',en:'CAMERA MANAGEMENT'},
   {key:'webhooks',name:'企业微信机器人',icon:'webhook',en:'WECOM DELIVERY'},
   {key:'settings',name:'系统配置',icon:'settings',en:'SYSTEM SETTINGS'},
+  {key:'users',name:'账号管理',icon:'users',en:'ACCOUNT MANAGEMENT'},
 ]
+type AuthUser = {id:number;username:string;display_name:string;role:'admin'|'user';enabled:boolean;created_at:string;updated_at:string}
+const authReady=ref(false)
+const currentUser=ref<AuthUser|null>(null)
+const isAdmin=computed(()=>currentUser.value?.role==='admin')
+const loginForm=reactive({username:'',password:''})
+const loginBusy=ref(false)
+const loginError=ref('')
+const passwordModal=ref(false)
+const passwordForm=reactive({old_password:'',new_password:'',confirm:''})
+const users=ref<AuthUser[]>([])
+const userForm=reactive({username:'',display_name:'',password:''})
 const active = ref('dashboard')
 const loading = ref(false)
 const dashboard = ref<any>({runtime:{}})
@@ -75,11 +87,11 @@ const toggleFullscreen = async () => {
 }
 
 /* ---------- 统一确认对话框（替代原生 confirm/prompt） ---------- */
-const confirmState = reactive<{show:boolean;title:string;message:string;input:boolean;inputLabel:string;inputValue:string;confirmText:string;danger:boolean;resolve?:(value:any)=>void}>(
-  {show:false,title:'',message:'',input:false,inputLabel:'',inputValue:'',confirmText:'确认',danger:false})
-const dialogConfirm = (options:{title:string;message:string;input?:boolean;inputLabel?:string;inputValue?:string;confirmText?:string;danger?:boolean}):Promise<any> =>
+const confirmState = reactive<{show:boolean;title:string;message:string;input:boolean;inputType:string;inputLabel:string;inputValue:string;confirmText:string;danger:boolean;resolve?:(value:any)=>void}>(
+  {show:false,title:'',message:'',input:false,inputType:'text',inputLabel:'',inputValue:'',confirmText:'确认',danger:false})
+const dialogConfirm = (options:{title:string;message:string;input?:boolean;inputType?:string;inputLabel?:string;inputValue?:string;confirmText?:string;danger?:boolean}):Promise<any> =>
   new Promise(resolve=>{
-    Object.assign(confirmState,{show:true,input:false,inputLabel:'',inputValue:'',confirmText:'确认',danger:false},options,{resolve})
+    Object.assign(confirmState,{show:true,input:false,inputType:'text',inputLabel:'',inputValue:'',confirmText:'确认',danger:false},options,{resolve})
   })
 const resolveConfirm = (value:any) => {
   confirmState.show=false
@@ -107,7 +119,7 @@ const webhookTargets=ref<any[]>([])
 const webhookForm=reactive<any>({id:null,name:'',enabled:false,url:'',auto_severities:[]})
 const sendModal=ref(false)
 const selectedTargetIds=ref<number[]>([])
-const enabledWebhookTargets=computed(()=>webhookTargets.value.filter(target=>target.enabled&&target.url))
+const enabledWebhookTargets=computed(()=>webhookTargets.value.filter(target=>target.enabled&&(!isAdmin.value||target.url)))
 const allAlertsSelected=computed(()=>alertRows.value.length>0&&alertRows.value.every(row=>selectedAlertIds.value.includes(row.id)))
 const toggleAllAlerts=()=>{selectedAlertIds.value=allAlertsSelected.value?[]:alertRows.value.map(row=>row.id)}
 const toggleDeliveryDetails=(id:number)=>{expandedDeliveryIds.value=expandedDeliveryIds.value.includes(id)?expandedDeliveryIds.value.filter(x=>x!==id):[...expandedDeliveryIds.value,id]}
@@ -126,12 +138,13 @@ const resetAlertFilter = () => {alertFilter.mode='';alertFilter.severity='';filt
 const loadAll = async (silent=false) => {
   if (!silent) loading.value=true
   try {
-    const [d,c,a,n,t,st,cp,ds] = await Promise.all([
+    const [d,c,a,n,t,ds] = await Promise.all([
       api('/api/dashboard'), api('/api/cameras'), api('/api/alerts?limit=100'), api('/api/analyses?limit=100'),
-      api<TrafficSummary>('/api/traffic/summary'), api('/api/scene-templates'), api('/api/capabilities'), api('/api/settings/display'),
+      api<TrafficSummary>('/api/traffic/summary'), api('/api/settings/display'),
     ])
-    dashboard.value=d; cameras.value=c; alerts.value=a; analyses.value=n; trafficSummary.value=t; templates.value=st; capabilities.value=cp
+    dashboard.value=d; cameras.value=c; alerts.value=a; analyses.value=n; trafficSummary.value=t
     Object.assign(displaySettings,ds)
+    if(isAdmin.value){const [st,cp]=await Promise.all([api('/api/scene-templates'),api('/api/capabilities')]);templates.value=st;capabilities.value=cp}
     if(active.value==='traffic'&&!displaySettings.show_traffic_report) setTab('dashboard')
     if(hasAlertFilter.value) void applyAlertFilter()
   } catch (error:any) { if(!silent) notify(error.message,'error') }
@@ -235,9 +248,9 @@ const modelSettings=reactive<any>({provider:'mock',base_url:'',api_key:'',econom
 const detectorSettings=reactive<any>({general_model:'yolo26s.pt',general_device:'cpu',fire_smoke_model:'models/fire_smoke_yolov8.pt',fire_smoke_device:'cpu',model_sha256:'',license_name:'AGPL-3.0 (internal pilot only)',runtime:{}})
 const retentionSettings=reactive<any>({alert_retention_days:30,auto_cleanup_enabled:true})
 const displaySettings=reactive({show_traffic_report:true,show_current_store_count:true})
-const visibleTabs=computed(()=>tabs.filter(tab=>tab.key!=='traffic'||displaySettings.show_traffic_report))
+const visibleTabs=computed(()=>tabs.filter(tab=>(isAdmin.value||['dashboard','traffic','alerts'].includes(tab.key))&&(tab.key!=='traffic'||displaySettings.show_traffic_report)))
 const loadSettings=async()=>{try{const [m,d,r,s]=await Promise.all([api('/api/settings/models'),api('/api/settings/detectors'),api('/api/settings/retention'),api('/api/settings/display')]);Object.assign(modelSettings,m);Object.assign(detectorSettings,d);Object.assign(retentionSettings,r);Object.assign(displaySettings,s)}catch(error:any){notify(`系统配置读取失败：${error.message}`,'error')}}
-const loadWebhooks=async()=>{try{const result=await api('/api/settings/webhooks');webhookTargets.value=result.items}catch(error:any){notify(`Webhook 配置读取失败：${error.message}`,'error')}}
+const loadWebhooks=async()=>{try{const result=await api(isAdmin.value?'/api/settings/webhooks':'/api/alert-webhook-targets');webhookTargets.value=result.items}catch(error:any){notify(`Webhook 配置读取失败：${error.message}`,'error')}}
 const saveDisplaySettings=async()=>{try{Object.assign(displaySettings,await api('/api/settings/display',{method:'PATCH',body:JSON.stringify(displaySettings)}));if(active.value==='traffic'&&!displaySettings.show_traffic_report)setTab('dashboard');notify('人流数据展示设置已保存')}catch(error:any){notify(error.message,'error');await loadSettings()}}
 const saveModels=async()=>{try{
   const baseUrl=String(modelSettings.base_url||'').trim().replace(/\/+$/,'')
@@ -256,7 +269,7 @@ const openWebhookSend=()=>{if(!selectedAlertIds.value.length){notify('请先选�
 const manualSend=async()=>{if(!selectedTargetIds.value.length){notify('请选择至少一个 Webhook','error');return}try{const result=await api('/api/alerts/webhook-send',{method:'POST',body:JSON.stringify({alert_ids:selectedAlertIds.value,webhook_target_ids:selectedTargetIds.value})});notify(`已完成 ${result.deliveries} 次投递`);sendModal.value=false;selectedAlertIds.value=[];await loadAll(true)}catch(error:any){notify(error.message,'error')}}
 const saveRetention=async()=>{try{await api('/api/settings/retention',{method:'PUT',body:JSON.stringify(retentionSettings)});notify('数据保留策略已保存');await loadSettings()}catch(error:any){notify(error.message,'error')}}
 const cleanupAlerts=async()=>{
-  const answer=await dialogConfirm({title:'清理历史告警',message:'删除多少天前的告警记录及证据图片？范围 1-365 天。',input:true,inputLabel:'保留天数',inputValue:String(retentionSettings.alert_retention_days||30),confirmText:'继续',danger:true})
+  const answer=await dialogConfirm({title:'清理历史告警',message:'删除多少天前的告警记录及证据图片？范围 1-365 天。',input:true,inputType:'number',inputLabel:'保留天数',inputValue:String(retentionSettings.alert_retention_days||30),confirmText:'继续',danger:true})
   if(answer===null||answer===false) return
   const n=parseInt(String(answer))
   if(isNaN(n)||n<1||n>365){notify('保留天数必须在 1-365 之间','error');return}
@@ -265,7 +278,7 @@ const cleanupAlerts=async()=>{
   try{const r=await api(`/api/alerts?before_days=${n}`,{method:'DELETE'});notify(`已清理 ${r.deleted} 条告警`);await loadAll(true)}catch(error:any){notify(error.message,'error')}
 }
 const saveDetectors=async()=>{try{const body={...detectorSettings};delete body.runtime;delete body.updated_at;await api('/api/settings/detectors',{method:'PUT',body:JSON.stringify(body)});notify('本地检测器配置已保存并重新加载');await loadSettings()}catch(error:any){notify(error.message,'error')}}
-const setTab=(name:string)=>{if(name==='traffic'&&!displaySettings.show_traffic_report){notify('人流报表已在系统配置中关闭','error');name='dashboard'}active.value=name;location.hash=name;if(name==='settings')loadSettings();if(name==='webhooks')loadWebhooks()}
+const setTab=(name:string)=>{if(!visibleTabs.value.some(tab=>tab.key===name))name='dashboard';if(name==='traffic'&&!displaySettings.show_traffic_report){notify('人流报表已在系统配置中关闭','error');name='dashboard'}active.value=name;location.hash=name;if(name==='settings')loadSettings();if(name==='webhooks')loadWebhooks();if(name==='users')loadUsers()}
 const scrollToAdd=()=>document.getElementById('add-camera')?.scrollIntoView({behavior:'smooth'})
 const formatTime=(value?:string)=>value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'尚未抓帧'
 const shortTime=(value?:string)=>value?new Date(value).toLocaleTimeString('zh-CN',{hour12:false}):'--:--:--'
@@ -296,8 +309,8 @@ const releasePreviewLease=(keepalive=false)=>{
   previewStreamUrl.value=''
   previewSessionId.value=''
   if(!camera||!sessionId) return Promise.resolve()
-  return fetch(`/api/cameras/${encodeURIComponent(camera.id)}/preview/stop`,{
-    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:sessionId}),keepalive,
+  return api(`/api/cameras/${encodeURIComponent(camera.id)}/preview/stop`,{
+    method:'POST',body:JSON.stringify({session_id:sessionId}),keepalive,
   }).then(()=>undefined).catch(()=>undefined)
 }
 const closePreview=async()=>{
@@ -327,18 +340,56 @@ const openPreview=async(camera:Camera)=>{
 }
 const abandonPreview=()=>{void releasePreviewLease(true)}
 
+const clearAuthenticatedState=()=>{
+  currentUser.value=null;setCsrfToken('');socket?.close();socket=undefined;wsOnline.value=false
+  window.clearInterval(refreshTimer);refreshTimer=undefined
+  active.value='dashboard'
+}
+const loadUsers=async()=>{if(!isAdmin.value)return;try{users.value=await api('/api/users')}catch(error:any){notify(error.message,'error')}}
+const login=async()=>{loginBusy.value=true;loginError.value='';try{
+  const result=await api<{user:AuthUser;csrf_token:string}>('/api/auth/login',{method:'POST',body:JSON.stringify(loginForm)})
+  currentUser.value=result.user;setCsrfToken(result.csrf_token);loginForm.password='';await startAuthenticated()
+}catch(error:any){loginError.value=error.message}finally{loginBusy.value=false}}
+const logout=async()=>{try{await api('/api/auth/logout',{method:'POST'})}catch{}finally{clearAuthenticatedState()}}
+const changePassword=async()=>{if(passwordForm.new_password!==passwordForm.confirm){notify('两次输入的新密码不一致','error');return}try{
+  await api('/api/auth/password',{method:'PUT',body:JSON.stringify({old_password:passwordForm.old_password,new_password:passwordForm.new_password})})
+  passwordModal.value=false;Object.assign(passwordForm,{old_password:'',new_password:'',confirm:''});clearAuthenticatedState();loginError.value='密码已修改，请重新登入'
+}catch(error:any){notify(error.message,'error')}}
+const createUserAccount=async()=>{try{await api('/api/users',{method:'POST',body:JSON.stringify(userForm)});Object.assign(userForm,{username:'',display_name:'',password:''});notify('普通用户已创建');await loadUsers()}catch(error:any){notify(error.message,'error')}}
+const toggleUser=async(user:AuthUser)=>{try{await api(`/api/users/${user.id}`,{method:'PATCH',body:JSON.stringify({enabled:!user.enabled})});notify(user.enabled?'账号已停用':'账号已启用');await loadUsers()}catch(error:any){notify(error.message,'error')}}
+const editUserName=async(user:AuthUser)=>{const value=await dialogConfirm({title:'修改显示名称',message:`账号：${user.username}`,input:true,inputLabel:'显示名称',inputValue:user.display_name,confirmText:'保存'});if(!value)return;try{await api(`/api/users/${user.id}`,{method:'PATCH',body:JSON.stringify({display_name:String(value)})});notify('显示名称已更新');await loadUsers()}catch(error:any){notify(error.message,'error')}}
+const resetUserPassword=async(user:AuthUser)=>{const value=await dialogConfirm({title:'重置密码',message:`为「${user.display_name}」设置新密码（8-128 位）。`,input:true,inputType:'password',inputLabel:'新密码',confirmText:'确认重置'});if(!value)return;try{await api(`/api/users/${user.id}/reset-password`,{method:'POST',body:JSON.stringify({new_password:String(value)})});notify('密码已重置，该账号的已有会话已注销')}catch(error:any){notify(error.message,'error')}}
+const deleteUserAccount=async(user:AuthUser)=>{const ok=await dialogConfirm({title:'删除账号',message:`确定删除「${user.display_name}（${user.username}）」？`,confirmText:'删除',danger:true});if(!ok)return;try{await api(`/api/users/${user.id}`,{method:'DELETE'});notify('账号已删除');await loadUsers()}catch(error:any){notify(error.message,'error')}}
+
+const startAuthenticated=async()=>{
+  await Promise.all([loadAll(),loadWebhooks()]);const requested=location.hash.slice(1);setTab(requested||'dashboard')
+  selectTemplate('workstation');connectWs();window.clearInterval(refreshTimer);refreshTimer=window.setInterval(()=>loadAll(true),15000)
+}
+
 const connectWs=()=>{
+  if(!currentUser.value)return
   const protocol=location.protocol==='https:'?'wss':'ws';socket=new WebSocket(`${protocol}://${location.host}/ws/events`)
   socket.onopen=()=>{wsOnline.value=true}
   socket.onmessage=(event)=>{try{const data=JSON.parse(event.data);if(data.type==='alert'){notify(`${data.severity==='critical'?'紧急：':''}${data.camera_name||data.camera_id} ${modeName(data.mode)}：${data.reason}`,'alert');loadAll(true)}}catch{}}
-  socket.onclose=()=>{wsOnline.value=false;window.setTimeout(connectWs,3000)}
+  socket.onclose=()=>{wsOnline.value=false;if(currentUser.value)window.setTimeout(connectWs,3000)}
 }
-onMounted(async()=>{await Promise.all([loadAll(),loadWebhooks()]);const requested=location.hash.slice(1);if(tabs.some(tab=>tab.key===requested))setTab(requested);selectTemplate('workstation');connectWs();refreshTimer=window.setInterval(()=>loadAll(true),15000);clockTimer=window.setInterval(()=>now.value=new Date(),1000);window.addEventListener('beforeunload',abandonPreview);window.addEventListener('hashchange',()=>setTab(location.hash.slice(1)||'dashboard'))})
+onMounted(async()=>{setUnauthorizedHandler(clearAuthenticatedState);try{const result=await api<{user:AuthUser;csrf_token:string}>('/api/auth/me');currentUser.value=result.user;setCsrfToken(result.csrf_token);await startAuthenticated()}catch{}finally{authReady.value=true}clockTimer=window.setInterval(()=>now.value=new Date(),1000);window.addEventListener('beforeunload',abandonPreview);window.addEventListener('hashchange',()=>{if(currentUser.value)setTab(location.hash.slice(1)||'dashboard')})})
 onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTimer);socket?.close();window.removeEventListener('beforeunload',abandonPreview);abandonPreview()})
 </script>
 
 <template>
-  <div class="shell">
+  <div v-if="!authReady" class="auth-screen"><div class="auth-loader">SYSTEM INITIALIZING</div></div>
+  <div v-else-if="!currentUser" class="auth-screen">
+    <form class="auth-card" @submit.prevent="login">
+      <div class="brand auth-brand"><div class="brand-mark">JS</div><div class="brand-text"><strong>江苏有线</strong><small>无锡广电 · AI巡检</small></div></div>
+      <span class="head-en">SECURE ACCESS</span><h1>账号登入</h1><p>请输入管理员分配的账号和密码</p>
+      <label>用户名<input v-model.trim="loginForm.username" autocomplete="username" autofocus></label>
+      <label>密码<input v-model="loginForm.password" type="password" autocomplete="current-password"></label>
+      <div v-if="loginError" class="auth-error">{{loginError}}</div>
+      <button class="primary wide" :disabled="loginBusy">{{loginBusy?'登入中…':'登入系统'}}</button>
+    </form>
+  </div>
+  <div v-else class="shell">
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-mark">JS</div>
@@ -349,6 +400,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         <i :class="onlineCount?'good':'warn'"></i>
         <div><b>{{onlineCount}} / {{cameras.length}}</b><small>CAMERAS ONLINE · 安全检测持续运行</small></div>
       </div>
+      <div class="account-panel"><b>{{currentUser.display_name}}</b><small>{{isAdmin?'管理员':'普通用户'}} · {{currentUser.username}}</small><div><button @click="passwordModal=true">修改密码</button><button @click="logout">退出</button></div></div>
       <div class="side-foot"><span>WUXI BROADCASTING</span><span>V2.0</span></div>
     </aside>
 
@@ -418,7 +470,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
                 <span v-if="camera.enabled" class="ai-tag"><TechIcon name="cpu" :size="10"/>AI ACTIVE</span>
                 <span v-else class="ai-tag" style="color:var(--text-muted);border-color:var(--border-dim)">PAUSED</span>
               </div>
-              <div class="shot-actions">
+              <div v-if="isAdmin" class="shot-actions">
                 <button @click="openPreview(camera)"><TechIcon name="play" :size="12"/>实时</button>
                 <button @click="analyze(camera)"><TechIcon name="zap" :size="12"/>分析</button>
                 <button @click="openEditor(camera)"><TechIcon name="edit" :size="12"/>编辑</button>
@@ -429,7 +481,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
               <div><dt>抽帧频率</dt><dd>每 {{camera.frame_interval_seconds}} 秒</dd></div>
             </dl>
             <div class="chips"><span v-for="mode in camera.modes" :key="mode">{{modeName(mode)}}</span></div>
-            <button class="preview-button" :class="{active:camera.preview_active}" @click="openPreview(camera)"><TechIcon name="eye" :size="13"/>{{camera.preview_active?'加入实时预览':'查看实时视频'}}</button>
+            <button v-if="isAdmin" class="preview-button" :class="{active:camera.preview_active}" @click="openPreview(camera)"><TechIcon name="eye" :size="13"/>{{camera.preview_active?'加入实时预览':'查看实时视频'}}</button>
           </article>
           <article v-if="!cameras.length" class="camera-card empty-card">
             <TechIcon name="video" :size="30"/><b class="head-en">NO CAMERA SOURCE</b><span>请先添加监控源</span>
@@ -506,7 +558,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         <section class="panel table-panel">
           <div class="section-head">
             <div><h2>告警中心</h2><span class="head-en">AI ALERT CENTER</span><p>烟火紧急告警置顶；仅确认违规才告警</p></div>
-            <div class="actions"><button class="primary" :disabled="!selectedAlertIds.length" @click="openWebhookSend"><TechIcon name="webhook" :size="13"/>发送企业微信 ({{selectedAlertIds.length}})</button><button class="link" @click="cleanupAlerts"><TechIcon name="trash" :size="13"/>清理历史</button></div>
+            <div class="actions"><button class="primary" :disabled="!selectedAlertIds.length" @click="openWebhookSend"><TechIcon name="webhook" :size="13"/>发送企业微信 ({{selectedAlertIds.length}})</button><button v-if="isAdmin" class="link" @click="cleanupAlerts"><TechIcon name="trash" :size="13"/>清理历史</button></div>
           </div>
           <div class="filter-bar">
             <label class="filter-item"><span class="filter-label">事件类型 / EVENT</span>
@@ -619,6 +671,25 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             </article>
           </div>
           <div v-else class="panel empty"><b>NO FLOW CAMERA</b><p>尚未配置人员计数摄像头</p></div>
+        </section>
+      </section>
+
+      <!-- ============ 账号管理 ACCOUNT MANAGEMENT ============ -->
+      <section v-else-if="active==='users'" class="page account-page">
+        <section class="panel account-create">
+          <div class="section-head"><div><h2>添加普通用户</h2><span class="head-en">CREATE USER</span><p>系统不开放注册，仅管理员可创建账号</p></div></div>
+          <label>用户名<input v-model.trim="userForm.username" placeholder="operator01" autocomplete="off"><small class="field-hint">3-64 位字母、数字或 . _ -</small></label>
+          <label>显示名称<input v-model.trim="userForm.display_name" placeholder="值班人员"></label>
+          <label>初始密码<input v-model="userForm.password" type="password" placeholder="至少 8 位" autocomplete="new-password"></label>
+          <button class="primary wide" @click="createUserAccount"><TechIcon name="plus" :size="13"/>创建普通用户</button>
+        </section>
+        <section class="panel account-list">
+          <div class="section-head"><div><h2>账号列表</h2><span class="head-en">ACCOUNTS · {{users.length}}</span><p>停用、重置密码或删除账号会立即注销其会话</p></div></div>
+          <article v-for="user in users" :key="user.id" :class="{disabled:!user.enabled}">
+            <div class="account-avatar">{{user.display_name.slice(0,1)}}</div>
+            <div><h3>{{user.display_name}} <span>{{user.role==='admin'?'管理员':'普通用户'}}</span></h3><code>{{user.username}}</code><small>创建于 {{formatTime(user.created_at)}}</small></div>
+            <div class="actions"><button class="ghost" @click="editUserName(user)">改名称</button><button v-if="user.id!==currentUser.id" class="ghost" @click="resetUserPassword(user)">重置密码</button><button v-if="user.id!==currentUser.id" class="ghost" @click="toggleUser(user)">{{user.enabled?'停用':'启用'}}</button><button v-if="user.role!=='admin'" class="danger" @click="deleteUserAccount(user)">删除</button></div>
+          </article>
         </section>
       </section>
 
@@ -740,10 +811,19 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
       <section class="confirm-modal">
         <header class="modal-head"><div><h2>发送告警到企业微信</h2><span class="head-en">MANUAL DELIVERY</span><p>已选择 {{selectedAlertIds.length}} 条告警</p></div><button @click="sendModal=false"><TechIcon name="close" :size="16"/></button></header>
         <div class="confirm-body target-picker">
-          <label v-for="target in enabledWebhookTargets" :key="target.id"><input v-model="selectedTargetIds" type="checkbox" :value="target.id"><span><b>{{target.name}}</b><small>{{target.url}}</small></span></label>
+          <label v-for="target in enabledWebhookTargets" :key="target.id"><input v-model="selectedTargetIds" type="checkbox" :value="target.id"><span><b>{{target.name}}</b><small v-if="target.url">{{target.url}}</small></span></label>
           <p v-if="!enabledWebhookTargets.length">没有已启用且配置完整的企业微信机器人。</p>
         </div>
         <footer class="confirm-foot"><button class="ghost" @click="sendModal=false">取消</button><button class="primary" :disabled="!selectedTargetIds.length" @click="manualSend">确认发送</button></footer>
+      </section>
+    </div>
+
+    <!-- ============ 修改本人密码 ============ -->
+    <div v-if="passwordModal" class="modal" role="dialog" aria-modal="true" @click.self="passwordModal=false">
+      <section class="confirm-modal">
+        <header class="modal-head"><div><h2>修改密码</h2><span class="head-en">CHANGE PASSWORD</span><p>修改成功后需要重新登入</p></div><button @click="passwordModal=false"><TechIcon name="close" :size="16"/></button></header>
+        <div class="confirm-body"><label>原密码<input v-model="passwordForm.old_password" type="password" autocomplete="current-password"></label><label>新密码<input v-model="passwordForm.new_password" type="password" autocomplete="new-password"></label><label>确认新密码<input v-model="passwordForm.confirm" type="password" autocomplete="new-password"></label></div>
+        <footer class="confirm-foot"><button class="ghost" @click="passwordModal=false">取消</button><button class="primary" @click="changePassword">保存新密码</button></footer>
       </section>
     </div>
 
@@ -753,7 +833,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         <header class="modal-head"><div><h2>{{confirmState.title}}</h2></div><button type="button" aria-label="关闭" @click.stop="resolveConfirm(null)"><TechIcon name="close" :size="16"/></button></header>
         <div class="confirm-body">
           <p>{{confirmState.message}}</p>
-          <label v-if="confirmState.input">{{confirmState.inputLabel}}<input v-model="confirmState.inputValue" type="number" min="1" max="365" @keyup.enter="resolveConfirm(confirmState.input?confirmState.inputValue:true)"></label>
+          <label v-if="confirmState.input">{{confirmState.inputLabel}}<input v-model="confirmState.inputValue" :type="confirmState.inputType" :min="confirmState.inputType==='number'?1:undefined" :max="confirmState.inputType==='number'?365:undefined" @keyup.enter="resolveConfirm(confirmState.input?confirmState.inputValue:true)"></label>
         </div>
         <footer class="confirm-foot">
           <button class="ghost" @click="resolveConfirm(null)">取消</button>

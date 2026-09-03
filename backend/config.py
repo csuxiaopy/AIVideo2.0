@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://monitor:monitor_pass@127.0.0.1:5432/monitor"
     redis_url: str = "redis://127.0.0.1:6379/0"
     app_encryption_key: str = "development-only-change-me"
+    admin_username: str = ""
+    admin_display_name: str = "系统管理员"
+    admin_password: str = ""
+    session_idle_hours: int = 8
+    secure_cookies: bool = False
+    allowed_origins: str = "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:5174,http://localhost:5174"
     evidence_dir: Path = ROOT / "data" / "evidence"
     snapshot_dir: Path = ROOT / "data" / "snapshots"
     evidence_retention_days: int = 30

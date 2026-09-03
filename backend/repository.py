@@ -22,6 +22,76 @@ def from_json(value: str, fallback: Any) -> Any:
 
 
 class Repository:
+    def count_users(self) -> int:
+        with session_scope() as session:
+            return session.scalar(select(func.count()).select_from(models.User)) or 0
+
+    def list_users(self) -> list[models.User]:
+        with session_scope() as session:
+            return list(session.scalars(select(models.User).order_by(models.User.created_at)))
+
+    def get_user(self, user_id: int) -> models.User | None:
+        with session_scope() as session:
+            return session.get(models.User, user_id)
+
+    def get_user_by_username(self, username: str) -> models.User | None:
+        with session_scope() as session:
+            return session.scalar(select(models.User).where(func.lower(models.User.username) == username.lower()))
+
+    def create_user(self, user: models.User) -> models.User:
+        with session_scope() as session:
+            session.add(user)
+            session.flush()
+            session.refresh(user)
+        return user
+
+    def update_user(self, user_id: int, values: dict[str, Any]) -> models.User | None:
+        with session_scope() as session:
+            row = session.get(models.User, user_id)
+            if not row:
+                return None
+            for key, value in values.items():
+                setattr(row, key, value)
+            row.updated_at = utc_now()
+            session.flush()
+            session.refresh(row)
+        return row
+
+    def delete_user(self, user_id: int) -> bool:
+        with session_scope() as session:
+            row = session.get(models.User, user_id)
+            if not row:
+                return False
+            session.delete(row)
+        return True
+
+    def create_user_session(self, row: models.UserSession) -> models.UserSession:
+        with session_scope() as session:
+            session.add(row)
+            session.flush()
+            session.refresh(row)
+        return row
+
+    def get_user_session(self, digest: str) -> tuple[models.UserSession, models.User] | None:
+        with session_scope() as session:
+            stmt = (select(models.UserSession, models.User)
+                    .join(models.User, models.User.id == models.UserSession.user_id)
+                    .where(models.UserSession.token_hash == digest))
+            return session.execute(stmt).first()
+
+    def touch_user_session(self, session_id: int, last_seen_at: datetime, expires_at: datetime) -> None:
+        with session_scope() as session:
+            session.execute(update(models.UserSession).where(models.UserSession.id == session_id)
+                            .values(last_seen_at=last_seen_at, expires_at=expires_at))
+
+    def delete_user_session(self, digest: str) -> None:
+        with session_scope() as session:
+            session.execute(delete(models.UserSession).where(models.UserSession.token_hash == digest))
+
+    def delete_user_sessions(self, user_id: int) -> None:
+        with session_scope() as session:
+            session.execute(delete(models.UserSession).where(models.UserSession.user_id == user_id))
+
     def list_cameras(self) -> list[models.Camera]:
         with session_scope() as session:
             return list(session.scalars(select(models.Camera).order_by(models.Camera.created_at)))

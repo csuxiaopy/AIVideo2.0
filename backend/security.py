@@ -4,9 +4,49 @@ import base64
 import hashlib
 import hmac
 import json
+import re
+import secrets
 from urllib.parse import urlsplit, urlunsplit
 
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError
 from cryptography.fernet import Fernet, InvalidToken
+
+
+USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{3,64}$")
+_password_hasher = PasswordHasher()
+
+
+def validate_username(value: str) -> str:
+    value = value.strip()
+    if not USERNAME_RE.fullmatch(value):
+        raise ValueError("用户名须为 3-64 位字母、数字或 . _ -")
+    return value
+
+
+def validate_password(value: str) -> str:
+    if not 8 <= len(value) <= 128:
+        raise ValueError("密码长度须为 8-128 位")
+    return value
+
+
+def hash_password(value: str) -> str:
+    return _password_hasher.hash(validate_password(value))
+
+
+def verify_password(hashed: str, value: str) -> bool:
+    try:
+        return _password_hasher.verify(hashed, value)
+    except (VerificationError, InvalidHashError):
+        return False
+
+
+def random_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def token_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 class SecretCipher:

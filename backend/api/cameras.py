@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from fastapi.responses import StreamingResponse
@@ -12,6 +12,7 @@ from backend.api.context import context
 from backend.api.presenters import camera_public
 from backend.capabilities import SCENE_TEMPLATES, capabilities_public, scene_templates_public
 from backend.media_capture import PreviewLimitError
+from backend.auth import admin_user, current_user
 from backend.repository import as_json, from_json
 from backend.schemas import (
     CameraCreate,
@@ -107,22 +108,22 @@ def _batch_default_camera(camera_id: str, name: str, rtsp_url: str) -> CameraCre
     )
 
 
-@router.get("/cameras")
+@router.get("/cameras", dependencies=[Depends(current_user)])
 async def list_cameras() -> list[dict[str, Any]]:
     return [_public(camera) for camera in context.repository.list_cameras()]
 
 
-@router.get("/scene-templates")
+@router.get("/scene-templates", dependencies=[Depends(admin_user)])
 async def scene_templates() -> list[dict[str, Any]]:
     return scene_templates_public()
 
 
-@router.get("/capabilities")
+@router.get("/capabilities", dependencies=[Depends(admin_user)])
 async def capabilities() -> list[dict[str, Any]]:
     return capabilities_public()
 
 
-@router.post("/cameras", status_code=status.HTTP_201_CREATED)
+@router.post("/cameras", status_code=status.HTTP_201_CREATED, dependencies=[Depends(admin_user)])
 async def create_camera(payload: CameraCreate) -> dict[str, Any]:
     if context.repository.get_camera(payload.id):
         raise HTTPException(status_code=409, detail="摄像头 ID 已存在")
@@ -132,7 +133,7 @@ async def create_camera(payload: CameraCreate) -> dict[str, Any]:
     return _public(camera)
 
 
-@router.post("/cameras/batch", status_code=status.HTTP_201_CREATED)
+@router.post("/cameras/batch", status_code=status.HTTP_201_CREATED, dependencies=[Depends(admin_user)])
 async def create_cameras_batch(payload: CameraBatchCreate) -> dict[str, Any]:
     errors: list[dict[str, Any]] = []
     validated: list[CameraCreate] = []
@@ -174,12 +175,12 @@ async def create_cameras_batch(payload: CameraBatchCreate) -> dict[str, Any]:
     return {"success": True, "created": len(cameras), "failed": 0}
 
 
-@router.get("/cameras/{camera_id}")
+@router.get("/cameras/{camera_id}", dependencies=[Depends(current_user)])
 async def get_camera(camera_id: str) -> dict[str, Any]:
     return _public(_camera_or_404(camera_id))
 
 
-@router.patch("/cameras/{camera_id}")
+@router.patch("/cameras/{camera_id}", dependencies=[Depends(admin_user)])
 async def patch_camera(camera_id: str, payload: CameraPatch) -> dict[str, Any]:
     camera = _camera_or_404(camera_id)
     effective = _effective_patch(camera, payload)
@@ -217,7 +218,7 @@ async def patch_camera(camera_id: str, payload: CameraPatch) -> dict[str, Any]:
     return _public(updated)
 
 
-@router.delete("/cameras/{camera_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/cameras/{camera_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(admin_user)])
 async def delete_camera(camera_id: str) -> Response:
     if not context.repository.delete_camera(camera_id):
         raise HTTPException(status_code=404, detail="摄像头不存在")
@@ -231,7 +232,7 @@ async def delete_camera(camera_id: str) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.put("/cameras/{camera_id}/modes")
+@router.put("/cameras/{camera_id}/modes", dependencies=[Depends(admin_user)])
 async def update_modes(camera_id: str, payload: ModesUpdate) -> dict[str, Any]:
     camera = _camera_or_404(camera_id)
     geometry = GeometrySpec.model_validate(from_json(camera.geometry_json, {}))
@@ -242,7 +243,7 @@ async def update_modes(camera_id: str, payload: ModesUpdate) -> dict[str, Any]:
     return _public(updated)
 
 
-@router.put("/cameras/{camera_id}/geometry")
+@router.put("/cameras/{camera_id}/geometry", dependencies=[Depends(admin_user)])
 async def update_geometry(camera_id: str, payload: GeometrySpec) -> dict[str, Any]:
     camera = _camera_or_404(camera_id)
     modes = [Mode(value) for value in from_json(camera.modes_json, [])]
@@ -252,7 +253,7 @@ async def update_geometry(camera_id: str, payload: GeometrySpec) -> dict[str, An
     )
 
 
-@router.put("/cameras/{camera_id}/schedule")
+@router.put("/cameras/{camera_id}/schedule", dependencies=[Depends(admin_user)])
 async def update_schedule(camera_id: str, payload: ScheduleSpec) -> dict[str, Any]:
     _camera_or_404(camera_id)
     return _public(
@@ -260,7 +261,7 @@ async def update_schedule(camera_id: str, payload: ScheduleSpec) -> dict[str, An
     )
 
 
-@router.post("/cameras/{camera_id}/analyze")
+@router.post("/cameras/{camera_id}/analyze", dependencies=[Depends(admin_user)])
 async def analyze_camera(camera_id: str) -> dict[str, Any]:
     try:
         return await context.require_runtime().analyze_now(camera_id)
@@ -270,7 +271,7 @@ async def analyze_camera(camera_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@router.post("/cameras/{camera_id}/preview/start")
+@router.post("/cameras/{camera_id}/preview/start", dependencies=[Depends(admin_user)])
 async def start_preview(camera_id: str) -> dict[str, object]:
     _camera_or_404(camera_id)
     try:
@@ -281,7 +282,7 @@ async def start_preview(camera_id: str) -> dict[str, object]:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@router.post("/cameras/{camera_id}/preview/heartbeat")
+@router.post("/cameras/{camera_id}/preview/heartbeat", dependencies=[Depends(admin_user)])
 async def heartbeat_preview(camera_id: str, payload: PreviewSessionRequest) -> dict[str, bool]:
     _camera_or_404(camera_id)
     media = context.require_runtime().media
@@ -292,7 +293,7 @@ async def heartbeat_preview(camera_id: str, payload: PreviewSessionRequest) -> d
     return {"active": True}
 
 
-@router.post("/cameras/{camera_id}/preview/stop", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/cameras/{camera_id}/preview/stop", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(admin_user)])
 async def stop_preview(camera_id: str, payload: PreviewSessionRequest) -> Response:
     _camera_or_404(camera_id)
     media = context.require_runtime().media
@@ -301,7 +302,7 @@ async def stop_preview(camera_id: str, payload: PreviewSessionRequest) -> Respon
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.get("/cameras/{camera_id}/preview")
+@router.get("/cameras/{camera_id}/preview", dependencies=[Depends(admin_user)])
 async def preview(camera_id: str, session_id: str = Query(min_length=16, max_length=100)) -> StreamingResponse:
     _camera_or_404(camera_id)
     runtime = context.require_runtime()
@@ -316,7 +317,7 @@ async def preview(camera_id: str, session_id: str = Query(min_length=16, max_len
     )
 
 
-@router.get("/cameras/{camera_id}/snapshot")
+@router.get("/cameras/{camera_id}/snapshot", dependencies=[Depends(current_user)])
 async def snapshot(camera_id: str) -> Response:
     _camera_or_404(camera_id)
     jpeg = context.require_runtime().media.preview_jpeg(camera_id)

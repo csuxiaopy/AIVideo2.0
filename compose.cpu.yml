@@ -51,6 +51,12 @@ services:
       DATABASE_URL: postgresql+psycopg://monitor:${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}@postgres:5432/monitor
       REDIS_URL: redis://redis:6379/0
       APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:-change-this-before-production}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:?请在 .env 中设置 ADMIN_USERNAME}
+      ADMIN_DISPLAY_NAME: ${ADMIN_DISPLAY_NAME:-系统管理员}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env 中设置 ADMIN_PASSWORD}
+      SESSION_IDLE_HOURS: ${SESSION_IDLE_HOURS:-8}
+      SECURE_COOKIES: ${SECURE_COOKIES:-false}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:5174,http://localhost:5174}
       YOLO_MODEL_PATH: ${YOLO_MODEL_PATH:-models/yolo26s.pt}
       YOLO_DEVICE: cpu
       YOLO_IMGSZ: ${YOLO_IMGSZ:-640}

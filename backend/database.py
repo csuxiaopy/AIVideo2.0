@@ -50,3 +50,30 @@ def upgrade_schema() -> None:
 
     config = Config(str(ROOT / "alembic.ini"))
     command.upgrade(config, "head")
+
+
+def bootstrap_admin() -> None:
+    from backend import models
+    from backend.security import hash_password, validate_username
+
+    with session_scope() as session:
+        if (session.query(models.User).count() or 0) > 0:
+            return
+        username = settings.admin_username.strip()
+        password = settings.admin_password
+        if not username or not password:
+            raise RuntimeError(
+                "系统尚无账号，请设置 ADMIN_USERNAME 和 ADMIN_PASSWORD 后重新启动"
+            )
+        try:
+            username = validate_username(username).lower()
+            password_hash = hash_password(password)
+        except ValueError as exc:
+            raise RuntimeError(f"初始管理员配置无效：{exc}") from exc
+        session.add(models.User(
+            username=username,
+            display_name=settings.admin_display_name.strip() or "系统管理员",
+            password_hash=password_hash,
+            role="admin",
+            enabled=True,
+        ))

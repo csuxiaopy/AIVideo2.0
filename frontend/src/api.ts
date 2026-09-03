@@ -41,15 +41,27 @@ export class ApiError extends Error {
   }
 }
 
+let csrfToken = ''
+let unauthorizedHandler: (() => void) | undefined
+
+export function setCsrfToken(value: string) { csrfToken = value }
+export function setUnauthorizedHandler(handler: () => void) { unauthorizedHandler = handler }
+
 export async function api<T = any>(path: string, options: RequestInit = {}): Promise<T> {
+  const method = (options.method || 'GET').toUpperCase()
+  const headers = new Headers(options.headers)
+  if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && csrfToken) headers.set('X-CSRF-Token', csrfToken)
   const response = await fetch(path, {
     ...options,
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
+    credentials: 'same-origin',
+    headers
   })
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`
     let detail: unknown
     try { detail = (await response.json()).detail; message = errorMessage(detail, message) } catch {}
+    if (response.status === 401 && path !== '/api/auth/login') unauthorizedHandler?.()
     throw new ApiError(message, detail, response.status)
   }
   if (response.status === 204) return undefined as T

@@ -2,19 +2,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from backend.api.context import context
 from backend.repository import as_json, from_json
 from backend.schemas import (DisplaySettingsUpdate, DetectorSettingsUpdate, ModelSettingsUpdate,
     RetentionSettingsUpdate, WebhookTargetCreate, WebhookTargetUpdate)
 from backend.webhook import WebhookClient
+from backend.auth import admin_user, current_user
 
 
 router = APIRouter(prefix="/api/settings")
 
 
-@router.get("/models")
+@router.get("/models", dependencies=[Depends(admin_user)])
 async def get_models() -> dict[str, Any]:
     row = context.repository.get_model_settings()
     return {
@@ -27,7 +28,7 @@ async def get_models() -> dict[str, Any]:
     }
 
 
-@router.put("/models")
+@router.put("/models", dependencies=[Depends(admin_user)])
 async def put_models(payload: ModelSettingsUpdate) -> dict[str, Any]:
     existing = context.repository.get_model_settings()
     effective_key = payload.api_key or (
@@ -48,7 +49,7 @@ async def put_models(payload: ModelSettingsUpdate) -> dict[str, Any]:
     return await get_models()
 
 
-@router.post("/models/test")
+@router.post("/models/test", dependencies=[Depends(admin_user)])
 async def test_models() -> dict[str, Any]:
     row = context.repository.get_model_settings()
     if row.provider == "mock":
@@ -62,7 +63,7 @@ async def test_models() -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@router.get("/detectors")
+@router.get("/detectors", dependencies=[Depends(admin_user)])
 async def get_detectors() -> dict[str, Any]:
     row = context.repository.get_detector_settings()
     runtime_status = await context.require_runtime().status()
@@ -78,7 +79,7 @@ async def get_detectors() -> dict[str, Any]:
     }
 
 
-@router.put("/detectors")
+@router.put("/detectors", dependencies=[Depends(admin_user)])
 async def put_detectors(payload: DetectorSettingsUpdate) -> dict[str, Any]:
     context.repository.save_detector_settings(payload.model_dump())
     await context.require_runtime().reload_detectors()
@@ -96,14 +97,14 @@ def webhook_target_public(row) -> dict[str, Any]:
     }
 
 
-@router.get("/webhooks")
+@router.get("/webhooks", dependencies=[Depends(admin_user)])
 async def get_webhooks() -> dict[str, Any]:
     return {
         "items": [webhook_target_public(row) for row in context.repository.list_webhook_targets()],
     }
 
 
-@router.post("/webhooks", status_code=201)
+@router.post("/webhooks", status_code=201, dependencies=[Depends(admin_user)])
 async def create_webhook(payload: WebhookTargetCreate) -> dict[str, Any]:
     if payload.enabled and not payload.url.startswith("https://"):
         raise HTTPException(status_code=400, detail="启用企业微信机器人时必须配置 HTTPS URL")
@@ -113,7 +114,7 @@ async def create_webhook(payload: WebhookTargetCreate) -> dict[str, Any]:
     return webhook_target_public(context.repository.create_webhook_target(values))
 
 
-@router.put("/webhooks/{target_id}")
+@router.put("/webhooks/{target_id}", dependencies=[Depends(admin_user)])
 async def update_webhook(target_id: int, payload: WebhookTargetUpdate) -> dict[str, Any]:
     existing = context.repository.get_webhook_target(target_id)
     if not existing:
@@ -126,14 +127,14 @@ async def update_webhook(target_id: int, payload: WebhookTargetUpdate) -> dict[s
     return webhook_target_public(row)
 
 
-@router.delete("/webhooks/{target_id}")
+@router.delete("/webhooks/{target_id}", dependencies=[Depends(admin_user)])
 async def delete_webhook(target_id: int) -> dict[str, bool]:
     if not context.repository.delete_webhook_target(target_id):
         raise HTTPException(status_code=404, detail="Webhook 目标不存在")
     return {"deleted": True}
 
 
-@router.post("/webhooks/{target_id}/test")
+@router.post("/webhooks/{target_id}/test", dependencies=[Depends(admin_user)])
 async def test_webhook_target(target_id: int) -> dict[str, bool]:
     row = context.repository.get_webhook_target(target_id)
     if not row or not row.url:
@@ -150,7 +151,7 @@ async def test_webhook_target(target_id: int) -> dict[str, bool]:
         await client.close()
 
 
-@router.get("/retention")
+@router.get("/retention", dependencies=[Depends(admin_user)])
 async def get_retention() -> dict[str, Any]:
     row = context.repository.get_retention_settings()
     return {
@@ -160,13 +161,13 @@ async def get_retention() -> dict[str, Any]:
     }
 
 
-@router.put("/retention")
+@router.put("/retention", dependencies=[Depends(admin_user)])
 async def put_retention(payload: RetentionSettingsUpdate) -> dict[str, Any]:
     context.repository.save_retention_settings(payload.model_dump())
     return await get_retention()
 
 
-@router.get("/display")
+@router.get("/display", dependencies=[Depends(current_user)])
 async def get_display() -> dict[str, Any]:
     row = context.repository.get_display_settings()
     return {
@@ -176,7 +177,7 @@ async def get_display() -> dict[str, Any]:
     }
 
 
-@router.patch("/display")
+@router.patch("/display", dependencies=[Depends(admin_user)])
 async def patch_display(payload: DisplaySettingsUpdate) -> dict[str, Any]:
     values = payload.model_dump(exclude_none=True)
     if values:

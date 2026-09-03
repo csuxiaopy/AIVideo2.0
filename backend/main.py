@@ -3,17 +3,19 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from backend.api.cameras import router as cameras_router
+from backend.api.auth import router as auth_router
 from backend.api.context import context
 from backend.api.monitoring import router as monitoring_router
 from backend.api.settings import router as settings_router
-from backend.database import upgrade_schema
+from backend.database import bootstrap_admin, upgrade_schema
+from backend.auth import current_user
 from backend.pipeline import MonitoringRuntime
 
 
@@ -23,6 +25,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     upgrade_schema()
+    bootstrap_admin()
     context.runtime = MonitoringRuntime(context.settings, context.repository, context.cipher)
     await context.runtime.start()
     try:
@@ -40,11 +43,12 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
-        allow_credentials=False,
+        allow_origins=[item.strip() for item in context.settings.allowed_origins.split(",") if item.strip()],
+        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.include_router(auth_router)
     app.include_router(cameras_router)
     app.include_router(monitoring_router)
     app.include_router(settings_router)
@@ -53,7 +57,7 @@ def create_app() -> FastAPI:
     async def metrics() -> Response:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-    @app.get("/evidence/{filename}")
+    @app.get("/evidence/{filename}", dependencies=[Depends(current_user)])
     async def evidence(filename: str):
         safe_name = filename.replace("\\", "/").split("/")[-1]
         path = context.settings.evidence_dir / safe_name
