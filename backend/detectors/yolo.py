@@ -147,7 +147,7 @@ class YoloDetector:
             try:
                 import supervision as sv
 
-                tracker = sv.ByteTrack(frame_rate=1)
+                tracker = sv.ByteTrack(frame_rate=10, lost_track_buffer=30)
             except Exception:
                 tracker = CentroidFallbackTracker()
             self.trackers[camera_id] = tracker

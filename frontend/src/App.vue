@@ -10,7 +10,7 @@ import type { Camera, DrawLayer, Mode, Point, SceneType, SceneTemplate, TrafficC
 const modeInfo:Record<Mode,{name:string;icon:string;note:string}> = {
   off_duty:{name:'离岗检测',icon:'offDuty',note:'排班内持续无人'},
   phone_use:{name:'玩手机检测',icon:'phone',note:'每 3 分钟单帧大模型联合检测'},
-  people_flow:{name:'人员计数',icon:'traffic',note:'跨线进出统计'},
+  people_flow:{name:'人员计数',icon:'traffic',note:'新人员进入画面自动统计'},
   fire_smoke:{name:'烟火检测',icon:'flame',note:'本地安全模型'},
   intrusion:{name:'区域入侵',icon:'intrusion',note:'进入禁区立即告警'},
   black_screen:{name:'屏幕黑屏',icon:'blackScreen',note:'亮度与内容变化'},
@@ -151,7 +151,7 @@ const loadAll = async (silent=false) => {
   finally { loading.value=false }
 }
 
-const defaultOptions = () => ({health_interval_seconds:5,yolo_fps:.1,behavior_interval_seconds:15,off_duty_seconds:300,shift_grace_seconds:60,alert_cooldown_seconds:300,black_mean_max:18,black_std_max:12,black_ratio_min:.92,fire_smoke_fps:1,fire_confidence:.3,smoke_confidence:.3,intrusion_confidence:.5,intrusion_cooldown_seconds:60})
+const defaultOptions = () => ({health_interval_seconds:5,yolo_fps:.1,behavior_interval_seconds:15,off_duty_seconds:300,shift_grace_seconds:60,alert_cooldown_seconds:300,black_mean_max:18,black_std_max:12,black_ratio_min:.92,fire_smoke_fps:1,fire_confidence:.3,smoke_confidence:.3,intrusion_confidence:.5,intrusion_cooldown_seconds:60,flow_min_stable_frames:3,flow_entry_edge_ratio:.1,flow_reassociation_seconds:5,flow_reassociation_distance:.12,stream_recovery_grace_seconds:15,flow_debug:false})
 const emptySchedule = () => ({timezone:'Asia/Shanghai',weekly:{},holidays:[]})
 const deepCopy = <T,>(value:T):T => JSON.parse(JSON.stringify(value))
 const newCamera = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'workstation' as SceneType,modes:[] as Mode[],schedule:emptySchedule(),options:defaultOptions(),frame_interval_seconds:1})
@@ -162,10 +162,9 @@ const selectTemplate = (scene:SceneType) => {
   else {newCamera.modes=['black_screen'];newCamera.schedule=emptySchedule()}
 }
 const defaultGeometry = (scene:SceneType) => {
-  if(scene==='workstation') return {post_roi:[[0,0],[1,0],[1,1],[0,1]],flow_line:[],intrusion_zone:null}
-  if(scene==='customer_area') return {post_roi:[],flow_line:[[.15,.52],[.85,.52]],intrusion_zone:null}
-  if(scene==='security_area') return {post_roi:[],flow_line:[],intrusion_zone:{name:'禁区',points:[[.12,.12],[.88,.12],[.88,.9],[.12,.9]]}}
-  return {post_roi:[],flow_line:[],intrusion_zone:null}
+  if(scene==='workstation') return {post_roi:[[0,0],[1,0],[1,1],[0,1]],intrusion_zone:null}
+  if(scene==='security_area') return {post_roi:[],intrusion_zone:{name:'禁区',points:[[.12,.12],[.88,.12],[.88,.9],[.12,.9]]}}
+  return {post_roi:[],intrusion_zone:null}
 }
 const toggleMode = (target:any, mode:Mode) => {
   const list=target.modes as Mode[]; const index=list.indexOf(mode)
@@ -193,11 +192,11 @@ const analyze = async (camera:Camera) => {
 }
 const batchCreated=async(count:number)=>{batchModal.value=false;notify(`成功添加 ${count} 个视频源`);await loadAll(true)}
 
-const editForm = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'custom',modes:[],geometry:{post_roi:[],flow_line:[],intrusion_zone:null},schedule:emptySchedule(),options:defaultOptions(),zone_name:'禁区',frame_interval_seconds:60})
+const editForm = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'custom',modes:[],geometry:{post_roi:[],intrusion_zone:null},schedule:emptySchedule(),options:defaultOptions(),zone_name:'禁区',frame_interval_seconds:60})
 const openEditor = (camera:Camera) => {
   editor.value=camera
   Object.assign(editForm,{id:camera.id,name:camera.name,rtsp_url:'',enabled:camera.enabled,scene_type:camera.scene_type,modes:[...camera.modes],geometry:deepCopy(camera.geometry||defaultGeometry('custom')),schedule:deepCopy(camera.schedule||emptySchedule()),options:{...defaultOptions(),...(camera.options||{})},zone_name:camera.geometry?.intrusion_zone?.name||'禁区',frame_interval_seconds:camera.frame_interval_seconds||60})
-  drawLayer.value = camera.scene_type==='customer_area'?'flow_line':camera.scene_type==='security_area'?'intrusion_zone':'post_roi'
+  drawLayer.value = camera.scene_type==='security_area'?'intrusion_zone':'post_roi'
 }
 const editorTemplate = (scene:SceneType) => {
   editForm.scene_type=scene
@@ -214,12 +213,10 @@ const canvasClick = (event:MouseEvent) => {
   const rect=target.getBoundingClientRect(); const p:[number,number]=[
     Math.max(0,Math.min(1,(event.clientX-rect.left)/rect.width)), Math.max(0,Math.min(1,(event.clientY-rect.top)/rect.height))]
   const current=[...pointsFor(drawLayer.value)]
-  if(drawLayer.value==='flow_line'&&current.length>=2) current.splice(0,current.length)
   current.push(p); setPoints(drawLayer.value,current)
 }
 const clearLayer = () => setPoints(drawLayer.value,[])
 const polygon = (points:Point[]) => points.map(p=>`${p[0]*100},${p[1]*100}`).join(' ')
-const line = (points:Point[]) => points.length===2?{x1:points[0][0]*100,y1:points[0][1]*100,x2:points[1][0]*100,y2:points[1][1]*100}:null
 const saveEditor = async () => {
   if(!editor.value) return
   try {
@@ -227,7 +224,6 @@ const saveEditor = async () => {
     if(!/^[A-Za-z0-9_-]+$/.test(editForm.id)) throw new Error('摄像头 ID 只能使用英文字母、数字、短横线和下划线')
     if(editForm.rtsp_url&&!/^(rtsp|rtsps|file):\/\//.test(editForm.rtsp_url)) throw new Error('视频源必须以 rtsp://、rtsps:// 或 file:// 开头')
     if(editForm.modes.includes('off_duty')||editForm.modes.includes('phone_use')||editForm.modes.includes('on_duty')) if(pointsFor('post_roi').length<3) throw new Error('岗位区域至少需要 3 个点')
-    if(editForm.modes.includes('people_flow')&&pointsFor('flow_line').length!==2) throw new Error('人员计数需要 2 个点的人流线')
     if(editForm.modes.includes('intrusion')&&pointsFor('intrusion_zone').length<3) throw new Error('区域入侵需要至少 3 个点的禁区')
     if(editForm.geometry.intrusion_zone) editForm.geometry.intrusion_zone.name=editForm.zone_name||'禁区'
     const id=editor.value.id
@@ -429,7 +425,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <em>{{cameras.length===0?'等待接入':onlineCount===cameras.length?'系统正常运行':'部分摄像头离线'}}</em>
           </article>
           <article v-if="displaySettings.show_current_store_count">
-            <span>当前在店人数</span><span class="metric-en">IN-STORE VISITORS</span>
+            <span>当前画面人数</span><span class="metric-en">ON-SCREEN VISITORS</span>
             <strong>{{dashboard.current_people||0}}</strong>
             <em>各入口实时统计</em>
           </article>
@@ -627,15 +623,15 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
       <!-- ============ 人流报表 PEOPLE FLOW ============ -->
       <section v-else-if="active==='traffic'" class="page traffic-dashboard">
         <div class="metrics">
-          <article><span>今日总人流</span><span class="metric-en">TOTAL FLOW TODAY</span><strong>{{trafficSummary.total_flow_today}}</strong><em>跨线进入累计</em></article>
-          <article><span>当前在店人数</span><span class="metric-en">IN-STORE NOW</span><strong>{{trafficSummary.current_people}}</strong><em>各统计点最新人数</em></article>
-          <article><span>今日离店</span><span class="metric-en">EXITED TODAY</span><strong>{{trafficSummary.exited_today}}</strong><em>跨线离开累计</em></article>
+          <article><span>今日总人流</span><span class="metric-en">TOTAL FLOW TODAY</span><strong>{{trafficSummary.total_flow_today}}</strong><em>有效进入画面人次</em></article>
+          <article><span>当前画面人数</span><span class="metric-en">ON-SCREEN NOW</span><strong>{{trafficSummary.current_people}}</strong><em>各摄像头有效人员轨迹</em></article>
+          <article><span>识别方式</span><span class="metric-en">COUNTING MODE</span><strong>TRACK</strong><em>稳定人员轨迹自动计数</em></article>
           <article><span>统计摄像头</span><span class="metric-en">FLOW CAMERAS</span><strong>{{trafficSummary.flow_camera_count}}</strong><em>启用人员计数</em></article>
         </div>
         <section class="panel traffic-trend-panel">
-          <div class="section-head"><div><h2>今日在店人数趋势</h2><span class="head-en">IN-STORE TREND · {{trafficSummary.date}}</span></div><div class="trend-current"><small>当前人数</small><strong>{{trafficSummary.current_people}}</strong></div></div>
+          <div class="section-head"><div><h2>今日画面人数趋势</h2><span class="head-en">ON-SCREEN TREND · {{trafficSummary.date}}</span></div><div class="trend-current"><small>当前人数</small><strong>{{trafficSummary.current_people}}</strong></div></div>
           <div v-if="chartPoints.length" class="traffic-chart">
-            <svg viewBox="0 0 1000 260" preserveAspectRatio="none" role="img" aria-label="今日在店人数趋势折线图">
+            <svg viewBox="0 0 1000 260" preserveAspectRatio="none" role="img" aria-label="今日画面人数趋势折线图">
               <defs><linearGradient id="trafficArea" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#00e5ff" stop-opacity=".34"/><stop offset="1" stop-color="#008cff" stop-opacity="0"/></linearGradient></defs>
               <g class="chart-grid"><line v-for="y in [44,132,220]" :key="y" x1="44" x2="956" :y1="y" :y2="y"/></g>
               <text v-for="(tick,index) in chartTicks" :key="tick+index" x="34" :y="[48,136,224][index]" text-anchor="end" class="chart-axis-label">{{tick}}</text>
@@ -649,7 +645,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         </section>
 
         <div class="ranking-grid">
-          <section v-for="ranking in [{title:'当前在店人数排名',en:'IN-STORE RANKING',rows:trafficSummary.current_ranking,key:'current_count'},{title:'今日人流排名',en:'DAILY FLOW RANKING',rows:trafficSummary.flow_ranking,key:'entered_today'}]" :key="ranking.en" class="panel podium-panel">
+          <section v-for="ranking in [{title:'当前画面人数排名',en:'ON-SCREEN RANKING',rows:trafficSummary.current_ranking,key:'current_count'},{title:'今日人流排名',en:'DAILY FLOW RANKING',rows:trafficSummary.flow_ranking,key:'entered_today'}]" :key="ranking.en" class="panel podium-panel">
             <div class="section-head"><div><h2>{{ranking.title}}</h2><span class="head-en">{{ranking.en}}</span></div></div>
             <div class="podium">
               <article v-for="(row,index) in podiumRows(ranking.rows)" :key="row?.camera_id||index" :class="`place-${[2,1,3][index]}`">
@@ -666,7 +662,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <article v-for="camera in trafficSummary.cameras" :key="camera.camera_id" class="panel traffic-camera-card">
               <header><div><h3>{{camera.camera_name}}</h3><code>{{camera.camera_id}}</code></div><span class="status-dot" :class="camera.online?'ready':'bad'">{{camera.online?'在线':'离线'}}</span></header>
               <div class="camera-flow-main"><div><small>今日总人流</small><strong>{{camera.entered_today}}</strong></div><div><small>当前人数</small><strong>{{camera.current_count}}</strong></div></div>
-              <div class="camera-flow-detail"><span>进入 <b class="green">+{{camera.entered_today}}</b></span><span>离开 <b>-{{camera.exited_today}}</b></span></div>
+              <div class="camera-flow-detail"><span>今日进入画面人次 <b class="green">+{{camera.entered_today}}</b></span><span>Track 稳定去重</span></div>
               <footer>最后统计：{{camera.last_stat_at?formatTime(camera.last_stat_at):'暂无数据'}}</footer>
             </article>
           </div>
@@ -699,7 +695,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
           <div class="section-head"><div><h2>人流数据展示</h2><span class="head-en">DATA DISPLAY SETTINGS</span><p>仅控制界面展示，不影响人员检测、统计任务和历史数据。</p></div></div>
           <div class="display-settings">
             <div class="inline-setting"><div><b>显示人流报表</b><small>控制左侧“人流报表”菜单及页面访问</small><span class="switch-label">{{displaySettings.show_traffic_report?'ENABLED':'DISABLED'}}</span></div><label class="switch"><input v-model="displaySettings.show_traffic_report" type="checkbox" @change="saveDisplaySettings"><span></span></label></div>
-            <div class="inline-setting"><div><b>显示当前在店人数</b><small>控制监控总览中的当前人数模块</small><span class="switch-label">{{displaySettings.show_current_store_count?'ENABLED':'DISABLED'}}</span></div><label class="switch"><input v-model="displaySettings.show_current_store_count" type="checkbox" @change="saveDisplaySettings"><span></span></label></div>
+            <div class="inline-setting"><div><b>显示当前画面人数</b><small>控制监控总览中的当前人数模块</small><span class="switch-label">{{displaySettings.show_current_store_count?'ENABLED':'DISABLED'}}</span></div><label class="switch"><input v-model="displaySettings.show_current_store_count" type="checkbox" @change="saveDisplaySettings"><span></span></label></div>
           </div>
         </section>
 
@@ -773,7 +769,6 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             </div>
             <div class="draw-actions">
               <button :class="{active:drawLayer==='post_roi'}" class="ghost" @click="drawLayer='post_roi'">岗位区域</button>
-              <button :class="{active:drawLayer==='flow_line'}" class="ghost" @click="drawLayer='flow_line'">人流线</button>
               <button :class="{active:drawLayer==='intrusion_zone'}" class="ghost" @click="drawLayer='intrusion_zone'">禁区</button>
               <button class="danger" @click="clearLayer"><TechIcon name="trash" :size="12"/>清空当前图层</button>
             </div>
@@ -781,12 +776,11 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
               <img :src="snapshotUrl(editor)">
               <svg viewBox="0 0 100 100" preserveAspectRatio="none">
                 <polygon v-if="pointsFor('post_roi').length>=3" :points="polygon(pointsFor('post_roi'))" class="post-zone"/>
-                <line v-if="line(pointsFor('flow_line'))" v-bind="line(pointsFor('flow_line'))" class="flow-line"/>
                 <polygon v-if="pointsFor('intrusion_zone').length>=3" :points="polygon(pointsFor('intrusion_zone'))" class="intrusion-zone"/>
                 <g v-for="(p,index) in pointsFor(drawLayer)" :key="index"><circle :cx="p[0]*100" :cy="p[1]*100" r="1.1"/><text :x="p[0]*100+1.5" :y="p[1]*100-1">{{index+1}}</text></g>
               </svg>
             </div>
-            <p class="hint">岗位/禁区至少 3 点；人流线恰好 2 点。当前图层已有 {{pointsFor(drawLayer)}} 个点。</p>
+            <p class="hint">岗位区域和禁区至少需要 3 个点；人流统计无需绘制区域。当前图层已有 {{pointsFor(drawLayer).length}} 个点。</p>
           </div>
           <aside class="editor-right">
             <label>抽帧频率<select v-model.number="editForm.frame_interval_seconds"><option v-for="seconds in frameIntervalOptions" :key="seconds" :value="seconds">每 {{seconds}} 秒抓取一帧</option></select></label>
@@ -796,6 +790,9 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <div class="form-row"><label>上午开始<input v-model="firstShift.start" type="time" @change="syncShifts"></label><label>上午结束<input v-model="firstShift.end" type="time" @change="syncShifts"></label></div>
             <div class="form-row"><label>下午开始<input v-model="secondShift.start" type="time" @change="syncShifts"></label><label>下午结束<input v-model="secondShift.end" type="time" @change="syncShifts"></label></div>
             <label>离岗时长（秒）<input v-model.number="editForm.options.off_duty_seconds" type="number" min="30"></label>
+            <div v-if="editForm.modes.includes('people_flow')" class="config-note"><b>人流自动统计</b><p>人员进入画面并稳定跟踪后自动累计，无需任何额外几何配置。</p></div>
+            <div v-if="editForm.modes.includes('people_flow')" class="form-row"><label>稳定确认帧数<input v-model.number="editForm.options.flow_min_stable_frames" type="number" min="2" max="30"></label><label>边缘区域比例<input v-model.number="editForm.options.flow_entry_edge_ratio" type="number" min=".02" max=".4" step=".01"></label></div>
+            <label v-if="editForm.modes.includes('people_flow')" class="inline-setting"><span>人流 Debug 标注</span><span class="switch"><input v-model="editForm.options.flow_debug" type="checkbox"><span></span></span></label>
             <div v-if="editForm.modes.includes('phone_use') || editForm.modes.includes('smoking')" class="config-note"><b>行为联合检测</b><p>上班时间内每 3 分钟抽取当前单帧，一次检测已启用的玩手机和吸烟行为；经济模型发现疑点时统一交由增强模型复核。</p></div>
             <div class="form-row"><label>火焰阈值<input v-model.number="editForm.options.fire_confidence" type="number" min="0" max="1" step=".05"></label><label>烟雾阈值<input v-model.number="editForm.options.smoke_confidence" type="number" min="0" max="1" step=".05"></label></div>
             <label>入侵置信度<input v-model.number="editForm.options.intrusion_confidence" type="number" min="0" max="1" step=".05"></label>

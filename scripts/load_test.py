@@ -30,7 +30,7 @@ async def main() -> None:
             response = await client.post("/api/cameras", json={
                 "id": camera_id, "name": f"压测 {index + 1}", "rtsp_url": source,
                 "modes": ["black_screen", "people_flow"],
-                "geometry": {"post_roi": [], "flow_line": [[0.5, 0.05], [0.5, 0.95]]},
+                "geometry": {"post_roi": []},
                 "schedule": {"timezone": "Asia/Shanghai", "weekly": {}, "holidays": []},
                 "frame_interval_seconds": args.frame_interval,
             })

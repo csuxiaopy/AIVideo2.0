@@ -4,6 +4,7 @@ from typing import Any
 
 from backend import models
 from backend.repository import from_json
+from backend.schemas import GeometrySpec
 from backend.security import SecretCipher, redact_rtsp
 
 
@@ -28,7 +29,7 @@ def camera_public(
         "preview_active": bool(preview_status and preview_status.get("active")),
         "preview_started_at": preview_status.get("started_at") if preview_status else None,
         "modes": from_json(camera.modes_json, []),
-        "geometry": from_json(camera.geometry_json, {}),
+        "geometry": GeometrySpec.model_validate(from_json(camera.geometry_json, {})).model_dump(),
         "schedule": from_json(camera.schedule_json, {}),
         "options": from_json(camera.options_json, {}),
         "created_at": camera.created_at,

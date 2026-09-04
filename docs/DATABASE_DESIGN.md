@@ -133,7 +133,6 @@ JSON 字段示例：
   "modes_json": ["black_screen", "off_duty", "phone_use"],
   "geometry_json": {
     "post_roi": [[0.10, 0.20], [0.80, 0.20], [0.80, 0.90], [0.10, 0.90]],
-    "flow_line": [],
     "intrusion_zone": null
   },
   "schedule_json": {
@@ -233,7 +232,7 @@ JSON 字段示例：
 
 ### 5.4 `traffic_aggregates` 人流分钟聚合表
 
-每个摄像头每分钟最多一条记录。`current_count` 是该分钟最后一次更新时的在场人数快照，`entered` 和 `exited` 是该分钟内事件累加值。
+每个摄像头每分钟最多一条记录。`current_count` 是该分钟最后一次更新时的画面人数快照，`entered` 是该分钟内新人员进入画面事件累加值；`exited` 为历史兼容字段，新算法固定写入 0。
 
 | 字段 | PostgreSQL 类型 | 空值 | 默认值 | 键/索引 | 说明 |
 | --- | --- | --- | --- | --- | --- |
@@ -242,7 +241,7 @@ JSON 字段示例：
 | `bucket_start` | `timestamptz` | 否 | 无 | INDEX | UTC 分钟桶起始时间，秒和微秒为 0 |
 | `current_count` | `integer` | 否 | `0` |  | 当前在场人数快照 |
 | `entered` | `integer` | 否 | `0` |  | 本分钟进入人数 |
-| `exited` | `integer` | 否 | `0` |  | 本分钟离开人数 |
+| `exited` | `integer` | 否 | `0` |  | 历史兼容字段，新人流算法不再使用 |
 
 唯一约束：`UNIQUE(camera_id, bucket_start)`，防止同一摄像头同一分钟产生重复聚合行。
 

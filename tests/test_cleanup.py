@@ -85,16 +85,18 @@ def test_cleanup_honors_override_days(evidence_dir):
     file = evidence_dir / "mid.jpg"
     file.write_bytes(b"mid")
     _add_camera(camera_id)
-    alert_id = _add_alert(camera_id, "black_screen", "normal", utc_now() - timedelta(days=20), "mid.jpg")
+    _add_alert(camera_id, "black_screen", "normal", utc_now() - timedelta(days=20), "mid.jpg")
     try:
         result = _run(evidence_dir, override_days=10)
         assert result["deleted"] == 1
         assert not file.exists()
-        _add_alert(camera_id, "black_screen", "normal", utc_now() - timedelta(days=20), "mid.jpg")
+        retained_alert_id = _add_alert(
+            camera_id, "black_screen", "normal", utc_now() - timedelta(days=20), "mid.jpg"
+        )
         result = _run(evidence_dir, override_days=60)
         assert result["deleted"] == 0
         with session_scope() as session:
-            assert session.get(models.Alert, alert_id) is not None
+            assert session.get(models.Alert, retained_alert_id) is not None
     finally:
         _cleanup_camera(camera_id)
 

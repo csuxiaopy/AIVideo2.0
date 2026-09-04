@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import math
+import logging
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from backend.schemas import GeometrySpec, ScheduleSpec
+
+logger = logging.getLogger(__name__)
 
 
 def point_in_polygon(point: tuple[float, float], polygon: list[tuple[float, float]]) -> bool:
@@ -84,14 +87,6 @@ def box_intersects_polygon(
     )
 
 
-def line_side(point: tuple[float, float], line: list[tuple[float, float]]) -> float:
-    if len(line) != 2:
-        return 0.0
-    (x1, y1), (x2, y2) = line
-    x, y = point
-    return (x2 - x1) * (y - y1) - (y2 - y1) * (x - x1)
-
-
 def is_scheduled(schedule: ScheduleSpec, now: datetime | None = None) -> bool:
     if not schedule.weekly:
         return True
@@ -122,14 +117,35 @@ def is_scheduled(schedule: ScheduleSpec, now: datetime | None = None) -> bool:
 
 
 @dataclass
+class FlowTrackState:
+    track_id: int
+    first_seen: datetime
+    last_seen: datetime
+    first_position: tuple[float, float]
+    first_zone: str
+    stable_frames: int = 1
+    counted: bool = False
+    suppressed: bool = False
+    trajectory: deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=8))
+
+
+def flow_entry_zone(point: tuple[float, float], ratio: float) -> str:
+    x, y = point
+    distances = {"LEFT_EDGE": x, "RIGHT_EDGE": 1 - x, "TOP_EDGE": y, "BOTTOM_EDGE": 1 - y}
+    zone, distance = min(distances.items(), key=lambda item: item[1])
+    return zone if distance <= ratio else "CENTER"
+
+
+@dataclass
 class CameraRuleState:
     black_consecutive: int = 0
     absence_since: datetime | None = None
     positive_windows: dict[str, deque[datetime]] = field(default_factory=lambda: defaultdict(deque))
-    previous_track_side: dict[int, float] = field(default_factory=dict)
-    last_seen_tracks: dict[int, datetime] = field(default_factory=dict)
-    counted_flow_tracks: set[int] = field(default_factory=set)
+    flow_tracks: dict[int, FlowTrackState] = field(default_factory=dict)
+    recently_lost_flow_tracks: dict[int, FlowTrackState] = field(default_factory=dict)
     flow_day: str | None = None
+    flow_initialized_at: datetime | None = None
+    flow_protection_until: datetime | None = None
     fire_consecutive: int = 0
     smoke_window: deque[bool] = field(default_factory=lambda: deque(maxlen=5))
     intrusion_active: set[int] = field(default_factory=set)
@@ -207,40 +223,82 @@ class CameraRuleState:
         return triggered
 
     def flow_update(
-        self, tracks: list[tuple[int, tuple[float, float]]], line: list[tuple[float, float]], now: datetime
-    ) -> tuple[int, int]:
+        self,
+        tracks: list[tuple[int, tuple[float, float]]],
+        now: datetime,
+        min_stable_frames: int = 3,
+        edge_ratio: float = 0.1,
+        reassociation_seconds: int = 5,
+        reassociation_distance: float = 0.12,
+        recovery_grace_seconds: int = 15,
+        recovering: bool = False,
+    ) -> tuple[int, dict[int, FlowTrackState]]:
         day = now.date().isoformat()
         if self.flow_day != day:
             self.flow_day = day
-            self.counted_flow_tracks.clear()
-            self.previous_track_side.clear()
-            self.last_seen_tracks.clear()
-        entered = exited = 0
-        active_ids = set()
-        for track_id, center in tracks:
-            active_ids.add(track_id)
-            side = line_side(center, line)
-            previous = self.previous_track_side.get(track_id)
-            if (
-                track_id not in self.counted_flow_tracks
-                and previous is not None
-                and abs(previous) > 1e-5
-                and abs(side) > 1e-5
-                and previous * side < 0
-            ):
-                if previous < side:
-                    entered += 1
+            self.flow_tracks.clear()
+            self.recently_lost_flow_tracks.clear()
+            self.flow_initialized_at = None
+            self.flow_protection_until = None
+        if self.flow_initialized_at is None or recovering:
+            self.flow_initialized_at = now
+            self.flow_protection_until = now + timedelta(seconds=recovery_grace_seconds)
+            if recovering:
+                self.recently_lost_flow_tracks.update(self.flow_tracks)
+                self.flow_tracks.clear()
+
+        incoming = {track_id: position for track_id, position in tracks}
+        for track_id in set(self.flow_tracks) - set(incoming):
+            self.recently_lost_flow_tracks[track_id] = self.flow_tracks.pop(track_id)
+
+        lost_cutoff = now - timedelta(seconds=reassociation_seconds)
+        self.recently_lost_flow_tracks = {
+            track_id: state for track_id, state in self.recently_lost_flow_tracks.items()
+            if state.last_seen >= lost_cutoff
+        }
+        entered = 0
+        protected = bool(self.flow_protection_until and now < self.flow_protection_until)
+        for track_id, position in tracks:
+            state = self.flow_tracks.get(track_id)
+            if state is None:
+                match = min(
+                    (
+                        (math.dist(position, old.trajectory[-1]), old_id, old)
+                        for old_id, old in self.recently_lost_flow_tracks.items()
+                        if old.trajectory and math.dist(position, old.trajectory[-1]) <= reassociation_distance
+                    ),
+                    default=None,
+                )
+                if match:
+                    _, old_id, old = match
+                    self.recently_lost_flow_tracks.pop(old_id, None)
+                    state = FlowTrackState(
+                        track_id, old.first_seen, now, old.first_position, old.first_zone,
+                        old.stable_frames + 1, old.counted, old.suppressed,
+                        deque(old.trajectory, maxlen=8),
+                    )
+                    logger.info("[FLOW] Track %s possibly reassociated with Track %s; inherit counted=%s", track_id, old_id, old.counted)
                 else:
-                    exited += 1
-                self.counted_flow_tracks.add(track_id)
-            self.previous_track_side[track_id] = side
-            self.last_seen_tracks[track_id] = now
-        expiry = now - timedelta(seconds=10)
-        for track_id, seen in list(self.last_seen_tracks.items()):
-            if seen < expiry:
-                self.last_seen_tracks.pop(track_id, None)
-                self.previous_track_side.pop(track_id, None)
-        return entered, exited
+                    zone = flow_entry_zone(position, edge_ratio)
+                    state = FlowTrackState(track_id, now, now, position, zone, suppressed=protected)
+                    logger.info("[FLOW] Track %s created first_zone=%s%s", track_id, zone, " (protected)" if protected else "")
+                    if zone == "CENTER":
+                        logger.info("[FLOW] Track %s created at CENTER; possible tracker recreation", track_id)
+                state.trajectory.append(position)
+                self.flow_tracks[track_id] = state
+            else:
+                state.stable_frames += 1
+                state.last_seen = now
+                state.trajectory.append(position)
+
+            displacement = math.dist(state.first_position, position)
+            required = min_stable_frames if state.first_zone != "CENTER" else min_stable_frames + 2
+            eligible_center = state.first_zone != "CENTER" or displacement >= 0.03
+            if not state.counted and not state.suppressed and state.stable_frames >= required and eligible_center:
+                state.counted = True
+                entered += 1
+                logger.info("[FLOW] Track %s stable=%s confirmed as new visitor; visitor_count +1", track_id, state.stable_frames)
+        return entered, dict(self.flow_tracks)
 
 
 class RuleStateRegistry:

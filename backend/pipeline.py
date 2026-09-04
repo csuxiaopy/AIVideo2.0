@@ -200,8 +200,9 @@ class MonitoringRuntime:
         if not camera:
             raise KeyError(camera_id)
         async with self.camera_locks[camera_id]:
+            recovering = not camera.online
             await self.media.capture(camera_id)
-            general = await self._process(camera, force=True)
+            general = await self._process(camera, force=True, recovering=recovering)
             modes = set(from_json(camera.modes_json, []))
             if Mode.FIRE_SMOKE.value in modes:
                 fire = await self._process_fire(camera, force=True)
@@ -267,8 +268,9 @@ class MonitoringRuntime:
                             self.repository.set_last_analysis_at(camera.id)
                         else:
                             # Scheduled capture is short lived: FFmpeg exits after one JPEG.
+                            recovering = not camera.online
                             await self.media.capture(camera.id)
-                            await self._process(camera)
+                            await self._process(camera, recovering=recovering)
                             self.repository.set_last_analysis_at(camera.id)
                             modes = set(from_json(camera.modes_json, []))
                             if Mode.FIRE_SMOKE.value in modes and camera.id not in self.fire_queued:
@@ -289,7 +291,7 @@ class MonitoringRuntime:
                 queued.discard(task.camera_id)
                 await queue.ack(task)
 
-    async def _process(self, camera: models.Camera, force: bool = False) -> dict[str, Any]:
+    async def _process(self, camera: models.Camera, force: bool = False, recovering: bool = False) -> dict[str, Any]:
         started = time.perf_counter()
         frame = self.media.latest(camera.id)
         if not frame:
@@ -377,14 +379,29 @@ class MonitoringRuntime:
                     evidence = annotate_detections(frame.jpeg, people, zone=geometry.post_roi)
                     await self.alerts.create(camera, analysis, evidence)
 
-        if Mode.PEOPLE_FLOW.value in modes and geometry.flow_line and mode_is_active(Mode.PEOPLE_FLOW.value, schedule, now):
+        if Mode.PEOPLE_FLOW.value in modes and mode_is_active(Mode.PEOPLE_FLOW.value, schedule, now):
             tracks = [
-                (item.track_id, ((item.box[0] + item.box[2]) / 2, item.box[3]))
+                (item.track_id, ((item.box[0] + item.box[2]) / 2, (item.box[1] + item.box[3]) / 2))
                 for item in people if item.track_id is not None
             ]
-            entered, exited = state.flow_update(tracks, geometry.flow_line, now)
-            self.repository.upsert_traffic(camera.id, len(people), entered, exited)
-            results.append({"mode": Mode.PEOPLE_FLOW.value, "current": len(people), "entered": entered, "exited": exited})
+            entered, flow_states = state.flow_update(
+                tracks, now,
+                options.flow_min_stable_frames,
+                options.flow_entry_edge_ratio,
+                options.flow_reassociation_seconds,
+                options.flow_reassociation_distance,
+                options.stream_recovery_grace_seconds,
+                recovering,
+            )
+            current_count = len(tracks)
+            self.repository.upsert_traffic(camera.id, current_count, entered, 0)
+            if options.flow_debug:
+                summary = self.repository.traffic_summary()
+                camera_summary = next((item for item in summary["cameras"] if item["camera_id"] == camera.id), {})
+                self.media.set_flow_debug(
+                    camera.id, flow_states, current_count, int(camera_summary.get("entered_today", 0)), entered
+                )
+            results.append({"mode": Mode.PEOPLE_FLOW.value, "current": current_count, "entered": entered})
 
         behavior_modes = {
             mode for mode in (Mode.PHONE_USE, Mode.SMOKING)

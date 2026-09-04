@@ -832,9 +832,8 @@ tr.severity-critical .event-type{color:var(--danger);background:rgba(255,77,90,.
 }
 .geometry-stage img{width:100%;height:100%;object-fit:contain;display:block;opacity:.9}
 .geometry-stage svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
-.geometry-stage polygon,.geometry-stage line{vector-effect:non-scaling-stroke;stroke-width:2}
+.geometry-stage polygon{vector-effect:non-scaling-stroke;stroke-width:2}
 .geometry-stage .post-zone{fill:rgba(0,230,168,.15);stroke:var(--success)}
-.geometry-stage .flow-line{stroke:var(--cyan);stroke-width:3}
 .geometry-stage .intrusion-zone{fill:rgba(255,77,90,.17);stroke:var(--danger)}
 .geometry-stage circle{fill:#fff;stroke:#04121F;stroke-width:.35}
 .geometry-stage text{fill:#fff;font-size:3px;font-weight:700;paint-order:stroke;stroke:#04121F;stroke-width:.6}

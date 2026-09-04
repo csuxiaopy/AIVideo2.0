@@ -10,7 +10,7 @@ export type Mode =
 
 export type SceneType = 'workstation' | 'customer_area' | 'security_area' | 'custom'
 export type Point = [number, number]
-export type DrawLayer = 'post_roi' | 'flow_line' | 'intrusion_zone'
+export type DrawLayer = 'post_roi' | 'intrusion_zone'
 
 export interface Camera {
   id: string

@@ -16,7 +16,7 @@ def test_scene_templates_have_expected_modes_and_geometry():
     ]
     assert templates["workstation"]["options"]["fire_confidence"] == 0.3
     assert templates["workstation"]["options"]["smoke_confidence"] == 0.3
-    assert templates["customer_area"]["required_geometry"] == ["flow_line"]
+    assert templates["customer_area"]["required_geometry"] == []
     assert templates["security_area"]["required_geometry"] == ["intrusion_zone"]
     assert set(templates["security_area"]["modes"]) == {"fire_smoke", "intrusion", "black_screen"}
 

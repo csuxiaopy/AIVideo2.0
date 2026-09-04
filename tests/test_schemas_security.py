@@ -12,16 +12,17 @@ from backend.schemas import (
     VLMResult,
 )
 from backend.security import SecretCipher, redact_rtsp, sign_webhook
+from backend.api.presenters import camera_public
 from backend.vlm import extract_json
 
 
-def test_camera_requires_roi_and_line():
+def test_camera_requires_roi_but_people_flow_needs_no_geometry():
     with pytest.raises(ValueError):
         CameraCreate(id="c1", name="c1", rtsp_url="rtsp://host/live", modes=[Mode.OFF_DUTY])
     camera = CameraCreate(
         id="c1", name="c1", rtsp_url="rtsp://host/live",
         modes=[Mode.OFF_DUTY, Mode.PEOPLE_FLOW],
-        geometry=GeometrySpec(post_roi=[(0,0),(1,0),(1,1)], flow_line=[(0.5,0),(0.5,1)]),
+        geometry=GeometrySpec(post_roi=[(0,0),(1,0),(1,1)]),
     )
     assert len(camera.modes) == 2
 
@@ -82,13 +83,29 @@ def test_camera_patch_supports_complete_business_edit():
         enabled=False,
         scene_type="security_area",
         modes=["black_screen", "fire_smoke", "fire_smoke"],
-        geometry={"post_roi": [], "flow_line": [], "intrusion_zone": None},
+        geometry={"post_roi": [], "intrusion_zone": None},
         schedule={"timezone": "Asia/Shanghai", "weekly": {}, "holidays": []},
         frame_interval_seconds=20,
     )
     assert patch.id == "hall-renamed"
     assert [mode.value for mode in patch.modes or []] == ["black_screen", "fire_smoke"]
     assert patch.frame_interval_seconds == 20
+
+
+def test_camera_public_discards_historical_flow_geometry():
+    from types import SimpleNamespace
+
+    camera = SimpleNamespace(
+        id="legacy-flow", name="旧入口", enabled=True, scene_type="customer_area",
+        rtsp_url_encrypted=SecretCipher("test-secret").encrypt("rtsp://host/live"),
+        online=True, last_seen_at=None, last_frame_at=None, last_analysis_at=None,
+        frame_interval_seconds=1, last_error=None, modes_json='["people_flow"]',
+        geometry_json='{"flow_line":[[0.1,0.5],[0.9,0.5]]}',
+        schedule_json="{}", options_json="{}", created_at=None, updated_at=None,
+    )
+    result = camera_public(camera, SecretCipher("test-secret"))
+    assert "flow_line" not in result["geometry"]
+    assert "flow_zone" not in result["geometry"]
 
 
 def test_camera_frame_interval_supports_one_second():

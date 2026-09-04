@@ -98,7 +98,12 @@ def draw_object_overlays(jpeg: bytes, overlays: list[ObjectOverlay]) -> bytes:
         return jpeg
 
 
-def draw_person_overlays(jpeg: bytes, overlays: list[PersonOverlay]) -> bytes:
+def draw_person_overlays(
+    jpeg: bytes,
+    overlays: list[PersonOverlay],
+    flow_states: dict[int, object] | None = None,
+    flow_summary: tuple[int, int, int] | None = None,
+) -> bytes:
     """Draw preview-only person boxes while leaving the analysis frame untouched."""
     if not overlays:
         return jpeg
@@ -124,7 +129,10 @@ def draw_person_overlays(jpeg: bytes, overlays: list[PersonOverlay]) -> bytes:
             cv2.rectangle(image, (left, top), (right, bottom), color, thickness, cv2.LINE_AA)
 
             person_id = overlay.track_id if overlay.track_id is not None else "-"
+            state = (flow_states or {}).get(overlay.track_id) if overlay.track_id is not None else None
             label = f"P#{person_id}  {overlay.confidence:.0%}"
+            if state is not None:
+                label = f"P#{person_id} {state.first_zone} stable:{state.stable_frames} counted:{'YES' if state.counted else 'NO'}"
             (text_width, text_height), baseline = cv2.getTextSize(
                 label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
             )
@@ -147,6 +155,10 @@ def draw_person_overlays(jpeg: bytes, overlays: list[PersonOverlay]) -> bytes:
                 cv2.LINE_AA,
             )
 
+        if flow_summary:
+            current, today, increment = flow_summary
+            summary = f"FLOW current:{current} today:{today}" + (f"  NEW VISITOR +{increment}" if increment else "")
+            cv2.putText(image, summary, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 229, 255), thickness, cv2.LINE_AA)
         ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 88])
         return encoded.tobytes() if ok else jpeg
     except Exception:

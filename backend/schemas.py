@@ -46,6 +46,12 @@ class CameraOptions(BaseModel):
     smoke_confidence: float = Field(default=0.30, ge=0, le=1)
     intrusion_confidence: float = Field(default=0.50, ge=0, le=1)
     intrusion_cooldown_seconds: int = Field(default=60, ge=0, le=86400)
+    flow_min_stable_frames: int = Field(default=3, ge=2, le=30)
+    flow_entry_edge_ratio: float = Field(default=0.10, ge=0.02, le=0.40)
+    flow_reassociation_seconds: int = Field(default=5, ge=1, le=30)
+    flow_reassociation_distance: float = Field(default=0.12, ge=0.02, le=0.50)
+    stream_recovery_grace_seconds: int = Field(default=15, ge=0, le=300)
+    flow_debug: bool = False
 
 
 class NamedPolygon(BaseModel):
@@ -55,7 +61,6 @@ class NamedPolygon(BaseModel):
 
 class GeometrySpec(BaseModel):
     post_roi: list[Point] = Field(default_factory=list, max_length=50)
-    flow_line: list[Point] = Field(default_factory=list, max_length=2)
     intrusion_zone: NamedPolygon | None = None
 
     @field_validator("post_roi")
@@ -65,12 +70,6 @@ class GeometrySpec(BaseModel):
             raise ValueError("岗位区域至少需要3个点")
         return value
 
-    @field_validator("flow_line")
-    @classmethod
-    def valid_line(cls, value: list[Point]) -> list[Point]:
-        if value and len(value) != 2:
-            raise ValueError("人流统计线必须包含2个点")
-        return value
 
 
 class Shift(BaseModel):
@@ -128,8 +127,6 @@ class CameraCreate(BaseModel):
         selected = set(self.modes)
         if selected & {Mode.OFF_DUTY, Mode.ON_DUTY, Mode.PHONE_USE} and len(self.geometry.post_roi) < 3:
             raise ValueError("在岗或离岗模式必须配置岗位区域")
-        if Mode.PEOPLE_FLOW in selected and len(self.geometry.flow_line) != 2:
-            raise ValueError("人流模式必须配置统计线")
         if Mode.INTRUSION in selected and self.geometry.intrusion_zone is None:
             raise ValueError("区域入侵模式必须配置禁区")
         return self

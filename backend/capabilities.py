@@ -49,7 +49,7 @@ SCENE_TEMPLATES: dict[SceneType, dict[str, Any]] = {
         "description": "营业厅客流统计",
         "modes": [Mode.PEOPLE_FLOW.value, Mode.BLACK_SCREEN.value],
         "schedule": _weekday_schedule([{"start": "08:30", "end": "17:30"}], range(7)),
-        "required_geometry": ["flow_line"],
+        "required_geometry": [],
     },
     SceneType.SECURITY_AREA: {
         "name": "库房/全局区域",
