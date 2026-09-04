@@ -140,7 +140,7 @@ pydantic-settings 的覆盖顺序（高 → 低）：
 | `online` / `last_seen_at` / `last_frame_at` / `last_analysis_at` / `last_error` | 运行时状态（每次心跳写库） |
 | `created_at` / `updated_at` | 时间戳 |
 
-`options_json` 全量字段（`backend/schemas.py` `CameraOptions`）：`health_interval_seconds=5`、`yolo_fps=0.1`、`behavior_interval_seconds=15`（兼容保留，玩手机/吸烟不再读取）、`off_duty_seconds=300`、`shift_grace_seconds=60`、`alert_cooldown_seconds=300`、`black_mean_max=18`、`black_std_max=12`、`black_ratio_min=0.92`、`fire_smoke_fps=1.0`、`fire_confidence=0.55`、`smoke_confidence=0.45`、`intrusion_confidence=0.50`、`intrusion_cooldown_seconds=60`。玩手机与吸烟在配置排班内共用固定 180 秒节流，以同一当前帧进行联合 VLM 检测。
+`options_json` 全量字段（`backend/schemas.py` `CameraOptions`）：`health_interval_seconds=5`、`yolo_fps=0.1`、`behavior_interval_seconds=15`（兼容保留，玩手机/吸烟不再读取）、`off_duty_seconds=300`、`shift_grace_seconds=60`、`alert_cooldown_seconds=300`、`black_mean_max=18`、`black_std_max=12`、`black_ratio_min=0.92`、`fire_smoke_fps=1.0`、`fire_confidence=0.30`、`smoke_confidence=0.30`、`intrusion_confidence=0.50`、`intrusion_cooldown_seconds=60`。离岗/在岗人员判断使用 `confidence>=0.30`。玩手机与吸烟在配置排班内共用固定 180 秒节流，以同一当前帧进行联合 VLM 检测。
 
 **（2）告警规则 / 系统级设置（Webhook 为多行，其余设置为单行表）**
 

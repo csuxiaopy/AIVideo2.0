@@ -122,7 +122,7 @@ erDiagram
 | `workstation` | 员工工位 |
 | `customer_area` | 客户区或入口 |
 | `security_area` | 库房或安全区域 |
-| `custom` | 自定义场景 |
+| `custom` | 其他场景（兼容枚举值） |
 
 `modes_json` 可用模式：`black_screen`（黑屏）、`off_duty`（离岗）、`on_duty`（在岗记录）、`people_flow`（人流）、`phone_use`（玩手机）、`smoking`（抽烟）、`fire_smoke`（烟火）、`intrusion`（闯入）。数组必须非空且去重。
 
@@ -139,7 +139,7 @@ JSON 字段示例：
   "schedule_json": {
     "timezone": "Asia/Shanghai",
     "weekly": {
-      "0": [{"start": "08:30", "end": "12:00"}, {"start": "13:30", "end": "17:30"}]
+      "0": [{"start": "09:30", "end": "11:00"}, {"start": "14:00", "end": "17:00"}]
     },
     "holidays": ["2026-10-01"]
   },
@@ -152,8 +152,8 @@ JSON 字段示例：
     "black_mean_max": 18.0,
     "black_std_max": 12.0,
     "black_ratio_min": 0.92,
-    "fire_confidence": 0.55,
-    "smoke_confidence": 0.45,
+    "fire_confidence": 0.30,
+    "smoke_confidence": 0.30,
     "intrusion_confidence": 0.50,
     "intrusion_cooldown_seconds": 60
   }

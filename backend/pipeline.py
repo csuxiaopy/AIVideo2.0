@@ -346,7 +346,7 @@ class MonitoringRuntime:
         people = self.yolo.people(detections)
         self.media.set_person_detections(camera.id, people)
         self.media.set_object_detections(camera.id, detections)
-        post_people = [item for item in people if item.confidence >= 0.45]
+        post_people = [item for item in people if item.confidence >= 0.30]
         occupied = any(box_intersects_polygon(item.box, geometry.post_roi) for item in post_people)
 
         if Mode.ON_DUTY.value in modes and mode_is_active(Mode.ON_DUTY.value, schedule, now) and self._mode_due(camera.id, Mode.ON_DUTY.value, 15, force):

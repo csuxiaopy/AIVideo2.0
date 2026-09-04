@@ -42,8 +42,8 @@ class CameraOptions(BaseModel):
     black_std_max: float = Field(default=12.0, ge=0, le=255)
     black_ratio_min: float = Field(default=0.92, ge=0, le=1)
     fire_smoke_fps: float = Field(default=1.0, ge=0.2, le=5)
-    fire_confidence: float = Field(default=0.55, ge=0, le=1)
-    smoke_confidence: float = Field(default=0.45, ge=0, le=1)
+    fire_confidence: float = Field(default=0.30, ge=0, le=1)
+    smoke_confidence: float = Field(default=0.30, ge=0, le=1)
     intrusion_confidence: float = Field(default=0.50, ge=0, le=1)
     intrusion_cooldown_seconds: int = Field(default=60, ge=0, le=86400)
 
@@ -97,12 +97,12 @@ class CameraCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     rtsp_url: str = Field(min_length=1, max_length=2000)
     enabled: bool = True
-    scene_type: SceneType = SceneType.CUSTOM
+    scene_type: SceneType = SceneType.WORKSTATION
     modes: list[Mode] = Field(min_length=1, max_length=len(Mode))
     geometry: GeometrySpec = Field(default_factory=GeometrySpec)
     schedule: ScheduleSpec = Field(default_factory=ScheduleSpec)
     options: CameraOptions = Field(default_factory=CameraOptions)
-    frame_interval_seconds: int = 60
+    frame_interval_seconds: int = 1
 
     @field_validator("frame_interval_seconds")
     @classmethod

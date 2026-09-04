@@ -40,7 +40,7 @@ SCENE_TEMPLATES: dict[SceneType, dict[str, Any]] = {
         "description": "员工行为规范与离岗管理",
         "modes": [Mode.OFF_DUTY.value, Mode.PHONE_USE.value, Mode.BLACK_SCREEN.value],
         "schedule": _weekday_schedule(
-            [{"start": "08:30", "end": "12:00"}, {"start": "13:30", "end": "17:30"}], range(5)
+            [{"start": "09:30", "end": "11:00"}, {"start": "14:00", "end": "17:00"}], range(5)
         ),
         "required_geometry": ["post_roi"],
     },
@@ -67,7 +67,7 @@ ALWAYS_ON_MODES = {Mode.FIRE_SMOKE.value, Mode.INTRUSION.value, Mode.BLACK_SCREE
 def scene_templates_public() -> list[dict[str, Any]]:
     options = CameraOptions().model_dump()
     geometry = GeometrySpec().model_dump()
-    return [
+    templates = [
         {
             "scene_type": scene.value,
             **deepcopy(template),
@@ -76,6 +76,10 @@ def scene_templates_public() -> list[dict[str, Any]]:
         }
         for scene, template in SCENE_TEMPLATES.items()
     ]
+    for template in templates:
+        if template["scene_type"] == SceneType.WORKSTATION.value:
+            template["geometry"]["post_roi"] = [[0, 0], [1, 0], [1, 1], [0, 1]]
+    return templates
 
 
 def capabilities_public() -> list[dict[str, Any]]:

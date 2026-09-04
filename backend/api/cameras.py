@@ -99,12 +99,12 @@ def _batch_default_camera(camera_id: str, name: str, rtsp_url: str) -> CameraCre
         scene_type=SceneType.WORKSTATION,
         modes=template["modes"],
         geometry={
-            "post_roi": [[0.12, 0.12], [0.88, 0.12], [0.88, 0.9], [0.12, 0.9]],
+            "post_roi": [[0, 0], [1, 0], [1, 1], [0, 1]],
             "flow_line": [],
             "intrusion_zone": None,
         },
         schedule=template["schedule"],
-        frame_interval_seconds=60,
+        frame_interval_seconds=1,
     )
 
 

@@ -16,7 +16,7 @@ def test_frame_interval_defaults_and_preserves_legacy_detector_options():
         modes=["black_screen"],
         options=CameraOptions(yolo_fps=0.5, fire_smoke_fps=2),
     )
-    assert payload.frame_interval_seconds == 60
+    assert payload.frame_interval_seconds == 1
     assert payload.options.yolo_fps == 0.5
     assert payload.options.fire_smoke_fps == 2
 

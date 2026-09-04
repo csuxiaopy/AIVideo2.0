@@ -21,7 +21,7 @@ const sceneInfo:Record<SceneType,{name:string;icon:string;en:string}> = {
   workstation:{name:'员工工位',icon:'workstation',en:'WORKSTATION'},
   customer_area:{name:'客户位 / 入口',icon:'entrance',en:'ENTRANCE'},
   security_area:{name:'库房 / 全局',icon:'warehouse',en:'WAREHOUSE'},
-  custom:{name:'自定义',icon:'sliders',en:'CUSTOM'},
+  custom:{name:'其他',icon:'sliders',en:'OTHER'},
 }
 const tabs = [
   {key:'dashboard',name:'监控总览',icon:'dashboard',en:'MONITORING CENTER'},
@@ -151,10 +151,10 @@ const loadAll = async (silent=false) => {
   finally { loading.value=false }
 }
 
-const defaultOptions = () => ({health_interval_seconds:5,yolo_fps:.1,behavior_interval_seconds:15,off_duty_seconds:300,shift_grace_seconds:60,alert_cooldown_seconds:300,black_mean_max:18,black_std_max:12,black_ratio_min:.92,fire_smoke_fps:1,fire_confidence:.55,smoke_confidence:.45,intrusion_confidence:.5,intrusion_cooldown_seconds:60})
+const defaultOptions = () => ({health_interval_seconds:5,yolo_fps:.1,behavior_interval_seconds:15,off_duty_seconds:300,shift_grace_seconds:60,alert_cooldown_seconds:300,black_mean_max:18,black_std_max:12,black_ratio_min:.92,fire_smoke_fps:1,fire_confidence:.3,smoke_confidence:.3,intrusion_confidence:.5,intrusion_cooldown_seconds:60})
 const emptySchedule = () => ({timezone:'Asia/Shanghai',weekly:{},holidays:[]})
 const deepCopy = <T,>(value:T):T => JSON.parse(JSON.stringify(value))
-const newCamera = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'workstation' as SceneType,modes:[] as Mode[],schedule:emptySchedule(),options:defaultOptions(),frame_interval_seconds:60})
+const newCamera = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'workstation' as SceneType,modes:[] as Mode[],schedule:emptySchedule(),options:defaultOptions(),frame_interval_seconds:1})
 const selectTemplate = (scene:SceneType) => {
   newCamera.scene_type=scene
   const item=templates.value.find(t=>t.scene_type===scene)
@@ -162,7 +162,7 @@ const selectTemplate = (scene:SceneType) => {
   else {newCamera.modes=['black_screen'];newCamera.schedule=emptySchedule()}
 }
 const defaultGeometry = (scene:SceneType) => {
-  if(scene==='workstation') return {post_roi:[[.12,.12],[.88,.12],[.88,.9],[.12,.9]],flow_line:[],intrusion_zone:null}
+  if(scene==='workstation') return {post_roi:[[0,0],[1,0],[1,1],[0,1]],flow_line:[],intrusion_zone:null}
   if(scene==='customer_area') return {post_roi:[],flow_line:[[.15,.52],[.85,.52]],intrusion_zone:null}
   if(scene==='security_area') return {post_roi:[],flow_line:[],intrusion_zone:{name:'禁区',points:[[.12,.12],[.88,.12],[.88,.9],[.12,.9]]}}
   return {post_roi:[],flow_line:[],intrusion_zone:null}
@@ -179,7 +179,7 @@ const createCamera = async () => {
     if(!newCamera.modes.length) throw new Error('请至少选择一种检测模式')
     const created=await api('/api/cameras',{method:'POST',body:JSON.stringify({...newCamera,geometry:defaultGeometry(newCamera.scene_type)})})
     notify('摄像头已添加，请继续校准检测区域'); await loadAll(true)
-    Object.assign(newCamera,{id:'',name:'',rtsp_url:'',enabled:true,scene_type:'workstation',modes:[],schedule:emptySchedule(),options:defaultOptions(),frame_interval_seconds:60}); selectTemplate('workstation')
+    Object.assign(newCamera,{id:'',name:'',rtsp_url:'',enabled:true,scene_type:'workstation',modes:[],schedule:emptySchedule(),options:defaultOptions(),frame_interval_seconds:1}); selectTemplate('workstation')
     openEditor(created)
   } catch(error:any){notify(error.message,'error')}
 }
@@ -239,9 +239,9 @@ const saveEditor = async () => {
 }
 const weekdays=[['0','一'],['1','二'],['2','三'],['3','四'],['4','五'],['5','六'],['6','日']]
 const dayEnabled=(d:string)=>Boolean(editForm.schedule.weekly?.[d]?.length)
-const toggleDay=(d:string)=>{if(dayEnabled(d)) delete editForm.schedule.weekly[d];else editForm.schedule.weekly[d]=[{start:'08:30',end:'12:00'},{start:'13:30',end:'17:30'}]}
-const firstShift = computed(()=>{const d=Object.keys(editForm.schedule.weekly||{})[0];return d?editForm.schedule.weekly[d][0]:{start:'08:30',end:'12:00'}})
-const secondShift = computed(()=>{const d=Object.keys(editForm.schedule.weekly||{})[0];return d?(editForm.schedule.weekly[d][1]||{start:'13:30',end:'17:30'}):{start:'13:30',end:'17:30'}})
+const toggleDay=(d:string)=>{if(dayEnabled(d)) delete editForm.schedule.weekly[d];else editForm.schedule.weekly[d]=[{start:'09:30',end:'11:00'},{start:'14:00',end:'17:00'}]}
+const firstShift = computed(()=>{const d=Object.keys(editForm.schedule.weekly||{})[0];return d?editForm.schedule.weekly[d][0]:{start:'09:30',end:'11:00'}})
+const secondShift = computed(()=>{const d=Object.keys(editForm.schedule.weekly||{})[0];return d?(editForm.schedule.weekly[d][1]||{start:'14:00',end:'17:00'}):{start:'14:00',end:'17:00'}})
 const syncShifts=()=>{for(const d of Object.keys(editForm.schedule.weekly||{})) editForm.schedule.weekly[d]=[deepCopy(firstShift.value),deepCopy(secondShift.value)]}
 
 const modelSettings=reactive<any>({provider:'mock',base_url:'',api_key:'',economy_model:'qwen-vl',enhanced_model:'qwen-vl-max',api_key_configured:false})
