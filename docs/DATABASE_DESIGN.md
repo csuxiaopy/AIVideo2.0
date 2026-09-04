@@ -106,7 +106,7 @@ erDiagram
 | `geometry_json` | `text` | 否 | `{}` |  | 岗位区域、统计线和禁区的 JSON 对象 |
 | `schedule_json` | `text` | 否 | `{}` |  | 时区、周排班和节假日的 JSON 对象 |
 | `options_json` | `text` | 否 | `{}` |  | 摄像头级检测阈值和冷却参数 JSON 对象 |
-| `frame_interval_seconds` | `integer` | 否 | `60` |  | 周期抓帧间隔，只允许 5、10、30、60、120 |
+| `frame_interval_seconds` | `integer` | 否 | `60` |  | 周期抓帧间隔，只允许 1、5、10、20、30、60、120 |
 | `online` | `boolean` | 否 | `false` |  | 最近一次视频源连接状态 |
 | `last_seen_at` | `timestamptz` | 是 | `NULL` |  | 最近一次确认在线时间 |
 | `last_frame_at` | `timestamptz` | 是 | `NULL` |  | 最近成功抓帧时间 |
@@ -372,7 +372,7 @@ ALTER TABLE cameras ADD CONSTRAINT ck_cameras_scene_type
 CHECK (scene_type IN ('workstation', 'customer_area', 'security_area', 'custom'));
 
 ALTER TABLE cameras ADD CONSTRAINT ck_cameras_frame_interval
-CHECK (frame_interval_seconds IN (5, 10, 30, 60, 120));
+CHECK (frame_interval_seconds IN (1, 5, 10, 20, 30, 60, 120));
 
 ALTER TABLE analyses ADD CONSTRAINT ck_analyses_confidence
 CHECK (confidence >= 0 AND confidence <= 1);

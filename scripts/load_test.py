@@ -16,7 +16,7 @@ async def main() -> None:
     parser.add_argument("--video", default=os.getenv("VIDEO_PATH", ""))
     parser.add_argument("--source", default="", help="Direct rtsp:// or file:// source visible to the app")
     parser.add_argument("--rounds", type=int, default=20)
-    parser.add_argument("--frame-interval", type=int, choices=[5, 10, 30, 60, 120], default=60)
+    parser.add_argument("--frame-interval", type=int, choices=[1, 5, 10, 20, 30, 60, 120], default=60)
     args = parser.parse_args()
     if args.source:
         source = args.source

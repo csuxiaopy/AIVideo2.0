@@ -1,6 +1,6 @@
 <script setup lang="ts">
 defineProps<{ model: any; editing?: boolean }>()
-const intervals = [5, 10, 20, 30, 60, 120]
+const intervals = [1, 5, 10, 20, 30, 60, 120]
 </script>
 
 <template>

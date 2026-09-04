@@ -136,7 +136,7 @@ pydantic-settings 的覆盖顺序（高 → 低）：
 | `geometry_json` | 岗位 ROI 多边形 / 人流统计线 / 入侵禁区多边形 |
 | `schedule_json` | 排班（`timezone`、`weekly` 星期排班、`holidays` 节假日） |
 | `options_json` | **采集参数 + 告警阈值**（`CameraOptions`，见下） |
-| `frame_interval_seconds` | 抽帧频率（5/10/30/60/120 秒） |
+| `frame_interval_seconds` | 抽帧频率（1/5/10/20/30/60/120 秒） |
 | `online` / `last_seen_at` / `last_frame_at` / `last_analysis_at` / `last_error` | 运行时状态（每次心跳写库） |
 | `created_at` / `updated_at` | 时间戳 |
 
