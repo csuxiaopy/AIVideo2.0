@@ -377,7 +377,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
   <div v-if="!authReady" class="auth-screen"><div class="auth-loader">SYSTEM INITIALIZING</div></div>
   <div v-else-if="!currentUser" class="auth-screen">
     <form class="auth-card" @submit.prevent="login">
-      <div class="brand auth-brand"><div class="brand-mark">JS</div><div class="brand-text"><strong>江苏有线</strong><small>无锡广电 · AI巡检</small></div></div>
+      <div class="brand auth-brand"><img class="brand-mark" src="/brand-icon.png" alt="江苏有线"><div class="brand-text"><strong>江苏有线</strong><small>无锡广电 · AI巡检</small></div></div>
       <span class="head-en">SECURE ACCESS</span><h1>账号登入</h1><p>请输入管理员分配的账号和密码</p>
       <label>用户名<input v-model.trim="loginForm.username" autocomplete="username" autofocus></label>
       <label>密码<input v-model="loginForm.password" type="password" autocomplete="current-password"></label>
@@ -388,7 +388,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
   <div v-else class="shell">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark">JS</div>
+        <img class="brand-mark" src="/brand-icon.png" alt="江苏有线">
         <div class="brand-text"><strong>江苏有线</strong><small>无锡广电 · AI巡检</small></div>
       </div>
       <nav><button v-for="tab in visibleTabs" :key="tab.key" :class="{active:active===tab.key}" @click="setTab(tab.key)"><TechIcon :name="tab.icon" :size="16"/>{{tab.name}}</button></nav>

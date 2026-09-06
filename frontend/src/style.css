@@ -135,20 +135,12 @@ img{display:block}
 }
 .brand{display:flex;align-items:center;gap:11px;padding:2px 8px 20px;position:relative}
 .brand-mark{
-  position:relative;width:42px;height:42px;flex:none;
-  display:grid;place-items:center;
-  color:var(--cyan);font:700 15px/1 var(--font-hud);letter-spacing:1px;
-  background:linear-gradient(145deg,rgba(0,140,255,.22),rgba(0,229,255,.08));
+  width:42px;height:42px;flex:none;display:block;object-fit:cover;
+  background:#0d63ad;
   border:1px solid var(--border-highlight);
-  border-radius:10px;
+  border-radius:9px;
   box-shadow:0 0 18px var(--glow-primary),inset 0 0 12px rgba(0,140,255,.15);
 }
-.brand-mark::before,.brand-mark::after{
-  content:'';position:absolute;width:7px;height:7px;
-  border-color:var(--cyan);border-style:solid;
-}
-.brand-mark::before{top:-2px;left:-2px;border-width:1.5px 0 0 1.5px}
-.brand-mark::after{bottom:-2px;right:-2px;border-width:0 1.5px 1.5px 0}
 .brand-text strong{display:block;font-size:16px;letter-spacing:2px;color:var(--text-primary)}
 .brand-text small{display:block;margin-top:2px;color:var(--text-muted);font-size:9px;letter-spacing:1.6px;font-family:var(--font-hud);font-weight:600}
 
