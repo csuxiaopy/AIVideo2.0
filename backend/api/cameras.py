@@ -17,6 +17,7 @@ from backend.repository import as_json, from_json
 from backend.schemas import (
     CameraCreate,
     CameraBatchCreate,
+    CameraBatchDelete,
     CameraPatch,
     GeometrySpec,
     Mode,
@@ -28,6 +29,16 @@ from backend.schemas import (
 
 
 router = APIRouter(prefix="/api")
+
+
+async def _remove_camera_runtime(camera_id: str) -> None:
+    runtime = context.require_runtime()
+    await runtime.media.remove(camera_id)
+    runtime.rules.remove(camera_id)
+    runtime.next_run.pop(camera_id, None)
+    runtime.next_fire_run.pop(camera_id, None)
+    runtime.queued.discard(camera_id)
+    runtime.fire_queued.discard(camera_id)
 
 
 def _camera_or_404(camera_id: str) -> models.Camera:
@@ -174,6 +185,16 @@ async def create_cameras_batch(payload: CameraBatchCreate) -> dict[str, Any]:
     return {"success": True, "created": len(cameras), "failed": 0}
 
 
+@router.post("/cameras/batch-delete", dependencies=[Depends(admin_user)])
+async def delete_cameras_batch(payload: CameraBatchDelete) -> dict[str, Any]:
+    deleted_ids = context.repository.delete_cameras(payload.ids)
+    for camera_id in deleted_ids:
+        await _remove_camera_runtime(camera_id)
+    deleted_set = set(deleted_ids)
+    missing_ids = [camera_id for camera_id in payload.ids if camera_id not in deleted_set]
+    return {"success": True, "deleted": len(deleted_ids), "deleted_ids": deleted_ids, "missing_ids": missing_ids}
+
+
 @router.get("/cameras/{camera_id}", dependencies=[Depends(current_user)])
 async def get_camera(camera_id: str) -> dict[str, Any]:
     return _public(_camera_or_404(camera_id))
@@ -221,13 +242,7 @@ async def patch_camera(camera_id: str, payload: CameraPatch) -> dict[str, Any]:
 async def delete_camera(camera_id: str) -> Response:
     if not context.repository.delete_camera(camera_id):
         raise HTTPException(status_code=404, detail="摄像头不存在")
-    runtime = context.require_runtime()
-    await runtime.media.remove(camera_id)
-    runtime.rules.remove(camera_id)
-    runtime.next_run.pop(camera_id, None)
-    runtime.next_fire_run.pop(camera_id, None)
-    runtime.queued.discard(camera_id)
-    runtime.fire_queued.discard(camera_id)
+    await _remove_camera_runtime(camera_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

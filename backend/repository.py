@@ -150,6 +150,16 @@ class Repository:
             session.delete(camera)
         return True
 
+    def delete_cameras(self, camera_ids: list[str]) -> list[str]:
+        """Delete existing cameras atomically and return the IDs actually removed."""
+        if not camera_ids:
+            return []
+        with session_scope() as session:
+            existing = list(session.scalars(select(models.Camera.id).where(models.Camera.id.in_(camera_ids))))
+            if existing:
+                session.execute(delete(models.Camera).where(models.Camera.id.in_(existing)))
+        return existing
+
     def set_camera_runtime(
         self,
         camera_id: str,

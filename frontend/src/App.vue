@@ -61,6 +61,8 @@ const previewLoading = ref(false)
 const previewError = ref('')
 const editor = ref<Camera|null>(null)
 const batchModal = ref(false)
+const selectedCameraIds = ref<string[]>([])
+const allCamerasSelected = computed(()=>cameras.value.length>0&&cameras.value.every(camera=>selectedCameraIds.value.includes(camera.id)))
 const drawLayer = ref<DrawLayer>('post_roi')
 const canvasRef = ref<HTMLElement|null>(null)
 const now = ref(new Date())
@@ -143,6 +145,7 @@ const loadAll = async (silent=false) => {
       api<TrafficSummary>('/api/traffic/summary'), api('/api/settings/display'),
     ])
     dashboard.value=d; cameras.value=c; alerts.value=a; analyses.value=n; trafficSummary.value=t
+    selectedCameraIds.value=selectedCameraIds.value.filter(id=>cameras.value.some(camera=>camera.id===id))
     Object.assign(displaySettings,ds)
     if(isAdmin.value){const [st,cp]=await Promise.all([api('/api/scene-templates'),api('/api/capabilities')]);templates.value=st;capabilities.value=cp}
     if(active.value==='traffic'&&!displaySettings.show_traffic_report) setTab('dashboard')
@@ -341,6 +344,21 @@ const clearAuthenticatedState=()=>{
   window.clearInterval(refreshTimer);refreshTimer=undefined
   active.value='dashboard'
 }
+const toggleAllCameras = () => {
+  selectedCameraIds.value = allCamerasSelected.value ? [] : cameras.value.map(camera=>camera.id)
+}
+const removeSelectedCameras = async () => {
+  const selected=cameras.value.filter(camera=>selectedCameraIds.value.includes(camera.id))
+  if(!selected.length)return
+  const previewNames=selected.slice(0,3).map(camera=>camera.name).join('、')
+  const preview=selected.length>3?`${previewNames} 等`:`${previewNames}`
+  const confirmed=await dialogConfirm({title:'批量删除摄像头',message:`确定删除 ${selected.length} 个摄像头（${preview}）？此操作不可撤销。`,confirmText:`删除 ${selected.length} 个`,danger:true})
+  if(!confirmed)return
+  try{
+    const result=await api<{deleted:number;missing_ids:string[]}>('/api/cameras/batch-delete',{method:'POST',body:JSON.stringify({ids:selected.map(camera=>camera.id)})})
+    selectedCameraIds.value=[];notify(`已删除 ${result.deleted} 个摄像头`);await loadAll(true)
+  }catch(error:any){notify(error.message,'error')}
+}
 const loadUsers=async()=>{if(!isAdmin.value)return;try{users.value=await api('/api/users')}catch(error:any){notify(error.message,'error')}}
 const login=async()=>{loginBusy.value=true;loginError.value='';try{
   const result=await api<{user:AuthUser;csrf_token:string}>('/api/auth/login',{method:'POST',body:JSON.stringify(loginForm)})
@@ -525,11 +543,14 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <div class="section-head">
               <div><h2>已有监控源</h2><span class="head-en">CAMERA SOURCES · {{cameras.length}}</span><p>原有摄像头保持自定义场景与原配置</p></div>
               <div class="actions">
+                <label v-if="cameras.length" class="camera-select-all"><input type="checkbox" :checked="allCamerasSelected" @change="toggleAllCameras">全选</label>
+                <button class="danger" :disabled="!selectedCameraIds.length" @click="removeSelectedCameras"><TechIcon name="trash" :size="13"/>批量删除 ({{selectedCameraIds.length}})</button>
                 <button class="ghost" @click="batchModal=true"><TechIcon name="layers" :size="13"/>批量添加</button>
                 <button class="primary" @click="scrollToAdd"><TechIcon name="plus" :size="13"/>添加视频源</button>
               </div>
             </div>
             <article v-for="camera in cameras" :key="camera.id">
+              <label class="camera-select" :aria-label="`选择 ${camera.name}`"><input v-model="selectedCameraIds" type="checkbox" :value="camera.id"></label>
               <i class="source-state" :class="camera.online?'ok':'bad'"></i>
               <div class="source-main">
                 <h3>{{camera.name}}<small>{{sceneInfo[camera.scene_type]?.name}} · 每 {{camera.frame_interval_seconds}} 秒 · {{camera.id}}</small></h3>

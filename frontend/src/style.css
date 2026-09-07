@@ -602,7 +602,7 @@ input[readonly]{opacity:.75}
 
 /* Compact Camera Row（右侧列表） */
 .source-list article{
-  display:grid;grid-template-columns:10px minmax(0,1fr) auto;gap:12px;align-items:center;
+  display:grid;grid-template-columns:22px 10px minmax(0,1fr) auto;gap:12px;align-items:center;
   padding:13px 3px;border-top:1px solid rgba(28,62,102,.35);
   transition:background .15s;
 }
@@ -619,6 +619,9 @@ input[readonly]{opacity:.75}
 .source-main .chips{padding:6px 0 0}
 .source-actions{display:flex;gap:5px}
 .source-actions button{padding:6px 9px;font-size:11px}
+.camera-select,.camera-select-all{display:flex;align-items:center;gap:6px;color:var(--text-secondary);font-size:11px;cursor:pointer}
+.camera-select input,.camera-select-all input{width:15px;height:15px;margin:0;accent-color:var(--cyan);cursor:pointer}
+.camera-select{justify-content:center;margin:0}
 .config-note{
   margin:18px 0 0;padding:13px 14px;
   background:rgba(255,176,32,.05);border:1px solid rgba(255,176,32,.25);

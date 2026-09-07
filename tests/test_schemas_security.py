@@ -3,6 +3,7 @@ import pytest
 from backend.schemas import (
     BehaviorVLMResult,
     CameraBatchCreate,
+    CameraBatchDelete,
     CameraCreate,
     CameraPatch,
     DisplaySettingsUpdate,
@@ -131,6 +132,9 @@ def test_camera_batch_limit_and_source_schemes():
     assert len(CameraBatchCreate(items=[item]).items) == 1
     with pytest.raises(ValueError):
         CameraBatchCreate(items=[item] * 501)
+    assert CameraBatchDelete(ids=["cam-1", "cam-1", "cam-2"]).ids == ["cam-1", "cam-2"]
+    with pytest.raises(ValueError):
+        CameraBatchDelete(ids=[])
 
     camera = CameraCreate(
         id="http-stream",

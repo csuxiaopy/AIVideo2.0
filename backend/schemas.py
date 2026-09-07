@@ -183,6 +183,18 @@ class CameraBatchCreate(BaseModel):
     items: list[CameraBatchItem] = Field(min_length=1, max_length=500)
 
 
+class CameraBatchDelete(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=500)
+
+    @field_validator("ids")
+    @classmethod
+    def unique_valid_ids(cls, value: list[str]) -> list[str]:
+        ids = list(dict.fromkeys(camera_id.strip() for camera_id in value))
+        if any(not camera_id or len(camera_id) > 100 for camera_id in ids):
+            raise ValueError("摄像头 ID 不能为空且不能超过100个字符")
+        return ids
+
+
 class PreviewSessionRequest(BaseModel):
     session_id: str = Field(min_length=16, max_length=100)
 

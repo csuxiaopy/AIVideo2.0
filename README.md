@@ -44,6 +44,7 @@
 管理员可以单个或批量添加视频源，并配置：
 
 - 业务 ID、显示名称、视频地址和启用状态。
+- 摄像头列表支持勾选、全选和批量删除；批量操作会统一释放对应运行状态。
 - 场景类型与检测模式组合。
 - 1、5、10、20、30、60、120 秒抽帧周期。
 - 岗位区域和入侵禁区；人流统计无需绘制区域。
@@ -243,7 +244,7 @@ docker compose -f compose.cpu.yml --profile monitoring up -d
 | 模块 | 接口 |
 | --- | --- |
 | 登录与账号 | `/api/auth/login`、`/api/auth/me`、`/api/auth/logout`、`/api/auth/password`、`/api/users` |
-| 摄像头 | `/api/cameras`、`/api/cameras/batch`、`/api/scene-templates`、`/api/capabilities` |
+| 摄像头 | `/api/cameras`、`/api/cameras/batch`、`/api/cameras/batch-delete`、`/api/scene-templates`、`/api/capabilities` |
 | 摄像头配置 | `/api/cameras/{id}/modes`、`geometry`、`schedule`、`analyze` |
 | 图像 | `/api/cameras/{id}/snapshot`、`preview/start`、`preview/heartbeat`、`preview/stop`、`preview` |
 | 业务数据 | `/api/dashboard`、`/api/alerts`、`/api/analyses`、`/api/traffic`、`/api/traffic/summary` |

@@ -49,3 +49,17 @@ def test_camera_delete_cascades_traffic_in_postgresql_dev_database():
     repository.upsert_traffic(camera_id, current_count=1, entered=1, exited=0)
     assert repository.delete_camera(camera_id)
     assert repository.traffic(camera_id=camera_id, limit=10) == []
+
+
+def test_camera_batch_delete_is_atomic_and_reports_existing_ids():
+    Base.metadata.create_all(engine)
+    camera_ids = ["test-batch-delete-a", "test-batch-delete-b"]
+    with session_scope() as session:
+        session.add_all([
+            models.Camera(id=camera_id, name=camera_id, rtsp_url_encrypted="encrypted")
+            for camera_id in camera_ids
+        ])
+    repository = Repository()
+    deleted = repository.delete_cameras([*camera_ids, "test-batch-delete-missing"])
+    assert set(deleted) == set(camera_ids)
+    assert all(repository.get_camera(camera_id) is None for camera_id in camera_ids)
