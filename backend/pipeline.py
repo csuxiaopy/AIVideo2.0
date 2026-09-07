@@ -82,6 +82,9 @@ class MonitoringRuntime:
             settings.yolo_imgsz,
             settings.yolo_confidence,
             settings.yolo_iou,
+            settings.yolo_inference_processes,
+            settings.yolo_threads_per_process,
+            settings.yolo_interop_threads,
         )
         self.fire_smoke = FireSmokeDetector(
             detector_settings.fire_smoke_model or settings.fire_smoke_model,
@@ -140,6 +143,7 @@ class MonitoringRuntime:
         await self.webhook.close()
         if self.vlm:
             await self.vlm.close()
+        self.yolo.close()
 
     async def reload_models(self) -> None:
         model_settings = self.repository.get_model_settings()
@@ -158,12 +162,16 @@ class MonitoringRuntime:
 
     async def reload_detectors(self) -> None:
         detector_settings = self.repository.get_detector_settings()
+        self.yolo.close()
         self.yolo = YoloDetector(
             self._general_model_path(detector_settings.general_model),
             detector_settings.general_device,
             self.settings.yolo_imgsz,
             self.settings.yolo_confidence,
             self.settings.yolo_iou,
+            self.settings.yolo_inference_processes,
+            self.settings.yolo_threads_per_process,
+            self.settings.yolo_interop_threads,
         )
         self.fire_smoke = FireSmokeDetector(
             detector_settings.fire_smoke_model,

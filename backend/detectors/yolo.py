@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
-import threading
+import os
 import time
 from collections import defaultdict
 from collections import deque
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from multiprocessing import get_context
 
 import cv2
 import numpy as np
@@ -15,6 +17,46 @@ from backend.schemas import Detection
 
 
 logger = logging.getLogger(__name__)
+
+_worker_model = None
+
+
+def _initialize_inference_worker(threads: int, interop_threads: int) -> None:
+    """Give every model process a bounded share of the host CPU."""
+    global _worker_model
+    _worker_model = None
+    os.environ["OMP_NUM_THREADS"] = str(threads)
+    os.environ["MKL_NUM_THREADS"] = str(threads)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(threads)
+    import torch
+
+    cv2.setNumThreads(1)
+    torch.set_num_threads(threads)
+    torch.set_num_interop_threads(interop_threads)
+
+
+def _predict_in_worker(
+    model_name: str, device: str, imgsz: int, confidence: float, iou: float, jpeg: bytes
+) -> tuple[int, int, list[tuple[int, str, float, tuple[float, float, float, float]]]]:
+    """Load one model per process and return only serializable raw detections."""
+    global _worker_model
+    if _worker_model is None:
+        from ultralytics import YOLO
+
+        _worker_model = YOLO(model_name)
+    image = decode_jpeg(jpeg)
+    height, width = image.shape[:2]
+    result = _worker_model.predict(
+        source=image, imgsz=imgsz, conf=confidence, iou=iou, device=device, verbose=False
+    )[0]
+    rows = []
+    for box in result.boxes:
+        class_id = int(box.cls.item())
+        x1, y1, x2, y2 = (float(value) for value in box.xyxy[0].tolist())
+        rows.append(
+            (class_id, str(result.names[class_id]), float(box.conf.item()), (x1 / width, y1 / height, x2 / width, y2 / height))
+        )
+    return width, height, rows
 
 
 @dataclass
@@ -50,29 +92,40 @@ class CentroidFallbackTracker:
 
 
 class YoloDetector:
-    def __init__(self, model_name: str, device: str, imgsz: int, confidence: float, iou: float = 0.5):
+    def __init__(
+        self, model_name: str, device: str, imgsz: int, confidence: float, iou: float = 0.5,
+        inference_processes: int = 1, threads_per_process: int = 1, interop_threads: int = 1,
+    ):
         self.model_name = model_name
         self.device = device
         self.imgsz = imgsz
         self.confidence = confidence
         self.iou = iou
-        self.model = None
+        self.inference_processes = max(1, inference_processes)
+        self.threads_per_process = max(1, threads_per_process)
+        self.interop_threads = max(1, interop_threads)
+        self.executor: ProcessPoolExecutor | None = None
         self.available = False
         self.detail = "YOLO 依赖尚未加载"
         self.trackers: dict[str, object] = {}
         self.load_latency_ms = 0.0
         self.last_latency_ms = 0.0
         self.inference_latencies_ms: deque[float] = deque(maxlen=300)
-        # A single resident Ultralytics model is intentionally shared. Serializing
-        # predict() avoids unsafe concurrent access and caps CPU inference at one.
-        self._predict_lock = threading.Lock()
         started = time.perf_counter()
         try:
-            from ultralytics import YOLO
+            import ultralytics  # noqa: F401
 
-            self.model = YOLO(model_name)
+            self.executor = ProcessPoolExecutor(
+                max_workers=self.inference_processes,
+                mp_context=get_context("spawn"),
+                initializer=_initialize_inference_worker,
+                initargs=(self.threads_per_process, self.interop_threads),
+            )
             self.available = True
-            self.detail = f"{model_name} on {device}"
+            self.detail = (
+                f"{model_name} on {device}; {self.inference_processes} processes × "
+                f"{self.threads_per_process} threads"
+            )
         except Exception as exc:
             self.detail = f"YOLO 不可用：{type(exc).__name__}: {str(exc)[:300]}"
             logger.warning(self.detail)
@@ -85,30 +138,19 @@ class YoloDetector:
             )
 
     def detect(self, camera_id: str, jpeg: bytes) -> list[Detection]:
-        if not self.available or self.model is None:
+        if not self.available or self.executor is None:
             raise RuntimeError(self.detail)
-        image = decode_jpeg(jpeg)
         started = time.perf_counter()
-        with self._predict_lock:
-            results = self.model.predict(
-                source=image, imgsz=self.imgsz, conf=self.confidence, iou=self.iou,
-                device=self.device, verbose=False
-            )
+        width, height, rows = self.executor.submit(
+            _predict_in_worker,
+            self.model_name, self.device, self.imgsz, self.confidence, self.iou, jpeg,
+        ).result()
         self.last_latency_ms = (time.perf_counter() - started) * 1000
         self.inference_latencies_ms.append(self.last_latency_ms)
-        height, width = image.shape[:2]
-        detections: list[Detection] = []
-        result = results[0]
-        names = result.names
-        for box in result.boxes:
-            class_id = int(box.cls.item())
-            x1, y1, x2, y2 = (float(value) for value in box.xyxy[0].tolist())
-            detections.append(Detection(
-                class_id=class_id,
-                class_name=str(names[class_id]),
-                confidence=float(box.conf.item()),
-                box=(x1 / width, y1 / height, x2 / width, y2 / height),
-            ))
+        detections = [
+            Detection(class_id=class_id, class_name=class_name, confidence=score, box=box)
+            for class_id, class_name, score, box in rows
+        ]
         persons = [item for item in detections if item.class_name == "person"]
         self._track(camera_id, persons, width, height)
         return detections
@@ -130,7 +172,15 @@ class YoloDetector:
             "average_latency_ms": round(average, 1),
             "p95_latency_ms": round(p95, 1),
             "samples": len(samples),
+            "inference_processes": self.inference_processes,
+            "threads_per_process": self.threads_per_process,
+            "interop_threads": self.interop_threads,
         }
+
+    def close(self) -> None:
+        if self.executor is not None:
+            self.executor.shutdown(wait=False, cancel_futures=True)
+            self.executor = None
 
     def _track(self, camera_id: str, persons: list[Detection], width: int, height: int) -> None:
         if not persons:

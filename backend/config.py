@@ -39,13 +39,16 @@ class Settings(BaseSettings):
     yolo_confidence: float = 0.35
     yolo_iou: float = 0.5
     yolo_inference_timeout_seconds: int = 30
+    yolo_inference_processes: int = 4
+    yolo_threads_per_process: int = 5
+    yolo_interop_threads: int = 1
     analysis_queue_maxsize: int = 256
     fire_smoke_model: str = "models/fire_smoke_yolov8.pt"
     fire_smoke_sha256: str = "ac0a10257b2bc1f20c9d957f8adeeb61dd6140322fc19d0b4a116cb491776d16"
     fire_smoke_device: str = "cpu"
     fire_smoke_imgsz: int = 640
     scheduler_enabled: bool = True
-    analysis_workers: int = 2
+    analysis_workers: int = 10
     fire_smoke_workers: int = 1
     web_dist_dir: Path = ROOT / "frontend" / "dist"
 

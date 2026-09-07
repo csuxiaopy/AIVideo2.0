@@ -1,5 +1,7 @@
 import pytest
+from types import ModuleType
 
+import backend.detectors.yolo as yolo_module
 from backend.detectors.fire_smoke import FireSmokeDetector
 from backend.detectors.yolo import YoloDetector
 from backend.queueing import AnalysisQueue
@@ -38,3 +40,33 @@ def test_yolo_missing_model_is_degraded_without_crashing(monkeypatch):
     assert detector.status()["status"] == "degraded"
     with pytest.raises(RuntimeError):
         detector.detect("camera-1", b"not-an-image")
+
+
+def test_yolo_process_pool_configuration_and_main_process_tracking(monkeypatch):
+    class ImmediateFuture:
+        def result(self):
+            return 100, 200, [(0, "person", 0.9, (0.1, 0.2, 0.3, 0.8))]
+
+    class FakeExecutor:
+        def __init__(self, max_workers, **kwargs):
+            self.max_workers = max_workers
+            self.closed = False
+
+        def submit(self, *args):
+            return ImmediateFuture()
+
+        def shutdown(self, **kwargs):
+            self.closed = True
+
+    monkeypatch.setitem(__import__("sys").modules, "ultralytics", ModuleType("ultralytics"))
+    monkeypatch.setitem(__import__("sys").modules, "supervision", None)
+    monkeypatch.setattr(yolo_module, "ProcessPoolExecutor", FakeExecutor)
+    detector = YoloDetector("models/yolo26s.pt", "cpu", 640, 0.35, 0.5, 4, 5, 1)
+    detections = detector.detect("camera-1", b"jpeg")
+    assert len(detections) == 1
+    assert detections[0].track_id is not None
+    assert detector.status()["inference_processes"] == 4
+    assert detector.status()["threads_per_process"] == 5
+    executor = detector.executor
+    detector.close()
+    assert executor.closed

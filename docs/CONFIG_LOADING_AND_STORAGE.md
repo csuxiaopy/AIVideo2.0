@@ -99,6 +99,7 @@ pydantic-settings 的覆盖顺序（高 → 低）：
    ├─ media.start()
    └─ sync_cameras()         # 从 cameras 表读全部摄像头 → 解密 RTSP → 重建调度计划 next_run
 4. 启动调度器、清理协程、N 个分析 worker（数量 = ANALYSIS_WORKERS / FIRE_SMOKE_WORKERS）
+5. 通用目标检测提交到独立 YOLO 进程池（进程数 = YOLO_INFERENCE_PROCESSES，每进程线程数 = YOLO_THREADS_PER_PROCESS）
 ```
 
 ---

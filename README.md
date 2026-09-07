@@ -138,9 +138,10 @@ RTSP / 视频文件
 1. 调度器按每路摄像头的 `frame_interval_seconds` 触发任务，同周期摄像头错峰执行。
 2. 任务进入 Redis 优先级队列；Redis 不可用时降级为进程内队列。
 3. 烟火使用独立队列和 worker，其余任务按安全性和业务类型确定优先级。
-4. FFmpeg 以短生命周期进程抓取单张 JPEG，抓取完成后退出。
-5. 各模式按自身最小执行间隔节流，分析结果写入 PostgreSQL。
-6. 告警生成标注证据图，通过 WebSocket 更新页面，并按规则投递企业微信。
+4. 通用 YOLO 使用独立多进程推理池；每个子进程加载一份模型并限制 CPU 线程数，检测框返回主进程后再按摄像头更新 Track。
+5. FFmpeg 以短生命周期进程抓取单张 JPEG，抓取完成后退出。
+6. 各模式按自身最小执行间隔节流，分析结果写入 PostgreSQL。
+7. 告警生成标注证据图，通过 WebSocket 更新页面，并按规则投递企业微信。
 
 ## 技术栈
 
@@ -264,8 +265,11 @@ docker compose -f compose.cpu.yml --profile monitoring up -d
 | `YOLO_MODEL_PATH` | `models/yolo26s.pt` | 通用 YOLO 权重 |
 | `YOLO_DEVICE` | `cpu` | 通用模型设备 |
 | `YOLO_IMGSZ` | `640` | 通用模型输入尺寸 |
+| `YOLO_INFERENCE_PROCESSES` | `4` | 独立 YOLO 推理进程数；每个进程加载一份模型 |
+| `YOLO_THREADS_PER_PROCESS` | `5` | 每个 YOLO 推理进程使用的 CPU 线程数 |
+| `YOLO_INTEROP_THREADS` | `1` | 每个进程的 PyTorch 算子间线程数 |
 | `FIRE_SMOKE_MODEL` | `models/fire_smoke_yolov8.pt` | 烟火模型权重 |
-| `ANALYSIS_WORKERS` | `2` | 普通分析 worker 数量 |
+| `ANALYSIS_WORKERS` | `10` | 抓图、入队和后处理的异步 worker 数量 |
 | `FIRE_SMOKE_WORKERS` | `1` | 烟火 worker 数量 |
 | `ANALYSIS_QUEUE_MAXSIZE` | `256` | 分析队列容量 |
 | `FRAME_CAPTURE_TIMEOUT_SECONDS` | `15` | 单帧抓取超时 |
