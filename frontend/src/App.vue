@@ -780,7 +780,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
           <div v-else-if="previewError" class="preview-state error"><b><TechIcon name="alert" :size="17"/>无法打开实时预览</b><p>{{previewError}}</p><button @click="openPreview(preview)">重新连接</button></div>
           <img v-else-if="previewStreamUrl" :src="previewStreamUrl" :alt="`${preview.name} 实时视频`">
           <span v-if="previewStreamUrl" class="live-badge">LIVE</span>
-          <span v-if="previewStreamUrl" class="person-legend">关闭窗口即释放视频资源</span>
+          <span v-if="previewStreamUrl" class="person-legend">YOLO 实时检测 · 人员框 / Track ID / 置信度</span>
         </div>
       </section>
     </div>

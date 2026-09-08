@@ -104,6 +104,7 @@ class MonitoringRuntime:
         self.vlm: VisionModelClient | None = None
         self.scheduler_task: asyncio.Task | None = None
         self.cleanup_task: asyncio.Task | None = None
+        self.preview_detector_task: asyncio.Task | None = None
         self.worker_tasks: list[asyncio.Task] = []
         self.fire_worker_tasks: list[asyncio.Task] = []
         self.running = False
@@ -125,6 +126,9 @@ class MonitoringRuntime:
         await self.media.start()
         await self.sync_cameras()
         self.running = True
+        self.preview_detector_task = asyncio.create_task(
+            self._preview_detector_loop(), name="preview-yolo-detector"
+        )
         if self.settings.scheduler_enabled:
             self.scheduler_task = asyncio.create_task(self._scheduler(), name="camera-scheduler")
             self.cleanup_task = asyncio.create_task(self._cleanup_loop(), name="alert-cleanup")
@@ -139,7 +143,7 @@ class MonitoringRuntime:
 
     async def close(self) -> None:
         self.running = False
-        tasks = [task for task in [self.scheduler_task, self.cleanup_task, *self.worker_tasks, *self.fire_worker_tasks] if task]
+        tasks = [task for task in [self.scheduler_task, self.cleanup_task, self.preview_detector_task, *self.worker_tasks, *self.fire_worker_tasks] if task]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -263,6 +267,38 @@ class MonitoringRuntime:
                 logger.info("Alert cleanup finished: %s", result)
             except Exception:
                 logger.exception("Alert cleanup failed")
+
+    async def _preview_detector_loop(self) -> None:
+        """Run UI-only YOLO inference while a leased live preview is open."""
+        last_sequence: dict[str, int] = {}
+        last_run: dict[str, float] = defaultdict(float)
+        while self.running:
+            active_ids = self.media.active_preview_ids()
+            active_set = set(active_ids)
+            last_sequence = {key: value for key, value in last_sequence.items() if key in active_set}
+            last_run = defaultdict(float, {key: value for key, value in last_run.items() if key in active_set})
+            now = time.monotonic()
+            for camera_id in active_ids:
+                frame = self.media.preview_frame(camera_id)
+                if not frame or frame.sequence == last_sequence.get(camera_id) or now - last_run[camera_id] < 1.0:
+                    continue
+                last_sequence[camera_id] = frame.sequence
+                last_run[camera_id] = now
+                try:
+                    detections = await asyncio.wait_for(
+                        asyncio.to_thread(self.yolo.detect, f"preview:{camera_id}", frame.jpeg),
+                        timeout=self.settings.yolo_inference_timeout_seconds,
+                    )
+                    self.media.set_person_detections(camera_id, self.yolo.people(detections))
+                    self.media.set_object_detections(camera_id, detections)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    error_key = f"preview:{camera_id}"
+                    if now - self.last_detector_error[error_key] > 60:
+                        self.last_detector_error[error_key] = now
+                        logger.warning("Preview YOLO detection failed for %s: %s", camera_id, exc)
+            await asyncio.sleep(0.2)
 
     async def _worker(self, index: int, fire_only: bool) -> None:
         queue = self.fire_queue if fire_only else self.queue

@@ -419,6 +419,14 @@ class MediaGateway:
             "clients": len(stream.sessions) if stream else 0,
         }
 
+    def preview_frame(self, camera_id: str) -> FramePacket | None:
+        """Return the latest live-preview frame without affecting its lease."""
+        stream = self.previews.get(camera_id)
+        return stream.frame if stream else None
+
+    def active_preview_ids(self) -> list[str]:
+        return list(self.previews)
+
     async def _preview_sweeper(self) -> None:
         while True:
             await asyncio.sleep(5)
