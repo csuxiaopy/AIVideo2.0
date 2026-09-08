@@ -46,16 +46,34 @@ def test_black_and_behavior_windows():
     assert state.behavior_confirmed("smoking", True, now)
 
 
-def test_new_edge_track_counts_after_stable_frames_once():
+def _flow_step(state, now, offset, tracks, **kwargs):
+    return state.flow_update(tracks, now + timedelta(seconds=offset), **kwargs)
+
+
+def test_flow_counts_only_stable_outside_to_inside_crossing():
     state = CameraRuleState()
     now = datetime.now(timezone.utc)
-    kwargs = {"recovery_grace_seconds": 0}
-    assert state.flow_update([(1, (0.02, 0.5))], now, **kwargs)[0] == 0
-    assert state.flow_update([(1, (0.05, 0.5))], now + timedelta(seconds=1), **kwargs)[0] == 0
-    entered, tracks = state.flow_update([(1, (0.09, 0.5))], now + timedelta(seconds=2), **kwargs)
+    roi = [(0.4, 0.2), (0.8, 0.2), (0.8, 0.8), (0.4, 0.8)]
+    kwargs = {"min_stable_frames": 2, "recovery_grace_seconds": 0, "roi": roi}
+    assert _flow_step(state, now, 0, [(1, (0.2, 0.5))], **kwargs)[0] == 0
+    assert _flow_step(state, now, 1, [(1, (0.2, 0.5))], **kwargs)[0] == 0
+    assert _flow_step(state, now, 2, [(1, (0.5, 0.5))], **kwargs)[0] == 0
+    entered, _, events = _flow_step(state, now, 3, [(1, (0.5, 0.5))], **kwargs)
     assert entered == 1
-    assert tracks[1].counted
-    assert state.flow_update([(1, (0.5, 0.5))], now + timedelta(seconds=3), **kwargs)[0] == 0
+    assert [event.kind for event in events] == ["ENTERED"]
+
+
+def test_first_seen_inside_does_not_count_and_reentry_does():
+    state = CameraRuleState()
+    now = datetime.now(timezone.utc)
+    roi = [(0.4, 0.2), (0.8, 0.2), (0.8, 0.8), (0.4, 0.8)]
+    kwargs = {"min_stable_frames": 2, "recovery_grace_seconds": 0, "roi": roi}
+    for offset in range(2):
+        assert _flow_step(state, now, offset, [(1, (0.5, 0.5))], **kwargs)[0] == 0
+    for offset in range(2, 4):
+        assert _flow_step(state, now, offset, [(1, (0.2, 0.5))], **kwargs)[0] == 0
+    assert _flow_step(state, now, 4, [(1, (0.5, 0.5))], **kwargs)[0] == 0
+    assert _flow_step(state, now, 5, [(1, (0.5, 0.5))], **kwargs)[0] == 1
 
 
 def test_one_frame_false_detection_does_not_count():
@@ -63,18 +81,6 @@ def test_one_frame_false_detection_does_not_count():
     now = datetime.now(timezone.utc)
     assert state.flow_update([(2, (0.02, 0.5))], now, recovery_grace_seconds=0)[0] == 0
     assert state.flow_update([], now + timedelta(seconds=1), recovery_grace_seconds=0)[0] == 0
-
-
-def test_flow_roi_counts_each_reentry_and_filters_outside():
-    state = CameraRuleState()
-    now = datetime.now(timezone.utc)
-    roi = [(0.4, 0.2), (0.8, 0.2), (0.8, 0.8), (0.4, 0.8)]
-    kwargs = {"min_stable_frames": 2, "recovery_grace_seconds": 0, "roi": roi}
-    assert state.flow_update([(1, (0.02, 0.5))], now, **kwargs)[0] == 0
-    assert state.flow_update([(1, (0.5, 0.5))], now + timedelta(seconds=1), **kwargs)[0] == 1
-    assert state.flow_update([(1, (0.6, 0.5))], now + timedelta(seconds=2), **kwargs)[0] == 0
-    assert state.flow_update([(1, (0.2, 0.5))], now + timedelta(seconds=3), **kwargs)[0] == 0
-    assert state.flow_update([(1, (0.5, 0.5))], now + timedelta(seconds=4), **kwargs)[0] == 1
 
 
 def test_absence_event_emits_threshold_then_resolution_once():
@@ -87,16 +93,33 @@ def test_absence_event_emits_threshold_then_resolution_once():
     assert state.absence_event_update(True, True, 600, now + timedelta(seconds=800)) == ("resolved", now)
 
 
-def test_id_switch_inherits_counted_state():
+def test_same_id_can_reassociate_before_three_missing_cycles():
     state = CameraRuleState()
     now = datetime.now(timezone.utc)
     kwargs = {"min_stable_frames": 2, "recovery_grace_seconds": 0}
-    state.flow_update([(4, (0.02, 0.5))], now, **kwargs)
-    assert state.flow_update([(4, (0.05, 0.5))], now + timedelta(seconds=1), **kwargs)[0] == 1
-    state.flow_update([], now + timedelta(seconds=2), **kwargs)
-    entered, tracks = state.flow_update([(9, (0.06, 0.5))], now + timedelta(seconds=3), **kwargs)
-    assert entered == 0
-    assert tracks[9].counted
+    _flow_step(state, now, 0, [(4, (0.02, 0.5))], **kwargs)
+    _flow_step(state, now, 1, [(4, (0.02, 0.5))], **kwargs)
+    _flow_step(state, now, 2, [], **kwargs)
+    _flow_step(state, now, 3, [], **kwargs)
+    _, tracks, events = _flow_step(state, now, 4, [(4, (0.03, 0.5))], **kwargs)
+    assert 4 in tracks
+    assert [(event.kind, event.missing_cycles) for event in events] == [("REASSOCIATED", 2)]
+
+
+def test_third_missing_cycle_loses_track_and_new_id_does_not_inherit():
+    state = CameraRuleState()
+    now = datetime.now(timezone.utc)
+    kwargs = {"min_stable_frames": 2, "recovery_grace_seconds": 0}
+    _flow_step(state, now, 0, [(4, (0.02, 0.5))], **kwargs)
+    _flow_step(state, now, 1, [(4, (0.02, 0.5))], **kwargs)
+    _flow_step(state, now, 2, [], **kwargs)
+    _flow_step(state, now, 3, [], **kwargs)
+    _, tracks, events = _flow_step(state, now, 4, [], **kwargs)
+    assert 4 not in tracks
+    assert [(event.kind, event.missing_cycles) for event in events] == [("LOST", 3)]
+    entered, tracks, events = _flow_step(state, now, 5, [(9, (0.021, 0.5))], **kwargs)
+    assert entered == 0 and 9 in tracks
+    assert [event.kind for event in events] == ["NEW"]
 
 
 def test_startup_and_recovery_tracks_are_suppressed():
@@ -109,34 +132,18 @@ def test_startup_and_recovery_tracks_are_suppressed():
     assert state.flow_update([(2, (0.05, 0.5))], now + timedelta(seconds=21), **kwargs)[0] == 0
 
 
-def test_center_track_requires_extra_stability_and_motion():
-    state = CameraRuleState()
-    now = datetime.now(timezone.utc)
-    kwargs = {"min_stable_frames": 3, "recovery_grace_seconds": 0}
-    for index, x in enumerate((0.5, 0.51, 0.52, 0.53)):
-        assert state.flow_update([(8, (x, 0.5))], now + timedelta(seconds=index), **kwargs)[0] == 0
-    assert state.flow_update([(8, (0.55, 0.5))], now + timedelta(seconds=4), **kwargs)[0] == 1
-
-
 def test_two_people_entering_together_count_independently():
     state = CameraRuleState()
     now = datetime.now(timezone.utc)
     kwargs = {"min_stable_frames": 2, "recovery_grace_seconds": 0}
-    state.flow_update([(10, (0.02, 0.3)), (11, (0.98, 0.7))], now, **kwargs)
-    assert state.flow_update(
-        [(10, (0.05, 0.3)), (11, (0.95, 0.7))], now + timedelta(seconds=1), **kwargs
-    )[0] == 2
-
-
-def test_person_reentering_after_reassociation_window_counts_again():
-    state = CameraRuleState()
-    now = datetime.now(timezone.utc)
-    kwargs = {"min_stable_frames": 2, "recovery_grace_seconds": 0, "reassociation_seconds": 5}
-    state.flow_update([(12, (0.02, 0.5))], now, **kwargs)
-    assert state.flow_update([(12, (0.05, 0.5))], now + timedelta(seconds=1), **kwargs)[0] == 1
-    state.flow_update([], now + timedelta(seconds=2), **kwargs)
-    state.flow_update([(13, (0.02, 0.5))], now + timedelta(seconds=8), **kwargs)
-    assert state.flow_update([(13, (0.05, 0.5))], now + timedelta(seconds=9), **kwargs)[0] == 1
+    roi = [(0.4, 0.1), (0.6, 0.1), (0.6, 0.9), (0.4, 0.9)]
+    kwargs["roi"] = roi
+    outside = [(10, (0.2, 0.3)), (11, (0.8, 0.7))]
+    inside = [(10, (0.5, 0.3)), (11, (0.5, 0.7))]
+    state.flow_update(outside, now, **kwargs)
+    state.flow_update(outside, now + timedelta(seconds=1), **kwargs)
+    state.flow_update(inside, now + timedelta(seconds=2), **kwargs)
+    assert state.flow_update(inside, now + timedelta(seconds=3), **kwargs)[0] == 2
 
 
 def test_fire_and_smoke_confirmation_windows():

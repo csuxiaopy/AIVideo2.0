@@ -5,6 +5,7 @@ import logging
 import time
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -192,12 +193,14 @@ class MonitoringRuntime:
 
     def _general_model_path(self, stored_model: str) -> str:
         """Keep custom weights safe; configuration owns known official model choices."""
-        if stored_model and stored_model.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] not in {
-            "yolo26n.pt", "yolo26s.pt", "yolo26m.pt"
-        }:
+        if not stored_model:
+            return self.settings.yolo_model_path
+        model_name = stored_model.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        if model_name not in {"yolo26n.pt", "yolo26s.pt", "yolo26m.pt"}:
             logger.warning("Preserving configured custom YOLO weight: %s", stored_model)
             return stored_model
-        return self.settings.yolo_model_path
+        configured = Path(self.settings.yolo_model_path)
+        return str(configured.with_name(model_name))
 
     async def sync_cameras(self) -> None:
         cameras = self.repository.list_cameras()
@@ -354,11 +357,9 @@ class MonitoringRuntime:
                 if phase == "resolved" and began_at:
                     state.pending_resolutions[Mode.PHONE_USE.value] = (began_at, ended_at)
             if Mode.OFF_DUTY.value in modes:
-                phase, began_at = state.absence_event_update(
+                state.absence_event_update(
                     False, False, options.off_duty_seconds, ended_at, options.shift_grace_seconds
                 )
-                if phase == "resolved" and began_at:
-                    state.pending_resolutions[Mode.OFF_DUTY.value] = (began_at, ended_at)
             # A newly started stream normally needs a short FFmpeg warm-up.
             # Scheduled work should be skipped instead of reported as a worker
             # failure; an explicit user-requested analysis still returns an error.
@@ -371,13 +372,16 @@ class MonitoringRuntime:
         now = utc_now()
 
         for pending_mode, (began_at, ended_at) in list(state.pending_resolutions.items()):
-            reason = "玩手机事件因画面中断结束" if pending_mode == Mode.PHONE_USE.value else "离岗事件因画面中断结束"
+            if pending_mode != Mode.PHONE_USE.value:
+                state.pending_resolutions.pop(pending_mode, None)
+                continue
+            reason = "玩手机事件因画面中断结束"
             analysis = self.repository.add_analysis(
                 camera_id=camera.id, mode=pending_mode, status="uncertain", confidence=0,
                 severity="normal", reason=reason, latency_ms=0,
             )
             evidence = annotate_detections(
-                frame.jpeg, [], zone=geometry.post_roi if pending_mode == Mode.OFF_DUTY.value else None,
+                frame.jpeg, [],
                 event_started_at=event_time(began_at, schedule), event_ended_at=event_time(ended_at, schedule),
             )
             await self.alerts.create(
@@ -426,20 +430,11 @@ class MonitoringRuntime:
                         now=now, grace_seconds=options.shift_grace_seconds,
                     )
                     if phase == "resolved" and started_at:
-                        analysis = self.repository.add_analysis(
+                        self.repository.add_analysis(
                             camera_id=camera.id, mode=Mode.OFF_DUTY.value, status="uncertain",
                             confidence=0, severity="normal", local_model=self.yolo.model_name,
                             model_version=self.yolo.model_name, reason="离岗事件因人员检测失败结束",
                             error=f"{type(exc).__name__}: {str(exc)[:500]}", latency_ms=0,
-                        )
-                        evidence = annotate_detections(
-                            frame.jpeg, [], zone=geometry.post_roi,
-                            event_started_at=event_time(started_at, schedule),
-                            event_ended_at=event_time(now, schedule),
-                        )
-                        await self.alerts.create(
-                            camera, analysis, evidence, bypass_cooldown=True, event_phase="resolved",
-                            event_started_at=started_at, event_ended_at=now,
                         )
                 return {"camera_id": camera.id, "results": results, "detector_error": str(exc)}
 
@@ -463,7 +458,7 @@ class MonitoringRuntime:
                 occupied, scheduled, options.off_duty_seconds, now, options.shift_grace_seconds
             )
             if self._mode_due(camera.id, Mode.OFF_DUTY.value, 15, force) or event_phase:
-                status = "confirmed" if event_phase else "none"
+                status = "confirmed" if event_phase == "threshold" else "none"
                 reason = ("排班内岗位区域持续无人，达到离岗阈值" if event_phase == "threshold"
                           else "离岗事件已结束" if event_phase == "resolved" else (
                     "岗位有人或尚未达到离岗阈值" if scheduled else "当前不在排班时段"
@@ -474,7 +469,7 @@ class MonitoringRuntime:
                     model_version=self.yolo.model_name, reason=reason, latency_ms=0,
                 )
                 results.append({"mode": Mode.OFF_DUTY.value, "status": status, "reason": reason})
-                if event_phase and event_start:
+                if event_phase == "threshold" and event_start:
                     end = now
                     evidence = annotate_detections(
                         frame.jpeg, qualified_people, zone=geometry.post_roi,
@@ -492,12 +487,9 @@ class MonitoringRuntime:
                 (item.track_id, ((item.box[0] + item.box[2]) / 2, (item.box[1] + item.box[3]) / 2))
                 for item in qualified_people if item.track_id is not None
             ]
-            entered, flow_states = state.flow_update(
+            entered, flow_states, flow_events = state.flow_update(
                 tracks, now,
                 options.flow_min_stable_frames,
-                options.flow_entry_edge_ratio,
-                options.flow_reassociation_seconds,
-                options.flow_reassociation_distance,
                 options.stream_recovery_grace_seconds,
                 recovering,
                 geometry.flow_roi,
@@ -509,7 +501,7 @@ class MonitoringRuntime:
                 camera_summary = next((item for item in summary["cameras"] if item["camera_id"] == camera.id), {})
                 self.media.set_flow_debug(
                     camera.id, flow_states, current_count, int(camera_summary.get("entered_today", 0)), entered,
-                    geometry.flow_roi,
+                    geometry.flow_roi, flow_events,
                 )
             results.append({"mode": Mode.PEOPLE_FLOW.value, "current": current_count, "entered": entered})
 

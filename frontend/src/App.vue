@@ -155,7 +155,7 @@ const loadAll = async (silent=false) => {
   finally { loading.value=false }
 }
 
-const defaultOptions = () => ({health_interval_seconds:5,yolo_fps:.1,behavior_interval_seconds:180,phone_use_seconds:600,off_duty_seconds:600,person_confidence:.3,shift_grace_seconds:60,alert_cooldown_seconds:300,black_mean_max:18,black_std_max:12,black_ratio_min:.92,fire_smoke_fps:1,fire_confidence:.3,smoke_confidence:.3,intrusion_confidence:.5,intrusion_cooldown_seconds:60,flow_min_stable_frames:3,flow_entry_edge_ratio:.1,flow_reassociation_seconds:5,flow_reassociation_distance:.12,stream_recovery_grace_seconds:15,flow_debug:false})
+const defaultOptions = () => ({health_interval_seconds:5,yolo_fps:.1,behavior_interval_seconds:180,phone_use_seconds:600,off_duty_seconds:600,person_confidence:.3,shift_grace_seconds:60,alert_cooldown_seconds:300,black_mean_max:18,black_std_max:12,black_ratio_min:.92,fire_smoke_fps:1,fire_confidence:.3,smoke_confidence:.3,intrusion_confidence:.5,intrusion_cooldown_seconds:60,flow_min_stable_frames:3,stream_recovery_grace_seconds:15,flow_debug:false})
 const emptySchedule = () => ({timezone:'Asia/Shanghai',weekly:{},holidays:[]})
 const deepCopy = <T,>(value:T):T => JSON.parse(JSON.stringify(value))
 const newCamera = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'workstation' as SceneType,modes:[] as Mode[],schedule:emptySchedule(),options:defaultOptions(),frame_interval_seconds:1})
@@ -828,8 +828,8 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <div class="form-row"><label>下午开始<input v-model="secondShift.start" type="time" @change="syncShifts"></label><label>下午结束<input v-model="secondShift.end" type="time" @change="syncShifts"></label></div>
             <label v-if="editForm.modes.includes('off_duty')">离岗判定时间（分钟）<input :value="optionMinutes('off_duty_seconds')" type="number" min="1" max="1440" @input="setOptionMinutes('off_duty_seconds',$event)"></label>
             <label v-if="usesPersonDetection">人员检测置信度<input v-model.number="editForm.options.person_confidence" type="number" min="0" max="1" step="0.05"><small class="field-hint">低于此置信度的人员不参与在岗、离岗、人流和入侵判定，默认 0.30。</small></label>
-            <div v-if="editForm.modes.includes('people_flow')" class="config-note"><b>人流 ROI 统计</b><p>人员每次从区域外进入 ROI 均累计一次，默认区域为全屏。</p></div>
-            <div v-if="editForm.modes.includes('people_flow')" class="form-row"><label>稳定确认帧数<input v-model.number="editForm.options.flow_min_stable_frames" type="number" min="2" max="30"></label><label>边缘区域比例<input v-model.number="editForm.options.flow_entry_edge_ratio" type="number" min=".02" max=".4" step=".01"></label></div>
+            <div v-if="editForm.modes.includes('people_flow')" class="config-note"><b>人流 ROI 有向穿越</b><p>同一 Track ID 从区域外稳定进入 ROI 后累计一次；首次出现在 ROI 内不会计入人流。</p></div>
+            <label v-if="editForm.modes.includes('people_flow')">稳定确认帧数<input v-model.number="editForm.options.flow_min_stable_frames" type="number" min="2" max="30"></label>
             <label v-if="editForm.modes.includes('people_flow')" class="inline-setting"><span>人流 Debug 标注</span><span class="switch"><input v-model="editForm.options.flow_debug" type="checkbox"><span></span></span></label>
             <div v-if="editForm.modes.includes('phone_use') || editForm.modes.includes('smoking')" class="config-note"><b>行为联合检测</b><p>按配置频率抽取当前单帧，玩手机需连续每次确认才会告警；任意非确认或失败均重新计时。</p></div>
             <div v-if="editForm.modes.includes('phone_use') || editForm.modes.includes('smoking')" class="form-row"><label>大模型检测间隔（分钟）<input :value="optionMinutes('behavior_interval_seconds')" type="number" min="1" max="60" @input="setOptionMinutes('behavior_interval_seconds',$event)"></label><label v-if="editForm.modes.includes('phone_use')">玩手机判定时间（分钟）<input :value="optionMinutes('phone_use_seconds')" type="number" min="1" max="1440" @input="setOptionMinutes('phone_use_seconds',$event)"></label></div>

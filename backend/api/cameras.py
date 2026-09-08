@@ -35,6 +35,7 @@ async def _remove_camera_runtime(camera_id: str) -> None:
     runtime = context.require_runtime()
     await runtime.media.remove(camera_id)
     runtime.rules.remove(camera_id)
+    runtime.yolo.reset_tracker(camera_id)
     runtime.next_run.pop(camera_id, None)
     runtime.next_fire_run.pop(camera_id, None)
     runtime.queued.discard(camera_id)
@@ -228,6 +229,7 @@ async def patch_camera(camera_id: str, payload: CameraPatch) -> dict[str, Any]:
         runtime = context.require_runtime()
         await runtime.media.remove(camera_id)
         runtime.rules.remove(camera_id)
+        runtime.yolo.reset_tracker(camera_id)
         runtime.next_run.pop(camera_id, None)
         runtime.next_fire_run.pop(camera_id, None)
         runtime.queued.discard(camera_id)
@@ -235,6 +237,10 @@ async def patch_camera(camera_id: str, payload: CameraPatch) -> dict[str, Any]:
         updated = context.repository.rename_and_update_camera(camera_id, new_camera_id, values)
     else:
         updated = context.repository.update_camera(camera_id, values)
+        if payload.geometry is not None or payload.options is not None:
+            runtime = context.require_runtime()
+            runtime.rules.remove(camera_id)
+            runtime.yolo.reset_tracker(camera_id)
     await context.require_runtime().sync_cameras()
     return _public(updated)
 

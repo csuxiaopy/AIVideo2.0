@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import logging
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -121,21 +120,23 @@ class FlowTrackState:
     track_id: int
     first_seen: datetime
     last_seen: datetime
-    first_position: tuple[float, float]
-    first_zone: str
+    position: tuple[float, float]
+    stable_zone: str | None = None
+    candidate_zone: str | None = None
     stable_frames: int = 1
-    counted: bool = False
+    outside_armed: bool = False
     suppressed: bool = False
     inside_roi: bool = False
-    entry_pending: bool = False
+    missing_cycles: int = 0
     trajectory: deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=8))
 
 
-def flow_entry_zone(point: tuple[float, float], ratio: float) -> str:
-    x, y = point
-    distances = {"LEFT_EDGE": x, "RIGHT_EDGE": 1 - x, "TOP_EDGE": y, "BOTTOM_EDGE": 1 - y}
-    zone, distance = min(distances.items(), key=lambda item: item[1])
-    return zone if distance <= ratio else "CENTER"
+@dataclass(frozen=True)
+class FlowDebugEvent:
+    track_id: int
+    kind: str
+    position: tuple[float, float]
+    missing_cycles: int = 0
 
 
 @dataclass
@@ -148,7 +149,6 @@ class CameraRuleState:
     pending_resolutions: dict[str, tuple[datetime, datetime]] = field(default_factory=dict)
     positive_windows: dict[str, deque[datetime]] = field(default_factory=lambda: defaultdict(deque))
     flow_tracks: dict[int, FlowTrackState] = field(default_factory=dict)
-    recently_lost_flow_tracks: dict[int, FlowTrackState] = field(default_factory=dict)
     flow_day: str | None = None
     flow_initialized_at: datetime | None = None
     flow_protection_until: datetime | None = None
@@ -267,92 +267,76 @@ class CameraRuleState:
         tracks: list[tuple[int, tuple[float, float]]],
         now: datetime,
         min_stable_frames: int = 3,
-        edge_ratio: float = 0.1,
-        reassociation_seconds: int = 5,
-        reassociation_distance: float = 0.12,
         recovery_grace_seconds: int = 15,
         recovering: bool = False,
         roi: list[tuple[float, float]] | None = None,
-    ) -> tuple[int, dict[int, FlowTrackState]]:
+        lost_cycles: int = 3,
+    ) -> tuple[int, dict[int, FlowTrackState], list[FlowDebugEvent]]:
         day = now.date().isoformat()
         if self.flow_day != day:
             self.flow_day = day
             self.flow_tracks.clear()
-            self.recently_lost_flow_tracks.clear()
             self.flow_initialized_at = None
             self.flow_protection_until = None
         if self.flow_initialized_at is None or recovering:
             self.flow_initialized_at = now
             self.flow_protection_until = now + timedelta(seconds=recovery_grace_seconds)
             if recovering:
-                self.recently_lost_flow_tracks.update(self.flow_tracks)
                 self.flow_tracks.clear()
 
-        incoming = {track_id: position for track_id, position in tracks}
-        for track_id in set(self.flow_tracks) - set(incoming):
-            self.recently_lost_flow_tracks[track_id] = self.flow_tracks.pop(track_id)
-
-        lost_cutoff = now - timedelta(seconds=reassociation_seconds)
-        self.recently_lost_flow_tracks = {
-            track_id: state for track_id, state in self.recently_lost_flow_tracks.items()
-            if state.last_seen >= lost_cutoff
-        }
         entered = 0
-        protected = bool(self.flow_protection_until and now < self.flow_protection_until)
+        events: list[FlowDebugEvent] = []
         active_roi = roi or [(0, 0), (1, 0), (1, 1), (0, 1)]
+        incoming = {track_id: position for track_id, position in tracks}
+
+        for track_id in set(self.flow_tracks) - set(incoming):
+            state = self.flow_tracks[track_id]
+            state.missing_cycles += 1
+            if state.missing_cycles >= lost_cycles:
+                events.append(FlowDebugEvent(track_id, "LOST", state.position, state.missing_cycles))
+                self.flow_tracks.pop(track_id)
+
         for track_id, position in tracks:
             current_inside = point_in_polygon(position, active_roi)
+            current_zone = "INSIDE" if current_inside else "OUTSIDE"
             state = self.flow_tracks.get(track_id)
             if state is None:
-                match = min(
-                    (
-                        (math.dist(position, old.trajectory[-1]), old_id, old)
-                        for old_id, old in self.recently_lost_flow_tracks.items()
-                        if old.trajectory and math.dist(position, old.trajectory[-1]) <= reassociation_distance
-                    ),
-                    default=None,
+                state = FlowTrackState(
+                    track_id=track_id, first_seen=now, last_seen=now, position=position,
+                    candidate_zone=current_zone, inside_roi=current_inside,
                 )
-                if match:
-                    _, old_id, old = match
-                    self.recently_lost_flow_tracks.pop(old_id, None)
-                    state = FlowTrackState(
-                        track_id=track_id, first_seen=old.first_seen, last_seen=now,
-                        first_position=old.first_position, first_zone=old.first_zone,
-                        stable_frames=old.stable_frames + 1, counted=old.counted,
-                        suppressed=old.suppressed, trajectory=deque(old.trajectory, maxlen=8),
-                        inside_roi=old.inside_roi, entry_pending=old.entry_pending,
-                    )
-                    logger.info("[FLOW] Track %s possibly reassociated with Track %s; inherit counted=%s", track_id, old_id, old.counted)
-                else:
-                    zone = flow_entry_zone(position, edge_ratio)
-                    state = FlowTrackState(
-                        track_id, now, now, position, zone, suppressed=protected,
-                        inside_roi=current_inside, entry_pending=current_inside,
-                    )
-                    logger.info("[FLOW] Track %s created first_zone=%s%s", track_id, zone, " (protected)" if protected else "")
-                    if zone == "CENTER":
-                        logger.info("[FLOW] Track %s created at CENTER; possible tracker recreation", track_id)
                 state.trajectory.append(position)
                 self.flow_tracks[track_id] = state
-            else:
-                state.stable_frames += 1
-                state.last_seen = now
-                state.trajectory.append(position)
-                if current_inside and not state.inside_roi:
-                    state.entry_pending = True
-                elif not current_inside:
-                    state.entry_pending = False
-                state.inside_roi = current_inside
+                events.append(FlowDebugEvent(track_id, "NEW", position))
+                continue
 
-            displacement = math.dist(state.first_position, position)
-            required = min_stable_frames if state.first_zone != "CENTER" else min_stable_frames + 2
-            eligible_center = state.first_zone != "CENTER" or displacement >= 0.03
-            if state.entry_pending and not state.suppressed and state.stable_frames >= required and eligible_center:
-                state.counted = True
-                state.entry_pending = False
+            if state.missing_cycles:
+                events.append(FlowDebugEvent(track_id, "REASSOCIATED", position, state.missing_cycles))
+            state.missing_cycles = 0
+            state.last_seen = now
+            state.position = position
+            state.inside_roi = current_inside
+            state.trajectory.append(position)
+
+            if state.candidate_zone == current_zone:
+                state.stable_frames += 1
+            else:
+                state.candidate_zone = current_zone
+                state.stable_frames = 1
+
+            if state.stable_frames < min_stable_frames or state.stable_zone == current_zone:
+                continue
+
+            previous_zone = state.stable_zone
+            state.stable_zone = current_zone
+            if current_zone == "OUTSIDE":
+                state.outside_armed = True
+            elif previous_zone == "OUTSIDE" and state.outside_armed and not state.suppressed:
+                state.outside_armed = False
                 entered += 1
-                logger.info("[FLOW] Track %s stable=%s confirmed as new visitor; visitor_count +1", track_id, state.stable_frames)
-        return entered, dict(self.flow_tracks)
+                events.append(FlowDebugEvent(track_id, "ENTERED", position))
+                logger.info("[FLOW] Track %s crossed OUTSIDE -> INSIDE; visitor_count +1", track_id)
+        return entered, dict(self.flow_tracks), events
 
 
 class RuleStateRegistry:

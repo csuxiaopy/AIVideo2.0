@@ -11,6 +11,17 @@
 
 The weight is committed to Git with the project. Deployment hosts receive it through `git clone` or `git pull`. Docker still excludes weights from the image build context and Compose mounts the repository's `models/` directory read-only at `/app/models`.
 
+## General YOLO26m
+
+- File: `yolo26m.pt`
+- Source: official Ultralytics assets release `v8.4.0`
+- Download URL: `https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26m.pt`
+- Size: `44,255,705` bytes
+- SHA256: `401cea9ab23ad19246ff7744859816bc599f350e93c9dd30367b6f0a0745d0b7`
+- Classes: COCO detection classes.
+
+To switch on the server, enter `yolo26m.pt` as the general model in System Settings. The backend resolves official `yolo26n/s/m.pt` names relative to the configured model directory, which is `models/` by default.
+
 ## Fire/smoke pilot model
 
 This reviewed pilot weight is committed to Git at `models/fire_smoke_yolov8.pt`.

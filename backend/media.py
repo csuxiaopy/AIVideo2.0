@@ -104,6 +104,7 @@ def draw_person_overlays(
     flow_states: dict[int, object] | None = None,
     flow_summary: tuple[int, int, int] | None = None,
     flow_roi: list[tuple[float, float]] | None = None,
+    flow_events: list[object] | None = None,
 ) -> bytes:
     """Draw preview-only person boxes while leaving the analysis frame untouched."""
     if not overlays and not flow_roi:
@@ -125,19 +126,33 @@ def draw_person_overlays(
             polygon = np.asarray([[round(x * width), round(y * height)] for x, y in flow_roi], dtype=np.int32)
             cv2.polylines(image, [polygon], True, (255, 170, 40), thickness, cv2.LINE_AA)
 
+        event_priority = {"NEW": 1, "REASSOCIATED": 2, "ENTERED": 3}
+        events_by_track: dict[int, object] = {}
+        for event in flow_events or []:
+            previous = events_by_track.get(event.track_id)
+            if previous is None or event_priority.get(event.kind, 0) >= event_priority.get(previous.kind, 0):
+                events_by_track[event.track_id] = event
+
+        event_colors = {
+            "NEW": (255, 200, 40), "LOST": (80, 80, 255),
+            "REASSOCIATED": (255, 80, 220), "ENTERED": (40, 230, 255),
+        }
         for overlay in overlays:
             x1, y1, x2, y2 = overlay.box
             left = max(0, min(width - 1, round(x1 * width)))
             top = max(0, min(height - 1, round(y1 * height)))
             right = max(left + 1, min(width - 1, round(x2 * width)))
             bottom = max(top + 1, min(height - 1, round(y2 * height)))
-            cv2.rectangle(image, (left, top), (right, bottom), color, thickness, cv2.LINE_AA)
-
             person_id = overlay.track_id if overlay.track_id is not None else "-"
             state = (flow_states or {}).get(overlay.track_id) if overlay.track_id is not None else None
+            event = events_by_track.get(overlay.track_id) if overlay.track_id is not None else None
+            box_color = event_colors.get(event.kind, color) if event is not None else color
+            cv2.rectangle(image, (left, top), (right, bottom), box_color, thickness, cv2.LINE_AA)
             label = f"P#{person_id}  {overlay.confidence:.0%}"
             if state is not None:
-                label = f"P#{person_id} {'IN' if state.inside_roi else 'OUT'} stable:{state.stable_frames} counted:{'YES' if state.counted else 'NO'}"
+                zone = "INSIDE" if state.inside_roi else "OUTSIDE"
+                event_text = f" {event.kind}" if event is not None else ""
+                label = f"P#{person_id} {overlay.confidence:.0%} {zone} stable:{state.stable_frames}{event_text}"
             (text_width, text_height), baseline = cv2.getTextSize(
                 label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
             )
@@ -148,7 +163,7 @@ def draw_person_overlays(
                 )
             label_top = max(0, top - text_height - baseline - 8)
             label_right = min(right, left + text_width + 12)
-            cv2.rectangle(image, (left, label_top), (label_right, top), color, -1)
+            cv2.rectangle(image, (left, label_top), (label_right, top), box_color, -1)
             cv2.putText(
                 image,
                 label,
@@ -160,10 +175,20 @@ def draw_person_overlays(
                 cv2.LINE_AA,
             )
 
+        for event in flow_events or []:
+            if event.kind != "LOST":
+                continue
+            x, y = round(event.position[0] * width), round(event.position[1] * height)
+            cv2.drawMarker(image, (x, y), event_colors["LOST"], cv2.MARKER_TILTED_CROSS, 18, thickness)
+            cv2.putText(image, f"P#{event.track_id} LOST ({event.missing_cycles}/3)", (x + 8, max(20, y - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, event_colors["LOST"], thickness, cv2.LINE_AA)
+
         if flow_summary:
             current, today, increment = flow_summary
             summary = f"FLOW current:{current} today:{today}" + (f"  NEW VISITOR +{increment}" if increment else "")
             cv2.putText(image, summary, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 229, 255), thickness, cv2.LINE_AA)
+            legend = "NEW=blue  LOST=red  REASSOCIATED=purple  ENTERED=yellow"
+            cv2.putText(image, legend, (12, 52), cv2.FONT_HERSHEY_SIMPLEX, font_scale * .8, (235, 235, 235), max(1, thickness - 1), cv2.LINE_AA)
         ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 88])
         return encoded.tobytes() if ok else jpeg
     except Exception:

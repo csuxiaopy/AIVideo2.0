@@ -1,9 +1,11 @@
 import pytest
+from pathlib import Path
 from types import ModuleType
 
 import backend.detectors.yolo as yolo_module
 from backend.detectors.fire_smoke import FireSmokeDetector
 from backend.detectors.yolo import YoloDetector
+from backend.pipeline import MonitoringRuntime
 from backend.queueing import AnalysisQueue
 from backend.schemas import WebhookSettingsUpdate
 
@@ -70,3 +72,10 @@ def test_yolo_process_pool_configuration_and_main_process_tracking(monkeypatch):
     executor = detector.executor
     detector.close()
     assert executor.closed
+
+
+def test_official_general_model_name_switches_within_configured_model_directory():
+    runtime = object.__new__(MonitoringRuntime)
+    runtime.settings = type("SettingsStub", (), {"yolo_model_path": "models/yolo26s.pt"})()
+    assert Path(runtime._general_model_path("yolo26m.pt")) == Path("models/yolo26m.pt")
+    assert runtime._general_model_path("custom/person.pt") == "custom/person.pt"

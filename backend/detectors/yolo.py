@@ -17,6 +17,7 @@ from backend.schemas import Detection
 
 
 logger = logging.getLogger(__name__)
+BYTE_TRACK_LOST_CYCLES = 3
 
 _worker_model = None
 
@@ -182,10 +183,15 @@ class YoloDetector:
             self.executor.shutdown(wait=False, cancel_futures=True)
             self.executor = None
 
+    def reset_tracker(self, camera_id: str) -> None:
+        self.trackers.pop(camera_id, None)
+
     def _track(self, camera_id: str, persons: list[Detection], width: int, height: int) -> None:
         if not persons:
             tracker = self.trackers.get(camera_id)
-            if tracker and hasattr(tracker, "update_with_detections"):
+            if isinstance(tracker, CentroidFallbackTracker):
+                tracker.update([])
+            elif tracker and hasattr(tracker, "update_with_detections"):
                 try:
                     import supervision as sv
                     tracker.update_with_detections(sv.Detections.empty())
@@ -197,7 +203,9 @@ class YoloDetector:
             try:
                 import supervision as sv
 
-                tracker = sv.ByteTrack(frame_rate=10, lost_track_buffer=30)
+                # supervision scales lost_track_buffer by frame_rate / 30.  Using
+                # frame_rate=30 makes this value mean detector updates, not video FPS.
+                tracker = sv.ByteTrack(frame_rate=30, lost_track_buffer=BYTE_TRACK_LOST_CYCLES)
             except Exception:
                 tracker = CentroidFallbackTracker()
             self.trackers[camera_id] = tracker
@@ -220,13 +228,39 @@ class YoloDetector:
                 sv.Detections(xyxy=xyxy, confidence=confidence, class_id=class_id)
             )
             tracked_ids = list(tracked.tracker_id) if tracked.tracker_id is not None else []
-            for item, track_id in zip(persons, tracked_ids):
-                item.track_id = int(track_id)
+            unmatched = set(range(len(persons)))
+            for tracked_box, track_id in zip(tracked.xyxy, tracked_ids):
+                best = max(
+                    unmatched,
+                    key=lambda index: self._box_iou(
+                        tracked_box,
+                        np.asarray([
+                            persons[index].box[0] * width, persons[index].box[1] * height,
+                            persons[index].box[2] * width, persons[index].box[3] * height,
+                        ]),
+                    ),
+                    default=None,
+                )
+                if best is not None and self._box_iou(tracked_box, np.asarray([
+                    persons[best].box[0] * width, persons[best].box[1] * height,
+                    persons[best].box[2] * width, persons[best].box[3] * height,
+                ])) > 0:
+                    persons[best].track_id = int(track_id)
+                    unmatched.remove(best)
         except Exception as exc:
             logger.warning("ByteTrack update failed for %s, using centroid fallback: %s", camera_id, exc)
             fallback = CentroidFallbackTracker()
             self.trackers[camera_id] = fallback
             fallback.update(persons)
+
+    @staticmethod
+    def _box_iou(first: np.ndarray, second: np.ndarray) -> float:
+        left, top = max(first[0], second[0]), max(first[1], second[1])
+        right, bottom = min(first[2], second[2]), min(first[3], second[3])
+        intersection = max(0.0, right - left) * max(0.0, bottom - top)
+        first_area = max(0.0, first[2] - first[0]) * max(0.0, first[3] - first[1])
+        second_area = max(0.0, second[2] - second[0]) * max(0.0, second[3] - second[1])
+        return float(intersection / max(first_area + second_area - intersection, 1e-9))
 
     @staticmethod
     def people(detections: list[Detection]) -> list[Detection]:
