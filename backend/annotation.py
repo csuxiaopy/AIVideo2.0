@@ -34,8 +34,10 @@ def annotate_detections(
     zone: list[tuple[float, float]] | None = None,
     highlighted_track_ids: set[int] | None = None,
     show_track_ids: bool = False,
+    event_started_at: str | None = None,
+    event_ended_at: str | None = None,
 ) -> bytes:
-    if not detections and not zone:
+    if not detections and not zone and not event_started_at:
         return jpeg
     try:
         image = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -72,6 +74,19 @@ def annotate_detections(
             if show_track_ids and detection.track_id is not None:
                 label = f"#{detection.track_id} {label}"
             _draw_label(image, label, left, top, color, font_scale, thickness)
+
+        if event_started_at:
+            end_text = event_ended_at or "ONGOING"
+            label = f"START {event_started_at}   END {end_text}"
+            text_scale = max(0.42, base / 1200)
+            (text_width, text_height), baseline = cv2.getTextSize(
+                label, cv2.FONT_HERSHEY_SIMPLEX, text_scale, max(1, thickness)
+            )
+            pad = 8
+            cv2.rectangle(image, (0, 0), (min(width, text_width + pad * 2), text_height + baseline + pad * 2),
+                          (18, 30, 48), -1)
+            cv2.putText(image, label, (pad, pad + text_height), cv2.FONT_HERSHEY_SIMPLEX,
+                        text_scale, (255, 255, 255), max(1, thickness), cv2.LINE_AA)
 
         ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 88])
         return encoded.tobytes() if ok else jpeg

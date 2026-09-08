@@ -7,7 +7,9 @@ from starlette.requests import Request
 
 from backend.auth import admin_user, current_user, resolve_session
 from backend.api.context import context
-from backend.database import utc_now
+from backend import models
+from backend.database import Base, engine, utc_now
+from backend.repository import Repository
 from backend.security import hash_password, token_hash, validate_password, validate_username, verify_password
 
 
@@ -67,3 +69,15 @@ def test_expired_or_disabled_session_is_revoked(monkeypatch):
     monkeypatch.setattr(context, "repository", repo)
     assert resolve_session("secret") is None
     assert repo.deleted
+
+
+def test_captcha_is_atomic_and_single_use():
+    Base.metadata.create_all(engine)
+    repository = Repository()
+    challenge_id = "test-captcha-single-use"
+    digest = token_hash(f"{challenge_id}:ABCD")
+    repository.create_captcha(models.CaptchaChallenge(
+        id=challenge_id, answer_hash=digest, expires_at=utc_now() + timedelta(minutes=5), used=False
+    ))
+    assert repository.consume_captcha(challenge_id, token_hash(f"{challenge_id}:ABCD"))
+    assert not repository.consume_captcha(challenge_id, token_hash(f"{challenge_id}:ABCD"))

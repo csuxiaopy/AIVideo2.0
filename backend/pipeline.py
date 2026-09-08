@@ -4,7 +4,9 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from prometheus_client import Counter, Gauge, Histogram
 
@@ -36,6 +38,10 @@ ONLINE_GAUGE = Gauge("monitor_cameras_online", "Online cameras")
 QUEUE_GAUGE = Gauge("monitor_queue_depth", "Queue depth", ["priority"])
 VLM_CALLS = Counter("monitor_vlm_calls_total", "VLM calls", ["mode", "status"])
 BEHAVIOR_INTERVAL_SECONDS = 180
+
+
+def event_time(value: datetime, schedule: ScheduleSpec) -> str:
+    return value.astimezone(ZoneInfo(schedule.timezone)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def yolo_required_modes(modes: set[str]) -> set[str]:
@@ -301,21 +307,48 @@ class MonitoringRuntime:
 
     async def _process(self, camera: models.Camera, force: bool = False, recovering: bool = False) -> dict[str, Any]:
         started = time.perf_counter()
+        modes = set(from_json(camera.modes_json, [])) - {Mode.FIRE_SMOKE.value}
+        options = CameraOptions.model_validate(from_json(camera.options_json, {}))
+        state = self.rules.for_camera(camera.id)
         frame = self.media.latest(camera.id)
         if not frame:
+            ended_at = utc_now()
+            if Mode.PHONE_USE.value in modes:
+                phase, began_at = state.phone_event_update(False, options.phone_use_seconds, ended_at)
+                if phase == "resolved" and began_at:
+                    state.pending_resolutions[Mode.PHONE_USE.value] = (began_at, ended_at)
+            if Mode.OFF_DUTY.value in modes:
+                phase, began_at = state.absence_event_update(
+                    False, False, options.off_duty_seconds, ended_at, options.shift_grace_seconds
+                )
+                if phase == "resolved" and began_at:
+                    state.pending_resolutions[Mode.OFF_DUTY.value] = (began_at, ended_at)
             # A newly started stream normally needs a short FFmpeg warm-up.
             # Scheduled work should be skipped instead of reported as a worker
             # failure; an explicit user-requested analysis still returns an error.
             if not force:
                 return {"camera_id": camera.id, "results": [], "skipped": "no_frame"}
             raise RuntimeError("视频源尚无可用画面")
-        modes = set(from_json(camera.modes_json, [])) - {Mode.FIRE_SMOKE.value}
-        options = CameraOptions.model_validate(from_json(camera.options_json, {}))
         geometry = GeometrySpec.model_validate(from_json(camera.geometry_json, {}))
         schedule = ScheduleSpec.model_validate(from_json(camera.schedule_json, {}))
-        state = self.rules.for_camera(camera.id)
         results: list[dict[str, Any]] = []
         now = utc_now()
+
+        for pending_mode, (began_at, ended_at) in list(state.pending_resolutions.items()):
+            reason = "玩手机事件因画面中断结束" if pending_mode == Mode.PHONE_USE.value else "离岗事件因画面中断结束"
+            analysis = self.repository.add_analysis(
+                camera_id=camera.id, mode=pending_mode, status="uncertain", confidence=0,
+                severity="normal", reason=reason, latency_ms=0,
+            )
+            evidence = annotate_detections(
+                frame.jpeg, [], zone=geometry.post_roi if pending_mode == Mode.OFF_DUTY.value else None,
+                event_started_at=event_time(began_at, schedule), event_ended_at=event_time(ended_at, schedule),
+            )
+            await self.alerts.create(
+                camera, analysis, evidence, bypass_cooldown=True, event_phase="resolved",
+                event_started_at=began_at, event_ended_at=ended_at,
+            )
+            state.pending_resolutions.pop(pending_mode, None)
 
         if Mode.BLACK_SCREEN.value in modes and self._mode_due(camera.id, Mode.BLACK_SCREEN.value, options.health_interval_seconds, force):
             black, metrics = is_black_screen(
@@ -351,46 +384,77 @@ class MonitoringRuntime:
                     )
                 if force:
                     raise
+                if Mode.OFF_DUTY.value in modes:
+                    phase, started_at = state.absence_event_update(
+                        occupied=False, scheduled=False, threshold_seconds=options.off_duty_seconds,
+                        now=now, grace_seconds=options.shift_grace_seconds,
+                    )
+                    if phase == "resolved" and started_at:
+                        analysis = self.repository.add_analysis(
+                            camera_id=camera.id, mode=Mode.OFF_DUTY.value, status="uncertain",
+                            confidence=0, severity="normal", local_model=self.yolo.model_name,
+                            model_version=self.yolo.model_name, reason="离岗事件因人员检测失败结束",
+                            error=f"{type(exc).__name__}: {str(exc)[:500]}", latency_ms=0,
+                        )
+                        evidence = annotate_detections(
+                            frame.jpeg, [], zone=geometry.post_roi,
+                            event_started_at=event_time(started_at, schedule),
+                            event_ended_at=event_time(now, schedule),
+                        )
+                        await self.alerts.create(
+                            camera, analysis, evidence, bypass_cooldown=True, event_phase="resolved",
+                            event_started_at=started_at, event_ended_at=now,
+                        )
                 return {"camera_id": camera.id, "results": results, "detector_error": str(exc)}
 
         people = self.yolo.people(detections)
         self.media.set_person_detections(camera.id, people)
         self.media.set_object_detections(camera.id, detections)
-        post_people = [item for item in people if item.confidence >= 0.30]
-        occupied = any(box_intersects_polygon(item.box, geometry.post_roi) for item in post_people)
+        qualified_people = [item for item in people if item.confidence >= options.person_confidence]
+        occupied = any(box_intersects_polygon(item.box, geometry.post_roi) for item in qualified_people)
 
         if Mode.ON_DUTY.value in modes and mode_is_active(Mode.ON_DUTY.value, schedule, now) and self._mode_due(camera.id, Mode.ON_DUTY.value, 15, force):
             analysis = self.repository.add_analysis(
                 camera_id=camera.id, mode=Mode.ON_DUTY.value, status="confirmed" if occupied else "none",
-                confidence=max((item.confidence for item in people), default=0.99),
+                confidence=max((item.confidence for item in qualified_people), default=0.99),
                 reason="岗位区域内检测到人员" if occupied else "岗位区域内未检测到人员", latency_ms=0,
             )
             results.append({"mode": Mode.ON_DUTY.value, "status": analysis.status, "reason": analysis.reason})
 
         if Mode.OFF_DUTY.value in modes:
             scheduled = mode_is_active(Mode.OFF_DUTY.value, schedule, now)
-            triggered = state.absence_update(
+            event_phase, event_start = state.absence_event_update(
                 occupied, scheduled, options.off_duty_seconds, now, options.shift_grace_seconds
             )
-            if self._mode_due(camera.id, Mode.OFF_DUTY.value, 15, force) or triggered:
-                status = "confirmed" if triggered else "none"
-                reason = "排班内岗位区域持续无人，达到离岗阈值" if triggered else (
+            if self._mode_due(camera.id, Mode.OFF_DUTY.value, 15, force) or event_phase:
+                status = "confirmed" if event_phase else "none"
+                reason = ("排班内岗位区域持续无人，达到离岗阈值" if event_phase == "threshold"
+                          else "离岗事件已结束" if event_phase == "resolved" else (
                     "岗位有人或尚未达到离岗阈值" if scheduled else "当前不在排班时段"
-                )
+                ))
                 analysis = self.repository.add_analysis(
                     camera_id=camera.id, mode=Mode.OFF_DUTY.value, status=status,
                     confidence=0.99, severity="normal", local_model=self.yolo.model_name,
                     model_version=self.yolo.model_name, reason=reason, latency_ms=0,
                 )
                 results.append({"mode": Mode.OFF_DUTY.value, "status": status, "reason": reason})
-                if triggered:
-                    evidence = annotate_detections(frame.jpeg, people, zone=geometry.post_roi)
-                    await self.alerts.create(camera, analysis, evidence)
+                if event_phase and event_start:
+                    end = now
+                    evidence = annotate_detections(
+                        frame.jpeg, qualified_people, zone=geometry.post_roi,
+                        event_started_at=event_time(event_start, schedule),
+                        event_ended_at=event_time(end, schedule),
+                    )
+                    await self.alerts.create(
+                        camera, analysis, evidence, bypass_cooldown=True,
+                        event_phase=event_phase, event_started_at=event_start,
+                        event_ended_at=end,
+                    )
 
         if Mode.PEOPLE_FLOW.value in modes and mode_is_active(Mode.PEOPLE_FLOW.value, schedule, now):
             tracks = [
                 (item.track_id, ((item.box[0] + item.box[2]) / 2, (item.box[1] + item.box[3]) / 2))
-                for item in people if item.track_id is not None
+                for item in qualified_people if item.track_id is not None
             ]
             entered, flow_states = state.flow_update(
                 tracks, now,
@@ -400,28 +464,50 @@ class MonitoringRuntime:
                 options.flow_reassociation_distance,
                 options.stream_recovery_grace_seconds,
                 recovering,
+                geometry.flow_roi,
             )
-            current_count = len(tracks)
+            current_count = sum(point_in_polygon(position, geometry.flow_roi) for _, position in tracks)
             self.repository.upsert_traffic(camera.id, current_count, entered, 0)
             if options.flow_debug:
                 summary = self.repository.traffic_summary()
                 camera_summary = next((item for item in summary["cameras"] if item["camera_id"] == camera.id), {})
                 self.media.set_flow_debug(
-                    camera.id, flow_states, current_count, int(camera_summary.get("entered_today", 0)), entered
+                    camera.id, flow_states, current_count, int(camera_summary.get("entered_today", 0)), entered,
+                    geometry.flow_roi,
                 )
             results.append({"mode": Mode.PEOPLE_FLOW.value, "current": current_count, "entered": entered})
+
+        phone_active = Mode.PHONE_USE.value in modes and mode_is_active(Mode.PHONE_USE.value, schedule, now)
+        if Mode.PHONE_USE.value in modes and not phone_active:
+            phase, began_at = state.phone_event_update(False, options.phone_use_seconds, now)
+            if phase == "resolved" and began_at:
+                analysis = self.repository.add_analysis(
+                    camera_id=camera.id, mode=Mode.PHONE_USE.value, status="none", confidence=0.99,
+                    severity="normal", reason="玩手机事件因排班结束", latency_ms=0,
+                )
+                evidence = annotate_detections(
+                    frame.jpeg, [], event_started_at=event_time(began_at, schedule),
+                    event_ended_at=event_time(now, schedule),
+                )
+                await self.alerts.create(
+                    camera, analysis, evidence, bypass_cooldown=True, event_phase="resolved",
+                    event_started_at=began_at, event_ended_at=now,
+                )
 
         behavior_modes = {
             mode for mode in (Mode.PHONE_USE, Mode.SMOKING)
             if mode.value in modes and mode_is_active(mode.value, schedule, now)
         }
         if behavior_modes and self._mode_due(
-            camera.id, "behavior", BEHAVIOR_INTERVAL_SECONDS, force
+            camera.id, "behavior", options.behavior_interval_seconds, force
         ):
-            results.extend(await self._behaviors(camera, behavior_modes, frame.jpeg))
+            results.extend(await self._behaviors(camera, behavior_modes, frame.jpeg, options, schedule, now))
 
         if Mode.INTRUSION.value in modes and geometry.intrusion_zone:
-            intrusion_people = [item for item in people if item.confidence >= options.intrusion_confidence and item.track_id is not None]
+            intrusion_people = [
+                item for item in qualified_people
+                if item.confidence >= options.intrusion_confidence and item.track_id is not None
+            ]
             intrusion_tracks = [
                 (item.track_id, ((item.box[0] + item.box[2]) / 2, item.box[3])) for item in intrusion_people
             ]
@@ -587,15 +673,36 @@ class MonitoringRuntime:
         camera: models.Camera,
         modes: set[Mode],
         frame_jpeg: bytes,
+        options: CameraOptions | None = None,
+        schedule: ScheduleSpec | None = None,
+        now: datetime | None = None,
     ) -> list[dict[str, Any]]:
+        options = options or CameraOptions()
+        schedule = schedule or ScheduleSpec()
+        now = now or utc_now()
+        if not hasattr(self, "rules"):
+            self.rules = RuleStateRegistry()
+        state = self.rules.for_camera(camera.id)
         if not self.vlm:
             output = []
+            phone_phase, phone_start = (state.phone_event_update(False, options.phone_use_seconds, now)
+                                        if Mode.PHONE_USE in modes else (None, None))
             for mode in sorted(modes, key=lambda item: item.value):
                 analysis = self.repository.add_analysis(
                     camera_id=camera.id, mode=mode.value, status="uncertain", confidence=0,
                     severity="normal", reason="视觉大模型尚未配置",
                     error="model_not_configured", latency_ms=0,
                 )
+                if mode == Mode.PHONE_USE and phone_phase == "resolved" and phone_start:
+                    analysis.reason = "玩手机事件因模型未配置结束"
+                    evidence = annotate_detections(
+                        frame_jpeg, [], event_started_at=event_time(phone_start, schedule),
+                        event_ended_at=event_time(now, schedule),
+                    )
+                    await self.alerts.create(
+                        camera, analysis, evidence, bypass_cooldown=True, event_phase="resolved",
+                        event_started_at=phone_start, event_ended_at=now,
+                    )
                 output.append({"mode": mode.value, "status": "uncertain", "reason": analysis.reason})
             return output
         try:
@@ -612,7 +719,20 @@ class MonitoringRuntime:
                     usage_json=as_json(response.usage), latency_ms=response.latency_ms,
                 )
                 confirmed = result.status == "confirmed"
-                if confirmed:
+                if mode == Mode.PHONE_USE:
+                    phase, started_at = state.phone_event_update(confirmed, options.phone_use_seconds, now)
+                    if phase and started_at:
+                        reason = "持续玩手机已达到判定时间" if phase == "threshold" else "玩手机事件已结束"
+                        analysis.reason = reason
+                        evidence = annotate_detections(
+                            frame_jpeg, [], event_started_at=event_time(started_at, schedule),
+                            event_ended_at=event_time(now, schedule),
+                        )
+                        await self.alerts.create(
+                            camera, analysis, evidence, bypass_cooldown=True,
+                            event_phase=phase, event_started_at=started_at, event_ended_at=now,
+                        )
+                elif confirmed:
                     await self.alerts.create(camera, analysis, frame_jpeg)
                 output.append({
                     "mode": mode.value, "status": result.status,
@@ -622,13 +742,25 @@ class MonitoringRuntime:
         except VLMError as exc:
             VLM_CALLS.labels(mode="behavior_combined", status="error").inc()
             output = []
+            phone_phase, phone_start = (state.phone_event_update(False, options.phone_use_seconds, now)
+                                        if Mode.PHONE_USE in modes else (None, None))
             for mode in sorted(modes, key=lambda item: item.value):
                 VLM_CALLS.labels(mode=mode.value, status="error").inc()
-                self.repository.add_analysis(
+                analysis = self.repository.add_analysis(
                     camera_id=camera.id, mode=mode.value, status="uncertain", confidence=0,
                     severity="normal", reason="视觉大模型分析失败", request_id=exc.request_id,
                     error=f"{type(exc).__name__}: {str(exc)[:500]}", latency_ms=0,
                 )
+                if mode == Mode.PHONE_USE and phone_phase == "resolved" and phone_start:
+                    analysis.reason = "玩手机事件因模型失败结束"
+                    evidence = annotate_detections(
+                        frame_jpeg, [], event_started_at=event_time(phone_start, schedule),
+                        event_ended_at=event_time(now, schedule),
+                    )
+                    await self.alerts.create(
+                        camera, analysis, evidence, bypass_cooldown=True, event_phase="resolved",
+                        event_started_at=phone_start, event_ended_at=now,
+                    )
                 output.append({"mode": mode.value, "status": "uncertain", "error": str(exc)})
             return output
 

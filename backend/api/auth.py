@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import base64
+import secrets
 from datetime import timedelta
+
+import cv2
+import numpy as np
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from sqlalchemy.exc import IntegrityError
@@ -14,6 +19,40 @@ from backend.security import hash_password, random_token, token_hash, validate_u
 
 router = APIRouter(prefix="/api")
 
+CAPTCHA_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+
+
+def _captcha_png(answer: str) -> bytes:
+    image = np.full((58, 168, 3), (241, 246, 250), dtype=np.uint8)
+    rng = np.random.default_rng()
+    for _ in range(9):
+        color = tuple(int(value) for value in rng.integers(90, 210, 3))
+        start = tuple(int(value) for value in (rng.integers(0, 168), rng.integers(0, 58)))
+        end = tuple(int(value) for value in (rng.integers(0, 168), rng.integers(0, 58)))
+        cv2.line(image, start, end, color, 1, cv2.LINE_AA)
+    for index, char in enumerate(answer):
+        color = tuple(int(value) for value in rng.integers(20, 100, 3))
+        cv2.putText(image, char, (12 + index * 38, 43 + int(rng.integers(-3, 4))),
+                    cv2.FONT_HERSHEY_DUPLEX, 1.15, color, 2, cv2.LINE_AA)
+    ok, encoded = cv2.imencode(".png", image)
+    if not ok:
+        raise RuntimeError("验证码图片生成失败")
+    return encoded.tobytes()
+
+
+@router.get("/auth/captcha")
+async def captcha() -> dict:
+    challenge_id = secrets.token_urlsafe(24)
+    answer = "".join(secrets.choice(CAPTCHA_ALPHABET) for _ in range(4))
+    context.repository.create_captcha(models.CaptchaChallenge(
+        id=challenge_id,
+        answer_hash=token_hash(f"{challenge_id}:{answer}"),
+        expires_at=utc_now() + timedelta(minutes=5),
+        used=False,
+    ))
+    encoded = base64.b64encode(_captcha_png(answer)).decode("ascii")
+    return {"captcha_id": challenge_id, "image": f"data:image/png;base64,{encoded}", "expires_in": 300}
+
 
 def _set_cookie(response: Response, token: str) -> None:
     response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
@@ -23,6 +62,10 @@ def _set_cookie(response: Response, token: str) -> None:
 
 @router.post("/auth/login")
 async def login(payload: LoginRequest, response: Response) -> dict:
+    answer_hash = token_hash(f"{payload.captcha_id}:{payload.captcha_answer.strip().upper()}")
+    if not context.repository.consume_captcha(payload.captcha_id, answer_hash):
+        context.repository.invalidate_captcha(payload.captcha_id)
+        raise HTTPException(status_code=400, detail="验证码错误或已过期")
     user = context.repository.get_user_by_username(payload.username.strip())
     if not user or not user.enabled or not verify_password(user.password_hash, payload.password):
         raise HTTPException(status_code=401, detail="用户名或密码错误")

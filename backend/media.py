@@ -103,9 +103,10 @@ def draw_person_overlays(
     overlays: list[PersonOverlay],
     flow_states: dict[int, object] | None = None,
     flow_summary: tuple[int, int, int] | None = None,
+    flow_roi: list[tuple[float, float]] | None = None,
 ) -> bytes:
     """Draw preview-only person boxes while leaving the analysis frame untouched."""
-    if not overlays:
+    if not overlays and not flow_roi:
         return jpeg
     try:
         import cv2
@@ -120,6 +121,10 @@ def draw_person_overlays(
         color = (117, 229, 71)
         text_color = (8, 23, 16)
 
+        if flow_roi and len(flow_roi) >= 3:
+            polygon = np.asarray([[round(x * width), round(y * height)] for x, y in flow_roi], dtype=np.int32)
+            cv2.polylines(image, [polygon], True, (255, 170, 40), thickness, cv2.LINE_AA)
+
         for overlay in overlays:
             x1, y1, x2, y2 = overlay.box
             left = max(0, min(width - 1, round(x1 * width)))
@@ -132,7 +137,7 @@ def draw_person_overlays(
             state = (flow_states or {}).get(overlay.track_id) if overlay.track_id is not None else None
             label = f"P#{person_id}  {overlay.confidence:.0%}"
             if state is not None:
-                label = f"P#{person_id} {state.first_zone} stable:{state.stable_frames} counted:{'YES' if state.counted else 'NO'}"
+                label = f"P#{person_id} {'IN' if state.inside_roi else 'OUT'} stable:{state.stable_frames} counted:{'YES' if state.counted else 'NO'}"
             (text_width, text_height), baseline = cv2.getTextSize(
                 label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
             )

@@ -188,7 +188,7 @@ class MediaGateway:
         self.object_overlays: dict[str, tuple[float, list[ObjectOverlay]]] = {}
         self.safety_overlays: dict[str, tuple[float, list[SafetyOverlay]]] = {}
         self.intrusions: dict[str, tuple[list[tuple[float, float]], set[int]]] = {}
-        self.flow_debug: dict[str, tuple[float, dict[int, object], tuple[int, int, int]]] = {}
+        self.flow_debug: dict[str, tuple[float, dict[int, object], tuple[int, int, int], list[tuple[float, float]]]] = {}
 
     @property
     def streams(self) -> dict[str, LivePreviewStream]:
@@ -311,9 +311,10 @@ class MediaGateway:
         self.object_overlays[camera_id] = (time.monotonic(), phone_overlays(detections))
 
     def set_flow_debug(
-        self, camera_id: str, states: dict[int, object], current: int, today: int, increment: int
+        self, camera_id: str, states: dict[int, object], current: int, today: int, increment: int,
+        roi: list[tuple[float, float]] | None = None,
     ) -> None:
-        self.flow_debug[camera_id] = (time.monotonic(), states, (current, today, increment))
+        self.flow_debug[camera_id] = (time.monotonic(), states, (current, today, increment), roi or [])
 
     def set_safety_detections(self, camera_id: str, detections: list[Detection]) -> None:
         self.safety_overlays[camera_id] = (
@@ -436,13 +437,13 @@ class MediaGateway:
         objects_at, objects = self.object_overlays.get(camera_id, (0.0, []))
         safety_at, safety = self.safety_overlays.get(camera_id, (0.0, []))
         zone, intruding_ids = self.intrusions.get(camera_id, ([], set()))
-        flow_at, flow_states, flow_summary = self.flow_debug.get(camera_id, (0.0, {}, None))
+        flow_at, flow_states, flow_summary, flow_roi = self.flow_debug.get(camera_id, (0.0, {}, None, []))
         people = people if now - people_at <= 3.0 else []
         objects = objects if now - objects_at <= 3.0 else []
         safety = safety if now - safety_at <= 3.0 else []
         if now - flow_at > 3.0:
-            flow_states, flow_summary = {}, None
-        rendered = draw_person_overlays(jpeg, people, flow_states, flow_summary)
+            flow_states, flow_summary, flow_roi = {}, None, []
+        rendered = draw_person_overlays(jpeg, people, flow_states, flow_summary, flow_roi)
         rendered = draw_object_overlays(rendered, objects)
         return draw_safety_overlays(rendered, safety, zone, people, intruding_ids)
 

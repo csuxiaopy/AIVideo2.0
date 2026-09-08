@@ -34,8 +34,10 @@ Point = tuple[Annotated[float, Field(ge=0, le=1)], Annotated[float, Field(ge=0, 
 class CameraOptions(BaseModel):
     health_interval_seconds: int = Field(default=5, ge=2, le=60)
     yolo_fps: float = Field(default=0.1, ge=0.1, le=10)
-    behavior_interval_seconds: int = Field(default=15, ge=5, le=300)
-    off_duty_seconds: int = Field(default=300, ge=30, le=86400)
+    behavior_interval_seconds: int = Field(default=180, ge=60, le=3600)
+    phone_use_seconds: int = Field(default=600, ge=60, le=86400)
+    off_duty_seconds: int = Field(default=600, ge=60, le=86400)
+    person_confidence: float = Field(default=0.30, ge=0, le=1)
     shift_grace_seconds: int = Field(default=60, ge=0, le=3600)
     alert_cooldown_seconds: int = Field(default=300, ge=0, le=86400)
     black_mean_max: float = Field(default=18.0, ge=0, le=255)
@@ -61,13 +63,16 @@ class NamedPolygon(BaseModel):
 
 class GeometrySpec(BaseModel):
     post_roi: list[Point] = Field(default_factory=list, max_length=50)
+    flow_roi: list[Point] = Field(
+        default_factory=lambda: [(0, 0), (1, 0), (1, 1), (0, 1)], max_length=50
+    )
     intrusion_zone: NamedPolygon | None = None
 
-    @field_validator("post_roi")
+    @field_validator("post_roi", "flow_roi")
     @classmethod
     def valid_roi(cls, value: list[Point]) -> list[Point]:
         if value and len(value) < 3:
-            raise ValueError("岗位区域至少需要3个点")
+            raise ValueError("ROI 区域至少需要3个点")
         return value
 
 
@@ -129,6 +134,10 @@ class CameraCreate(BaseModel):
             raise ValueError("在岗或离岗模式必须配置岗位区域")
         if Mode.INTRUSION in selected and self.geometry.intrusion_zone is None:
             raise ValueError("区域入侵模式必须配置禁区")
+        if Mode.PEOPLE_FLOW in selected and len(self.geometry.flow_roi) < 3:
+            raise ValueError("人流模式必须配置人流 ROI")
+        if Mode.PHONE_USE in selected and self.options.behavior_interval_seconds > self.options.phone_use_seconds:
+            raise ValueError("玩手机检测间隔不能大于连续判定时间")
         return self
 
 
@@ -276,6 +285,8 @@ class DisplaySettingsUpdate(BaseModel):
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=128)
+    captcha_id: str = Field(min_length=1, max_length=64)
+    captcha_answer: str = Field(min_length=1, max_length=16)
 
 
 class PasswordChange(BaseModel):

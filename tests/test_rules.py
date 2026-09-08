@@ -65,6 +65,28 @@ def test_one_frame_false_detection_does_not_count():
     assert state.flow_update([], now + timedelta(seconds=1), recovery_grace_seconds=0)[0] == 0
 
 
+def test_flow_roi_counts_each_reentry_and_filters_outside():
+    state = CameraRuleState()
+    now = datetime.now(timezone.utc)
+    roi = [(0.4, 0.2), (0.8, 0.2), (0.8, 0.8), (0.4, 0.8)]
+    kwargs = {"min_stable_frames": 2, "recovery_grace_seconds": 0, "roi": roi}
+    assert state.flow_update([(1, (0.02, 0.5))], now, **kwargs)[0] == 0
+    assert state.flow_update([(1, (0.5, 0.5))], now + timedelta(seconds=1), **kwargs)[0] == 1
+    assert state.flow_update([(1, (0.6, 0.5))], now + timedelta(seconds=2), **kwargs)[0] == 0
+    assert state.flow_update([(1, (0.2, 0.5))], now + timedelta(seconds=3), **kwargs)[0] == 0
+    assert state.flow_update([(1, (0.5, 0.5))], now + timedelta(seconds=4), **kwargs)[0] == 1
+
+
+def test_absence_event_emits_threshold_then_resolution_once():
+    state = CameraRuleState()
+    now = datetime.now(timezone.utc)
+    assert state.absence_event_update(False, True, 600, now) == (None, now)
+    phase, started = state.absence_event_update(False, True, 600, now + timedelta(seconds=600))
+    assert (phase, started) == ("threshold", now)
+    assert state.absence_event_update(False, True, 600, now + timedelta(seconds=700))[0] is None
+    assert state.absence_event_update(True, True, 600, now + timedelta(seconds=800)) == ("resolved", now)
+
+
 def test_id_switch_inherits_counted_state():
     state = CameraRuleState()
     now = datetime.now(timezone.utc)

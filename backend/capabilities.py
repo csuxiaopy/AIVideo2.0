@@ -49,7 +49,7 @@ SCENE_TEMPLATES: dict[SceneType, dict[str, Any]] = {
         "description": "营业厅客流统计",
         "modes": [Mode.PEOPLE_FLOW.value, Mode.BLACK_SCREEN.value],
         "schedule": _weekday_schedule([{"start": "08:30", "end": "17:30"}], range(7)),
-        "required_geometry": [],
+        "required_geometry": ["flow_roi"],
     },
     SceneType.SECURITY_AREA: {
         "name": "库房/全局区域",
@@ -66,7 +66,7 @@ ALWAYS_ON_MODES = {Mode.FIRE_SMOKE.value, Mode.INTRUSION.value, Mode.BLACK_SCREE
 
 def scene_templates_public() -> list[dict[str, Any]]:
     options = CameraOptions().model_dump()
-    geometry = GeometrySpec().model_dump()
+    geometry = GeometrySpec().model_dump(mode="json")
     templates = [
         {
             "scene_type": scene.value,

@@ -111,6 +111,7 @@ def _batch_default_camera(camera_id: str, name: str, rtsp_url: str) -> CameraCre
         modes=template["modes"],
         geometry={
             "post_roi": [[0, 0], [1, 0], [1, 1], [0, 1]],
+            "flow_roi": [[0, 0], [1, 0], [1, 1], [0, 1]],
             "intrusion_zone": None,
         },
         schedule=template["schedule"],

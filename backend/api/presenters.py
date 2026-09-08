@@ -69,6 +69,9 @@ def alert_public(alert: models.Alert, deliveries: list[models.WebhookDelivery] |
             } for row in delivery_rows],
         },
         "shadow": alert.shadow,
+        "event_phase": alert.event_phase,
+        "event_started_at": alert.event_started_at,
+        "event_ended_at": alert.event_ended_at,
         "created_at": alert.created_at,
     }
 

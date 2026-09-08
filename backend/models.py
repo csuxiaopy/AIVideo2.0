@@ -70,7 +70,20 @@ class Alert(Base):
     evidence_path: Mapped[str | None] = mapped_column(Text)
     webhook_status: Mapped[str] = mapped_column(String(30), default="pending")
     shadow: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    event_phase: Mapped[str | None] = mapped_column(String(30))
+    event_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    event_ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+
+class CaptchaChallenge(Base):
+    __tablename__ = "captcha_challenges"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    answer_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
 
 class TrafficAggregate(Base):

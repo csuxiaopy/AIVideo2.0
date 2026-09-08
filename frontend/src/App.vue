@@ -36,7 +36,8 @@ type AuthUser = {id:number;username:string;display_name:string;role:'admin'|'use
 const authReady=ref(false)
 const currentUser=ref<AuthUser|null>(null)
 const isAdmin=computed(()=>currentUser.value?.role==='admin')
-const loginForm=reactive({username:'',password:''})
+const loginForm=reactive({username:'',password:'',captcha_id:'',captcha_answer:''})
+const captchaImage=ref('')
 const loginBusy=ref(false)
 const loginError=ref('')
 const passwordModal=ref(false)
@@ -154,7 +155,7 @@ const loadAll = async (silent=false) => {
   finally { loading.value=false }
 }
 
-const defaultOptions = () => ({health_interval_seconds:5,yolo_fps:.1,behavior_interval_seconds:15,off_duty_seconds:300,shift_grace_seconds:60,alert_cooldown_seconds:300,black_mean_max:18,black_std_max:12,black_ratio_min:.92,fire_smoke_fps:1,fire_confidence:.3,smoke_confidence:.3,intrusion_confidence:.5,intrusion_cooldown_seconds:60,flow_min_stable_frames:3,flow_entry_edge_ratio:.1,flow_reassociation_seconds:5,flow_reassociation_distance:.12,stream_recovery_grace_seconds:15,flow_debug:false})
+const defaultOptions = () => ({health_interval_seconds:5,yolo_fps:.1,behavior_interval_seconds:180,phone_use_seconds:600,off_duty_seconds:600,person_confidence:.3,shift_grace_seconds:60,alert_cooldown_seconds:300,black_mean_max:18,black_std_max:12,black_ratio_min:.92,fire_smoke_fps:1,fire_confidence:.3,smoke_confidence:.3,intrusion_confidence:.5,intrusion_cooldown_seconds:60,flow_min_stable_frames:3,flow_entry_edge_ratio:.1,flow_reassociation_seconds:5,flow_reassociation_distance:.12,stream_recovery_grace_seconds:15,flow_debug:false})
 const emptySchedule = () => ({timezone:'Asia/Shanghai',weekly:{},holidays:[]})
 const deepCopy = <T,>(value:T):T => JSON.parse(JSON.stringify(value))
 const newCamera = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'workstation' as SceneType,modes:[] as Mode[],schedule:emptySchedule(),options:defaultOptions(),frame_interval_seconds:1})
@@ -165,9 +166,10 @@ const selectTemplate = (scene:SceneType) => {
   else {newCamera.modes=['black_screen'];newCamera.schedule=emptySchedule()}
 }
 const defaultGeometry = (scene:SceneType) => {
-  if(scene==='workstation') return {post_roi:[[0,0],[1,0],[1,1],[0,1]],intrusion_zone:null}
-  if(scene==='security_area') return {post_roi:[],intrusion_zone:{name:'禁区',points:[[.12,.12],[.88,.12],[.88,.9],[.12,.9]]}}
-  return {post_roi:[],intrusion_zone:null}
+  const flow_roi=[[0,0],[1,0],[1,1],[0,1]]
+  if(scene==='workstation') return {post_roi:[[0,0],[1,0],[1,1],[0,1]],flow_roi,intrusion_zone:null}
+  if(scene==='security_area') return {post_roi:[],flow_roi,intrusion_zone:{name:'禁区',points:[[.12,.12],[.88,.12],[.88,.9],[.12,.9]]}}
+  return {post_roi:[],flow_roi,intrusion_zone:null}
 }
 const toggleMode = (target:any, mode:Mode) => {
   const list=target.modes as Mode[]; const index=list.indexOf(mode)
@@ -195,7 +197,7 @@ const analyze = async (camera:Camera) => {
 }
 const batchCreated=async(count:number)=>{batchModal.value=false;notify(`成功添加 ${count} 个视频源`);await loadAll(true)}
 
-const editForm = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'custom',modes:[],geometry:{post_roi:[],intrusion_zone:null},schedule:emptySchedule(),options:defaultOptions(),zone_name:'禁区',frame_interval_seconds:60})
+const editForm = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'custom',modes:[],geometry:defaultGeometry('custom'),schedule:emptySchedule(),options:defaultOptions(),zone_name:'禁区',frame_interval_seconds:60})
 const openEditor = (camera:Camera) => {
   editor.value=camera
   Object.assign(editForm,{id:camera.id,name:camera.name,rtsp_url:'',enabled:camera.enabled,scene_type:camera.scene_type,modes:[...camera.modes],geometry:deepCopy(camera.geometry||defaultGeometry('custom')),schedule:deepCopy(camera.schedule||emptySchedule()),options:{...defaultOptions(),...(camera.options||{})},zone_name:camera.geometry?.intrusion_zone?.name||'禁区',frame_interval_seconds:camera.frame_interval_seconds||60})
@@ -219,6 +221,10 @@ const canvasClick = (event:MouseEvent) => {
   current.push(p); setPoints(drawLayer.value,current)
 }
 const clearLayer = () => setPoints(drawLayer.value,[])
+const fullScreenFlow = () => setPoints('flow_roi',[[0,0],[1,0],[1,1],[0,1]])
+const optionMinutes = (key:string) => Math.round(Number(editForm.options[key]||0)/60)
+const setOptionMinutes = (key:string,event:Event) => {editForm.options[key]=Number((event.target as HTMLInputElement).value)*60}
+const usesPersonDetection = computed(()=>editForm.modes.some((mode:Mode)=>['off_duty','on_duty','people_flow','intrusion'].includes(mode)))
 const polygon = (points:Point[]) => points.map(p=>`${p[0]*100},${p[1]*100}`).join(' ')
 const saveEditor = async () => {
   if(!editor.value) return
@@ -228,6 +234,8 @@ const saveEditor = async () => {
     if(editForm.rtsp_url&&!/^(rtsp|rtsps|file):\/\//.test(editForm.rtsp_url)) throw new Error('视频源必须以 rtsp://、rtsps:// 或 file:// 开头')
     if(editForm.modes.includes('off_duty')||editForm.modes.includes('phone_use')||editForm.modes.includes('on_duty')) if(pointsFor('post_roi').length<3) throw new Error('岗位区域至少需要 3 个点')
     if(editForm.modes.includes('intrusion')&&pointsFor('intrusion_zone').length<3) throw new Error('区域入侵需要至少 3 个点的禁区')
+    if(editForm.modes.includes('people_flow')&&pointsFor('flow_roi').length<3) throw new Error('人流检测需要至少 3 个点的 ROI')
+    if(editForm.modes.includes('phone_use')&&editForm.options.behavior_interval_seconds>editForm.options.phone_use_seconds) throw new Error('大模型检测间隔不能大于玩手机判定时间')
     if(editForm.geometry.intrusion_zone) editForm.geometry.intrusion_zone.name=editForm.zone_name||'禁区'
     const id=editor.value.id
     const body=deepCopy(editForm);delete body.zone_name;if(!body.rtsp_url)delete body.rtsp_url
@@ -282,6 +290,8 @@ const scrollToAdd=()=>document.getElementById('add-camera')?.scrollIntoView({beh
 const formatTime=(value?:string)=>value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'尚未抓帧'
 const shortTime=(value?:string)=>value?new Date(value).toLocaleTimeString('zh-CN',{hour12:false}):'--:--:--'
 const modeName=(mode:Mode)=>modeInfo[mode]?.name||mode
+const eventPhaseName=(phase?:string)=>phase==='threshold'?'达到阈值':phase==='resolved'?'事件结束':''
+const eventRange=(item:any)=>item.event_started_at?`${formatTime(item.event_started_at)} 至 ${formatTime(item.event_ended_at||item.created_at)}`:''
 const maskedSource=(source:string)=>source?source.replace(/(\/\/[^/:@]+:)[^@]*(?=@)/,'$1****'):''
 const onlineCount=computed(()=>cameras.value.filter(c=>c.online).length)
 const chartMax=computed(()=>Math.max(1,...trafficSummary.value.store_trend.map(point=>point.current_people)))
@@ -343,6 +353,7 @@ const clearAuthenticatedState=()=>{
   currentUser.value=null;setCsrfToken('');socket?.close();socket=undefined;wsOnline.value=false
   window.clearInterval(refreshTimer);refreshTimer=undefined
   active.value='dashboard'
+  void loadCaptcha()
 }
 const toggleAllCameras = () => {
   selectedCameraIds.value = allCamerasSelected.value ? [] : cameras.value.map(camera=>camera.id)
@@ -360,10 +371,11 @@ const removeSelectedCameras = async () => {
   }catch(error:any){notify(error.message,'error')}
 }
 const loadUsers=async()=>{if(!isAdmin.value)return;try{users.value=await api('/api/users')}catch(error:any){notify(error.message,'error')}}
+const loadCaptcha=async()=>{try{const result=await api<{captcha_id:string;image:string}>('/api/auth/captcha');loginForm.captcha_id=result.captcha_id;loginForm.captcha_answer='';captchaImage.value=result.image}catch(error:any){loginError.value=error.message}}
 const login=async()=>{loginBusy.value=true;loginError.value='';try{
   const result=await api<{user:AuthUser;csrf_token:string}>('/api/auth/login',{method:'POST',body:JSON.stringify(loginForm)})
-  currentUser.value=result.user;setCsrfToken(result.csrf_token);loginForm.password='';await startAuthenticated()
-}catch(error:any){loginError.value=error.message}finally{loginBusy.value=false}}
+  currentUser.value=result.user;setCsrfToken(result.csrf_token);loginForm.password='';loginForm.captcha_answer='';await startAuthenticated()
+}catch(error:any){loginError.value=error.message;await loadCaptcha()}finally{loginBusy.value=false}}
 const logout=async()=>{try{await api('/api/auth/logout',{method:'POST'})}catch{}finally{clearAuthenticatedState()}}
 const changePassword=async()=>{if(passwordForm.new_password!==passwordForm.confirm){notify('两次输入的新密码不一致','error');return}try{
   await api('/api/auth/password',{method:'PUT',body:JSON.stringify({old_password:passwordForm.old_password,new_password:passwordForm.new_password})})
@@ -387,7 +399,7 @@ const connectWs=()=>{
   socket.onmessage=(event)=>{try{const data=JSON.parse(event.data);if(data.type==='alert'){notify(`${data.severity==='critical'?'紧急：':''}${data.camera_name||data.camera_id} ${modeName(data.mode)}：${data.reason}`,'alert');loadAll(true)}}catch{}}
   socket.onclose=()=>{wsOnline.value=false;if(currentUser.value)window.setTimeout(connectWs,3000)}
 }
-onMounted(async()=>{setUnauthorizedHandler(clearAuthenticatedState);try{const result=await api<{user:AuthUser;csrf_token:string}>('/api/auth/me');currentUser.value=result.user;setCsrfToken(result.csrf_token);await startAuthenticated()}catch{}finally{authReady.value=true}clockTimer=window.setInterval(()=>now.value=new Date(),1000);window.addEventListener('beforeunload',abandonPreview);window.addEventListener('hashchange',()=>{if(currentUser.value)setTab(location.hash.slice(1)||'dashboard')})})
+onMounted(async()=>{setUnauthorizedHandler(clearAuthenticatedState);try{const result=await api<{user:AuthUser;csrf_token:string}>('/api/auth/me');currentUser.value=result.user;setCsrfToken(result.csrf_token);await startAuthenticated()}catch{await loadCaptcha()}finally{authReady.value=true}clockTimer=window.setInterval(()=>now.value=new Date(),1000);window.addEventListener('beforeunload',abandonPreview);window.addEventListener('hashchange',()=>{if(currentUser.value)setTab(location.hash.slice(1)||'dashboard')})})
 onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTimer);socket?.close();window.removeEventListener('beforeunload',abandonPreview);abandonPreview()})
 </script>
 
@@ -399,6 +411,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
       <span class="head-en">SECURE ACCESS</span><h1>账号登入</h1><p>请输入管理员分配的账号和密码</p>
       <label>用户名<input v-model.trim="loginForm.username" autocomplete="username" autofocus></label>
       <label>密码<input v-model="loginForm.password" type="password" autocomplete="current-password"></label>
+      <label>图形验证码<div class="captcha-row"><input v-model.trim="loginForm.captcha_answer" maxlength="4" autocomplete="off"><button type="button" title="点击换一张" @click="loadCaptcha"><img v-if="captchaImage" :src="captchaImage" alt="图形验证码"></button></div></label>
       <div v-if="loginError" class="auth-error">{{loginError}}</div>
       <button class="primary wide" :disabled="loginBusy">{{loginBusy?'登入中…':'登入系统'}}</button>
     </form>
@@ -594,15 +607,15 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <span class="filter-count"><b>{{alertRows.length}}</b> / {{alerts.length}} <small>MATCHED / TOTAL</small></span>
           </div>
           <table v-if="alertRows.length">
-            <thead><tr><th><input type="checkbox" :checked="allAlertsSelected" @change="toggleAllAlerts"></th><th>级别</th><th>证据</th><th>摄像头 / 场景</th><th>事件</th><th>原因</th><th>Webhook</th><th>时间</th></tr></thead>
+            <thead><tr><th><input type="checkbox" :checked="allAlertsSelected" @change="toggleAllAlerts"></th><th>级别</th><th>证据</th><th>摄像头 / 名称</th><th>事件</th><th>原因</th><th>Webhook</th><th>时间</th></tr></thead>
             <tbody>
               <template v-for="item in alertRows" :key="item.id">
               <tr :class="`severity-${item.severity}`">
                 <td><input v-model="selectedAlertIds" type="checkbox" :value="item.id"></td>
                 <td><span class="severity-badge" :class="item.severity">{{item.severity||'normal'}}</span></td>
                 <td><EvidencePreview :src="item.evidence_url" alt="告警证据" /></td>
-                <td>{{item.camera_id}}<br><small>{{sceneInfo[cameras.find(c=>c.id===item.camera_id)?.scene_type||'custom'].name}}</small></td>
-                <td><span class="event-type">{{modeName(item.mode)}}</span></td>
+                <td>{{item.camera_id}}<br><small>{{cameras.find(c=>c.id===item.camera_id)?.name||'未知摄像头'}}</small></td>
+                <td><span class="event-type">{{modeName(item.mode)}}</span><small v-if="item.event_phase"><br>{{eventPhaseName(item.event_phase)}}<br>{{eventRange(item)}}</small></td>
                 <td class="reason">{{item.reason}}</td>
                 <td><button v-if="item.webhook_delivery?.total" class="delivery-summary" @click="toggleDeliveryDetails(item.id)">{{item.webhook_delivery.delivered}}/{{item.webhook_delivery.total}} 成功</button><span v-else class="muted">未发送</span></td>
                 <td>{{formatTime(item.created_at)}}</td>
@@ -790,18 +803,21 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             </div>
             <div class="draw-actions">
               <button :class="{active:drawLayer==='post_roi'}" class="ghost" @click="drawLayer='post_roi'">岗位区域</button>
+              <button :class="{active:drawLayer==='flow_roi'}" class="ghost" @click="drawLayer='flow_roi'">人流区域</button>
               <button :class="{active:drawLayer==='intrusion_zone'}" class="ghost" @click="drawLayer='intrusion_zone'">禁区</button>
+              <button v-if="drawLayer==='flow_roi'" class="ghost" @click="fullScreenFlow">恢复全屏</button>
               <button class="danger" @click="clearLayer"><TechIcon name="trash" :size="12"/>清空当前图层</button>
             </div>
             <div ref="canvasRef" class="geometry-stage" @click="canvasClick">
               <img :src="snapshotUrl(editor)">
               <svg viewBox="0 0 100 100" preserveAspectRatio="none">
                 <polygon v-if="pointsFor('post_roi').length>=3" :points="polygon(pointsFor('post_roi'))" class="post-zone"/>
+                <polygon v-if="pointsFor('flow_roi').length>=3" :points="polygon(pointsFor('flow_roi'))" class="flow-zone"/>
                 <polygon v-if="pointsFor('intrusion_zone').length>=3" :points="polygon(pointsFor('intrusion_zone'))" class="intrusion-zone"/>
                 <g v-for="(p,index) in pointsFor(drawLayer)" :key="index"><circle :cx="p[0]*100" :cy="p[1]*100" r="1.1"/><text :x="p[0]*100+1.5" :y="p[1]*100-1">{{index+1}}</text></g>
               </svg>
             </div>
-            <p class="hint">岗位区域和禁区至少需要 3 个点；人流统计无需绘制区域。当前图层已有 {{pointsFor(drawLayer).length}} 个点。</p>
+            <p class="hint">岗位区域、人流 ROI 和禁区至少需要 3 个点。人流 ROI 默认为全屏。当前图层已有 {{pointsFor(drawLayer).length}} 个点。</p>
           </div>
           <aside class="editor-right">
             <label>抽帧频率<select v-model.number="editForm.frame_interval_seconds"><option v-for="seconds in frameIntervalOptions" :key="seconds" :value="seconds">每 {{seconds}} 秒抓取一帧</option></select></label>
@@ -810,11 +826,13 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <div class="weekday"><button v-for="d in weekdays" :key="d[0]" :class="{selected:dayEnabled(d[0])}" @click="toggleDay(d[0])">{{d[1]}}</button></div>
             <div class="form-row"><label>上午开始<input v-model="firstShift.start" type="time" @change="syncShifts"></label><label>上午结束<input v-model="firstShift.end" type="time" @change="syncShifts"></label></div>
             <div class="form-row"><label>下午开始<input v-model="secondShift.start" type="time" @change="syncShifts"></label><label>下午结束<input v-model="secondShift.end" type="time" @change="syncShifts"></label></div>
-            <label>离岗时长（秒）<input v-model.number="editForm.options.off_duty_seconds" type="number" min="30"></label>
-            <div v-if="editForm.modes.includes('people_flow')" class="config-note"><b>人流自动统计</b><p>人员进入画面并稳定跟踪后自动累计，无需任何额外几何配置。</p></div>
+            <label v-if="editForm.modes.includes('off_duty')">离岗判定时间（分钟）<input :value="optionMinutes('off_duty_seconds')" type="number" min="1" max="1440" @input="setOptionMinutes('off_duty_seconds',$event)"></label>
+            <label v-if="usesPersonDetection">人员检测置信度<input v-model.number="editForm.options.person_confidence" type="number" min="0" max="1" step="0.05"><small class="field-hint">低于此置信度的人员不参与在岗、离岗、人流和入侵判定，默认 0.30。</small></label>
+            <div v-if="editForm.modes.includes('people_flow')" class="config-note"><b>人流 ROI 统计</b><p>人员每次从区域外进入 ROI 均累计一次，默认区域为全屏。</p></div>
             <div v-if="editForm.modes.includes('people_flow')" class="form-row"><label>稳定确认帧数<input v-model.number="editForm.options.flow_min_stable_frames" type="number" min="2" max="30"></label><label>边缘区域比例<input v-model.number="editForm.options.flow_entry_edge_ratio" type="number" min=".02" max=".4" step=".01"></label></div>
             <label v-if="editForm.modes.includes('people_flow')" class="inline-setting"><span>人流 Debug 标注</span><span class="switch"><input v-model="editForm.options.flow_debug" type="checkbox"><span></span></span></label>
-            <div v-if="editForm.modes.includes('phone_use') || editForm.modes.includes('smoking')" class="config-note"><b>行为联合检测</b><p>上班时间内每 3 分钟抽取当前单帧，一次检测已启用的玩手机和吸烟行为；经济模型发现疑点时统一交由增强模型复核。</p></div>
+            <div v-if="editForm.modes.includes('phone_use') || editForm.modes.includes('smoking')" class="config-note"><b>行为联合检测</b><p>按配置频率抽取当前单帧，玩手机需连续每次确认才会告警；任意非确认或失败均重新计时。</p></div>
+            <div v-if="editForm.modes.includes('phone_use') || editForm.modes.includes('smoking')" class="form-row"><label>大模型检测间隔（分钟）<input :value="optionMinutes('behavior_interval_seconds')" type="number" min="1" max="60" @input="setOptionMinutes('behavior_interval_seconds',$event)"></label><label v-if="editForm.modes.includes('phone_use')">玩手机判定时间（分钟）<input :value="optionMinutes('phone_use_seconds')" type="number" min="1" max="1440" @input="setOptionMinutes('phone_use_seconds',$event)"></label></div>
             <div class="form-row"><label>火焰阈值<input v-model.number="editForm.options.fire_confidence" type="number" min="0" max="1" step=".05"></label><label>烟雾阈值<input v-model.number="editForm.options.smoke_confidence" type="number" min="0" max="1" step=".05"></label></div>
             <label>入侵置信度<input v-model.number="editForm.options.intrusion_confidence" type="number" min="0" max="1" step=".05"></label>
             <div class="config-note"><b>全天安全模式</b><p>烟火、区域入侵、黑屏忽略此处排班，始终运行。</p></div>

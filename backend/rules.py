@@ -126,6 +126,8 @@ class FlowTrackState:
     stable_frames: int = 1
     counted: bool = False
     suppressed: bool = False
+    inside_roi: bool = False
+    entry_pending: bool = False
     trajectory: deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=8))
 
 
@@ -140,6 +142,10 @@ def flow_entry_zone(point: tuple[float, float], ratio: float) -> str:
 class CameraRuleState:
     black_consecutive: int = 0
     absence_since: datetime | None = None
+    absence_alerted: bool = False
+    phone_since: datetime | None = None
+    phone_alerted: bool = False
+    pending_resolutions: dict[str, tuple[datetime, datetime]] = field(default_factory=dict)
     positive_windows: dict[str, deque[datetime]] = field(default_factory=lambda: defaultdict(deque))
     flow_tracks: dict[int, FlowTrackState] = field(default_factory=dict)
     recently_lost_flow_tracks: dict[int, FlowTrackState] = field(default_factory=dict)
@@ -179,6 +185,40 @@ class CameraRuleState:
             self.absence_since = now
             return False
         return (now - self.absence_since).total_seconds() >= threshold_seconds
+
+    def absence_event_update(
+        self, occupied: bool, scheduled: bool, threshold_seconds: int, now: datetime,
+        grace_seconds: int = 0,
+    ) -> tuple[str | None, datetime | None]:
+        """Return threshold/resolved transitions and their event start time."""
+        previous_start, previous_alerted = self.absence_since, self.absence_alerted
+        reached = self.absence_update(occupied, scheduled, threshold_seconds, now, grace_seconds)
+        if previous_alerted and self.absence_since is None:
+            self.absence_alerted = False
+            return "resolved", previous_start
+        if reached and not self.absence_alerted:
+            self.absence_alerted = True
+            return "threshold", self.absence_since
+        return None, self.absence_since
+
+    def phone_event_update(
+        self, confirmed: bool, threshold_seconds: int, now: datetime,
+    ) -> tuple[str | None, datetime | None]:
+        previous_start = self.phone_since
+        if not confirmed:
+            if self.phone_alerted:
+                self.phone_since = None
+                self.phone_alerted = False
+                return "resolved", previous_start
+            self.phone_since = None
+            return None, None
+        if self.phone_since is None:
+            self.phone_since = now
+            return None, self.phone_since
+        if not self.phone_alerted and (now - self.phone_since).total_seconds() >= threshold_seconds:
+            self.phone_alerted = True
+            return "threshold", self.phone_since
+        return None, self.phone_since
 
     def behavior_confirmed(self, mode: str, confirmed: bool, now: datetime) -> bool:
         values = self.positive_windows[mode]
@@ -232,6 +272,7 @@ class CameraRuleState:
         reassociation_distance: float = 0.12,
         recovery_grace_seconds: int = 15,
         recovering: bool = False,
+        roi: list[tuple[float, float]] | None = None,
     ) -> tuple[int, dict[int, FlowTrackState]]:
         day = now.date().isoformat()
         if self.flow_day != day:
@@ -258,7 +299,9 @@ class CameraRuleState:
         }
         entered = 0
         protected = bool(self.flow_protection_until and now < self.flow_protection_until)
+        active_roi = roi or [(0, 0), (1, 0), (1, 1), (0, 1)]
         for track_id, position in tracks:
+            current_inside = point_in_polygon(position, active_roi)
             state = self.flow_tracks.get(track_id)
             if state is None:
                 match = min(
@@ -273,14 +316,19 @@ class CameraRuleState:
                     _, old_id, old = match
                     self.recently_lost_flow_tracks.pop(old_id, None)
                     state = FlowTrackState(
-                        track_id, old.first_seen, now, old.first_position, old.first_zone,
-                        old.stable_frames + 1, old.counted, old.suppressed,
-                        deque(old.trajectory, maxlen=8),
+                        track_id=track_id, first_seen=old.first_seen, last_seen=now,
+                        first_position=old.first_position, first_zone=old.first_zone,
+                        stable_frames=old.stable_frames + 1, counted=old.counted,
+                        suppressed=old.suppressed, trajectory=deque(old.trajectory, maxlen=8),
+                        inside_roi=old.inside_roi, entry_pending=old.entry_pending,
                     )
                     logger.info("[FLOW] Track %s possibly reassociated with Track %s; inherit counted=%s", track_id, old_id, old.counted)
                 else:
                     zone = flow_entry_zone(position, edge_ratio)
-                    state = FlowTrackState(track_id, now, now, position, zone, suppressed=protected)
+                    state = FlowTrackState(
+                        track_id, now, now, position, zone, suppressed=protected,
+                        inside_roi=current_inside, entry_pending=current_inside,
+                    )
                     logger.info("[FLOW] Track %s created first_zone=%s%s", track_id, zone, " (protected)" if protected else "")
                     if zone == "CENTER":
                         logger.info("[FLOW] Track %s created at CENTER; possible tracker recreation", track_id)
@@ -290,12 +338,18 @@ class CameraRuleState:
                 state.stable_frames += 1
                 state.last_seen = now
                 state.trajectory.append(position)
+                if current_inside and not state.inside_roi:
+                    state.entry_pending = True
+                elif not current_inside:
+                    state.entry_pending = False
+                state.inside_roi = current_inside
 
             displacement = math.dist(state.first_position, position)
             required = min_stable_frames if state.first_zone != "CENTER" else min_stable_frames + 2
             eligible_center = state.first_zone != "CENTER" or displacement >= 0.03
-            if not state.counted and not state.suppressed and state.stable_frames >= required and eligible_center:
+            if state.entry_pending and not state.suppressed and state.stable_frames >= required and eligible_center:
                 state.counted = True
+                state.entry_pending = False
                 entered += 1
                 logger.info("[FLOW] Track %s stable=%s confirmed as new visitor; visitor_count +1", track_id, state.stable_frames)
         return entered, dict(self.flow_tracks)

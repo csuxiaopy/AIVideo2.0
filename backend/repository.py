@@ -22,6 +22,36 @@ def from_json(value: str, fallback: Any) -> Any:
 
 
 class Repository:
+    def create_captcha(self, row: models.CaptchaChallenge) -> models.CaptchaChallenge:
+        now = utc_now()
+        with session_scope() as session:
+            session.execute(delete(models.CaptchaChallenge).where(
+                (models.CaptchaChallenge.expires_at <= now) | models.CaptchaChallenge.used.is_(True)
+            ))
+            session.add(row)
+        return row
+
+    def consume_captcha(self, challenge_id: str, answer_hash: str) -> bool:
+        """Atomically consume a matching, unexpired challenge."""
+        with session_scope() as session:
+            result = session.execute(
+                update(models.CaptchaChallenge)
+                .where(
+                    models.CaptchaChallenge.id == challenge_id,
+                    models.CaptchaChallenge.answer_hash == answer_hash,
+                    models.CaptchaChallenge.used.is_(False),
+                    models.CaptchaChallenge.expires_at > utc_now(),
+                )
+                .values(used=True)
+            )
+            return result.rowcount == 1
+
+    def invalidate_captcha(self, challenge_id: str) -> None:
+        with session_scope() as session:
+            session.execute(update(models.CaptchaChallenge).where(
+                models.CaptchaChallenge.id == challenge_id
+            ).values(used=True))
+
     def count_users(self) -> int:
         with session_scope() as session:
             return session.scalar(select(func.count()).select_from(models.User)) or 0

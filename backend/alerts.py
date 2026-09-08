@@ -41,6 +41,9 @@ class AlertService:
         analysis: models.Analysis,
         jpeg: bytes,
         bypass_cooldown: bool = False,
+        event_phase: str | None = None,
+        event_started_at=None,
+        event_ended_at=None,
     ) -> None:
         options = CameraOptions.model_validate(from_json(camera.options_json, {}))
         cooldown_seconds = options.alert_cooldown_seconds
@@ -69,6 +72,9 @@ class AlertService:
             evidence_path=filename,
             webhook_status="not_sent",
             shadow=False,
+            event_phase=event_phase,
+            event_started_at=event_started_at,
+            event_ended_at=event_ended_at,
         )
         payload = self._payload(camera, alert, filename)
         await self.event_bus.publish(payload)
@@ -93,6 +99,9 @@ class AlertService:
             "created_at": alert.created_at.isoformat(),
             "evidence_url": f"/evidence/{filename}",
             "shadow": alert.shadow,
+            "event_phase": getattr(alert, "event_phase", None),
+            "event_started_at": getattr(alert, "event_started_at", None).isoformat() if getattr(alert, "event_started_at", None) else None,
+            "event_ended_at": getattr(alert, "event_ended_at", None).isoformat() if getattr(alert, "event_ended_at", None) else None,
         }
 
     def _schedule_delivery(self, alert_id: int, payload: dict[str, Any]) -> None:

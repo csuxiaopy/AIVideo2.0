@@ -6,7 +6,8 @@ from unittest.mock import patch
 import pytest
 
 from backend.pipeline import BEHAVIOR_INTERVAL_SECONDS, MonitoringRuntime, yolo_required_modes
-from backend.schemas import Mode, VLMResult
+from backend.rules import RuleStateRegistry
+from backend.schemas import CameraOptions, Mode, ScheduleSpec, VLMResult
 from backend.vlm import VLMError, VLMResponse, VisionModelClient
 
 
@@ -61,7 +62,7 @@ def test_combined_behaviors_split_records_and_alerts_using_same_frame():
             return SimpleNamespace(**kwargs)
 
     class Alerts:
-        async def create(self, camera, analysis, evidence):
+        async def create(self, camera, analysis, evidence, **kwargs):
             alerts.append((analysis.mode, evidence))
 
     runtime = object.__new__(MonitoringRuntime)
@@ -72,7 +73,40 @@ def test_combined_behaviors_split_records_and_alerts_using_same_frame():
     assert received == [(modes, frame)]
     assert {item["mode"] for item in output} == {"phone_use", "smoking"}
     assert {item["mode"] for item in analyses} == {"phone_use", "smoking"}
-    assert alerts == [("phone_use", frame), ("smoking", frame)]
+    assert alerts == [("smoking", frame)]
+
+
+def test_phone_use_alerts_at_threshold_and_resolution():
+    current = {"status": "confirmed"}
+    alerts = []
+
+    class VLM:
+        async def tiered_analyze_behaviors(self, modes, jpeg):
+            result = make_result(Mode.PHONE_USE, current["status"])
+            return VLMResponse(results={Mode.PHONE_USE: result}, request_id="r", usage={},
+                               latency_ms=1, provider="test", model="test")
+
+    class Repository:
+        def add_analysis(self, **kwargs):
+            return SimpleNamespace(**kwargs)
+
+    class Alerts:
+        async def create(self, camera, analysis, evidence, **kwargs):
+            alerts.append(kwargs)
+
+    runtime = object.__new__(MonitoringRuntime)
+    runtime.vlm, runtime.repository, runtime.alerts = VLM(), Repository(), Alerts()
+    runtime.rules = RuleStateRegistry()
+    camera = SimpleNamespace(id="camera-1")
+    options = CameraOptions(phone_use_seconds=600)
+    schedule = ScheduleSpec(timezone="UTC")
+    from datetime import datetime, timedelta, timezone
+    started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    asyncio.run(runtime._behaviors(camera, {Mode.PHONE_USE}, b"frame", options, schedule, started))
+    asyncio.run(runtime._behaviors(camera, {Mode.PHONE_USE}, b"frame", options, schedule, started + timedelta(seconds=600)))
+    current["status"] = "none"
+    asyncio.run(runtime._behaviors(camera, {Mode.PHONE_USE}, b"frame", options, schedule, started + timedelta(seconds=700)))
+    assert [item["event_phase"] for item in alerts] == ["threshold", "resolved"]
 
 
 def test_combined_behavior_error_records_uncertain_for_every_requested_mode():

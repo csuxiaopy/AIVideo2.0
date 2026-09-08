@@ -17,7 +17,7 @@ from backend.api.presenters import camera_public
 from backend.vlm import extract_json
 
 
-def test_camera_requires_roi_but_people_flow_needs_no_geometry():
+def test_camera_requires_post_roi_and_people_flow_defaults_to_full_screen_roi():
     with pytest.raises(ValueError):
         CameraCreate(id="c1", name="c1", rtsp_url="rtsp://host/live", modes=[Mode.OFF_DUTY])
     camera = CameraCreate(
@@ -26,6 +26,7 @@ def test_camera_requires_roi_but_people_flow_needs_no_geometry():
         geometry=GeometrySpec(post_roi=[(0,0),(1,0),(1,1)]),
     )
     assert len(camera.modes) == 2
+    assert camera.geometry.flow_roi == [(0, 0), (1, 0), (1, 1), (0, 1)]
 
 
 def test_cipher_redaction_and_signature():
@@ -107,6 +108,24 @@ def test_camera_public_discards_historical_flow_geometry():
     result = camera_public(camera, SecretCipher("test-secret"))
     assert "flow_line" not in result["geometry"]
     assert "flow_zone" not in result["geometry"]
+    assert result["geometry"]["flow_roi"] == [(0, 0), (1, 0), (1, 1), (0, 1)]
+
+
+def test_phone_interval_cannot_exceed_judgment_duration():
+    with pytest.raises(ValueError):
+        CameraCreate(
+            id="phone-1", name="phone", rtsp_url="rtsp://host/live", modes=[Mode.PHONE_USE],
+            geometry={"post_roi": [[0, 0], [1, 0], [1, 1]]},
+            options={"behavior_interval_seconds": 660, "phone_use_seconds": 600},
+        )
+
+
+def test_person_confidence_defaults_and_bounds():
+    from backend.schemas import CameraOptions
+    assert CameraOptions().person_confidence == 0.30
+    assert CameraOptions(person_confidence=0.75).person_confidence == 0.75
+    with pytest.raises(ValueError):
+        CameraOptions(person_confidence=1.01)
 
 
 def test_camera_frame_interval_supports_one_second():
