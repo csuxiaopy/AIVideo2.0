@@ -126,6 +126,7 @@ class FlowTrackState:
     stable_frames: int = 1
     outside_armed: bool = False
     suppressed: bool = False
+    counted: bool = False
     inside_roi: bool = False
     missing_cycles: int = 0
     trajectory: deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=8))
@@ -308,6 +309,11 @@ class CameraRuleState:
                 state.trajectory.append(position)
                 self.flow_tracks[track_id] = state
                 events.append(FlowDebugEvent(track_id, "NEW", position))
+                if current_inside:
+                    state.counted = True
+                    entered += 1
+                    events.append(FlowDebugEvent(track_id, "ENTERED", position))
+                    logger.info("[FLOW] Track %s first observed inside ROI; visitor_count +1", track_id)
                 continue
 
             if state.missing_cycles:
@@ -324,18 +330,12 @@ class CameraRuleState:
                 state.candidate_zone = current_zone
                 state.stable_frames = 1
 
-            if state.stable_frames < min_stable_frames or state.stable_zone == current_zone:
-                continue
-
-            previous_zone = state.stable_zone
             state.stable_zone = current_zone
-            if current_zone == "OUTSIDE":
-                state.outside_armed = True
-            elif previous_zone == "OUTSIDE" and state.outside_armed and not state.suppressed:
-                state.outside_armed = False
+            if current_inside and not state.counted:
+                state.counted = True
                 entered += 1
                 events.append(FlowDebugEvent(track_id, "ENTERED", position))
-                logger.info("[FLOW] Track %s crossed OUTSIDE -> INSIDE; visitor_count +1", track_id)
+                logger.info("[FLOW] Track %s first observed inside ROI; visitor_count +1", track_id)
         return entered, dict(self.flow_tracks), events
 
 

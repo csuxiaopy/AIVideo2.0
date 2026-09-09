@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { api, setCsrfToken, setUnauthorizedHandler } from './api'
 import TechIcon from './components/TechIcon.vue'
 import EvidencePreview from './components/EvidencePreview.vue'
@@ -48,6 +48,13 @@ const active = ref('dashboard')
 const loading = ref(false)
 const dashboard = ref<any>({runtime:{}})
 const cameras = ref<Camera[]>([])
+const dashboardCameraSearch = ref('')
+const cameraSettingsSearch = ref('')
+const focusedCameraId = ref('')
+let focusCameraTimer:number|undefined
+const matchesCameraName=(camera:Camera,query:string)=>camera.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
+const filteredDashboardCameras=computed(()=>cameras.value.filter(camera=>matchesCameraName(camera,dashboardCameraSearch.value)))
+const filteredSettingsCameras=computed(()=>cameras.value.filter(camera=>matchesCameraName(camera,cameraSettingsSearch.value)))
 const alerts = ref<any[]>([])
 const analyses = ref<any[]>([])
 const emptyTrafficSummary = ():TrafficSummary => ({date:'',timezone:'Asia/Shanghai',total_flow_today:0,current_people:0,entered_today:0,exited_today:0,flow_camera_count:0,store_trend:[],cameras:[],current_ranking:[],flow_ranking:[]})
@@ -63,7 +70,8 @@ const previewError = ref('')
 const editor = ref<Camera|null>(null)
 const batchModal = ref(false)
 const selectedCameraIds = ref<string[]>([])
-const allCamerasSelected = computed(()=>cameras.value.length>0&&cameras.value.every(camera=>selectedCameraIds.value.includes(camera.id)))
+const allCamerasSelected = computed(()=>filteredSettingsCameras.value.length>0&&filteredSettingsCameras.value.every(camera=>selectedCameraIds.value.includes(camera.id)))
+watch(cameraSettingsSearch,()=>{selectedCameraIds.value=[]})
 const drawLayer = ref<DrawLayer>('post_roi')
 const canvasRef = ref<HTMLElement|null>(null)
 const now = ref(new Date())
@@ -286,6 +294,18 @@ const cleanupAlerts=async()=>{
 }
 const saveDetectors=async()=>{try{const body={...detectorSettings};delete body.runtime;delete body.updated_at;await api('/api/settings/detectors',{method:'PUT',body:JSON.stringify(body)});notify('本地检测器配置已保存并重新加载');await loadSettings()}catch(error:any){notify(error.message,'error')}}
 const setTab=(name:string)=>{if(!visibleTabs.value.some(tab=>tab.key===name))name='dashboard';if(name==='traffic'&&!displaySettings.show_traffic_report){notify('人流报表已在系统配置中关闭','error');name='dashboard'}active.value=name;location.hash=name;if(name==='settings')loadSettings();if(name==='webhooks')loadWebhooks();if(name==='users')loadUsers()}
+const focusDashboardCamera=async(row:TrafficCameraSummary|null)=>{
+  if(!row)return
+  const camera=cameras.value.find(item=>item.id===row.camera_id)
+  if(!camera)return
+  window.clearTimeout(focusCameraTimer)
+  dashboardCameraSearch.value=camera.name
+  focusedCameraId.value=camera.id
+  setTab('dashboard')
+  await nextTick()
+  document.getElementById(`camera-card-${camera.id}`)?.scrollIntoView({behavior:'smooth',block:'center'})
+  focusCameraTimer=window.setTimeout(()=>{if(focusedCameraId.value===camera.id)focusedCameraId.value=''},2000)
+}
 const scrollToAdd=()=>document.getElementById('add-camera')?.scrollIntoView({behavior:'smooth'})
 const formatTime=(value?:string)=>value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'尚未抓帧'
 const shortTime=(value?:string)=>value?new Date(value).toLocaleTimeString('zh-CN',{hour12:false}):'--:--:--'
@@ -352,14 +372,15 @@ const abandonPreview=()=>{void releasePreviewLease(true)}
 const clearAuthenticatedState=()=>{
   currentUser.value=null;setCsrfToken('');socket?.close();socket=undefined;wsOnline.value=false
   window.clearInterval(refreshTimer);refreshTimer=undefined
-  active.value='dashboard'
+  window.clearTimeout(focusCameraTimer);focusCameraTimer=undefined
+  active.value='dashboard';dashboardCameraSearch.value='';cameraSettingsSearch.value='';focusedCameraId.value='';selectedCameraIds.value=[]
   void loadCaptcha()
 }
 const toggleAllCameras = () => {
-  selectedCameraIds.value = allCamerasSelected.value ? [] : cameras.value.map(camera=>camera.id)
+  selectedCameraIds.value = allCamerasSelected.value ? [] : filteredSettingsCameras.value.map(camera=>camera.id)
 }
 const removeSelectedCameras = async () => {
-  const selected=cameras.value.filter(camera=>selectedCameraIds.value.includes(camera.id))
+  const selected=filteredSettingsCameras.value.filter(camera=>selectedCameraIds.value.includes(camera.id))
   if(!selected.length)return
   const previewNames=selected.slice(0,3).map(camera=>camera.name).join('、')
   const preview=selected.length>3?`${previewNames} 等`:`${previewNames}`
@@ -400,7 +421,7 @@ const connectWs=()=>{
   socket.onclose=()=>{wsOnline.value=false;if(currentUser.value)window.setTimeout(connectWs,3000)}
 }
 onMounted(async()=>{setUnauthorizedHandler(clearAuthenticatedState);try{const result=await api<{user:AuthUser;csrf_token:string}>('/api/auth/me');currentUser.value=result.user;setCsrfToken(result.csrf_token);await startAuthenticated()}catch{await loadCaptcha()}finally{authReady.value=true}clockTimer=window.setInterval(()=>now.value=new Date(),1000);window.addEventListener('beforeunload',abandonPreview);window.addEventListener('hashchange',()=>{if(currentUser.value)setTab(location.hash.slice(1)||'dashboard')})})
-onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTimer);socket?.close();window.removeEventListener('beforeunload',abandonPreview);abandonPreview()})
+onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTimer);window.clearTimeout(focusCameraTimer);socket?.close();window.removeEventListener('beforeunload',abandonPreview);abandonPreview()})
 </script>
 
 <template>
@@ -482,8 +503,13 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         <div class="section-head">
           <div><h2>AI 监控矩阵</h2><span class="head-en">AI MONITORING GRID</span><p>后台按各摄像头抽帧周期更新快照；页面不会自动启动实时视频</p></div>
         </div>
+        <div class="camera-searchbar">
+          <label><TechIcon name="search" :size="14"/><input v-model="dashboardCameraSearch" type="search" placeholder="按监控名称搜索" aria-label="搜索监控总览"></label>
+          <button v-if="dashboardCameraSearch" class="ghost" @click="dashboardCameraSearch=''">清除</button>
+          <span><b>{{filteredDashboardCameras.length}}</b> / {{cameras.length}} <small>MATCHED / TOTAL</small></span>
+        </div>
         <div class="camera-grid">
-          <article v-for="camera in cameras" :key="camera.id" class="camera-card">
+          <article v-for="camera in filteredDashboardCameras" :id="`camera-card-${camera.id}`" :key="camera.id" class="camera-card" :class="{'camera-focus':focusedCameraId===camera.id}">
             <div class="camera-shot">
               <img v-if="camera.last_frame_at" :src="snapshotUrl(camera)" loading="lazy" :alt="`${camera.name} 最近快照`">
               <div v-else class="no-signal"><TechIcon name="video" :size="26"/><b>NO SIGNAL</b><span>{{camera.last_error||'等待首次抓帧'}}</span></div>
@@ -512,6 +538,9 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
           </article>
           <article v-if="!cameras.length" class="camera-card empty-card">
             <TechIcon name="video" :size="30"/><b class="head-en">NO CAMERA SOURCE</b><span>请先添加监控源</span>
+          </article>
+          <article v-else-if="!filteredDashboardCameras.length" class="camera-card empty-card">
+            <TechIcon name="search" :size="30"/><b class="head-en">NO MATCHED CAMERA</b><span>没有名称匹配“{{dashboardCameraSearch.trim()}}”的监控</span>
           </article>
         </div>
 
@@ -562,7 +591,12 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
                 <button class="primary" @click="scrollToAdd"><TechIcon name="plus" :size="13"/>添加视频源</button>
               </div>
             </div>
-            <article v-for="camera in cameras" :key="camera.id">
+            <div class="camera-searchbar compact">
+              <label><TechIcon name="search" :size="14"/><input v-model="cameraSettingsSearch" type="search" placeholder="按监控名称搜索" aria-label="搜索摄像头设置"></label>
+              <button v-if="cameraSettingsSearch" class="ghost" @click="cameraSettingsSearch=''">清除</button>
+              <span><b>{{filteredSettingsCameras.length}}</b> / {{cameras.length}}</span>
+            </div>
+            <article v-for="camera in filteredSettingsCameras" :key="camera.id">
               <label class="camera-select" :aria-label="`选择 ${camera.name}`"><input v-model="selectedCameraIds" type="checkbox" :value="camera.id"></label>
               <i class="source-state" :class="camera.online?'ok':'bad'"></i>
               <div class="source-main">
@@ -579,6 +613,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
               </div>
             </article>
             <div v-if="!cameras.length" class="empty"><b>NO CAMERA SOURCE</b><p>暂无监控源，请在左侧添加</p></div>
+            <div v-else-if="!filteredSettingsCameras.length" class="empty"><b>NO MATCHED CAMERA</b><p>没有名称匹配“{{cameraSettingsSearch.trim()}}”的监控</p></div>
           </section>
         </div>
       </section>
@@ -682,7 +717,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
           <section v-for="ranking in [{title:'当前画面人数排名',en:'ON-SCREEN RANKING',rows:trafficSummary.current_ranking,key:'current_count'},{title:'今日人流排名',en:'DAILY FLOW RANKING',rows:trafficSummary.flow_ranking,key:'entered_today'}]" :key="ranking.en" class="panel podium-panel">
             <div class="section-head"><div><h2>{{ranking.title}}</h2><span class="head-en">{{ranking.en}}</span></div></div>
             <div class="podium">
-              <article v-for="(row,index) in podiumRows(ranking.rows)" :key="row?.camera_id||index" :class="`place-${[2,1,3][index]}`">
+              <article v-for="(row,index) in podiumRows(ranking.rows)" :key="row?.camera_id||index" :class="[`place-${[2,1,3][index]}`,{clickable:!!row}]" :role="row?'button':undefined" :tabindex="row?0:undefined" @click="focusDashboardCamera(row)" @keydown.enter.prevent="focusDashboardCamera(row)" @keydown.space.prevent="focusDashboardCamera(row)">
                 <div class="podium-person"><span>{{[2,1,3][index]}}</span><b>{{row?.camera_name||'暂无'}}</b><small>{{row?.camera_id||'—'}}</small><strong>{{row ? row[ranking.key as keyof TrafficCameraSummary] : 0}}</strong></div>
                 <div class="podium-step">NO.{{[2,1,3][index]}}</div>
               </article>
@@ -693,7 +728,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         <section class="traffic-camera-section">
           <div class="section-head"><div><h2>摄像头统计</h2><span class="head-en">CAMERA FLOW OVERVIEW</span><p>按今日总人流从高到低排列</p></div></div>
           <div v-if="trafficSummary.cameras.length" class="traffic-camera-grid">
-            <article v-for="camera in trafficSummary.cameras" :key="camera.camera_id" class="panel traffic-camera-card">
+            <article v-for="camera in trafficSummary.cameras" :key="camera.camera_id" class="panel traffic-camera-card clickable" role="button" tabindex="0" @click="focusDashboardCamera(camera)" @keydown.enter.prevent="focusDashboardCamera(camera)" @keydown.space.prevent="focusDashboardCamera(camera)">
               <header><div><h3>{{camera.camera_name}}</h3><code>{{camera.camera_id}}</code></div><span class="status-dot" :class="camera.online?'ready':'bad'">{{camera.online?'在线':'离线'}}</span></header>
               <div class="camera-flow-main"><div><small>今日总人流</small><strong>{{camera.entered_today}}</strong></div><div><small>当前人数</small><strong>{{camera.current_count}}</strong></div></div>
               <div class="camera-flow-detail"><span>今日进入画面人次 <b class="green">+{{camera.entered_today}}</b></span><span>Track 稳定去重</span></div>

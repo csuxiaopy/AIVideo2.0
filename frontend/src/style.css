@@ -389,6 +389,16 @@ input[readonly]{opacity:.75}
 .scene-summary small{display:block;font:600 8px/1 var(--font-hud);letter-spacing:1.6px;color:var(--text-muted);margin-top:2px}
 
 /* ---------- AI MONITORING GRID：摄像头面板 ---------- */
+.camera-searchbar{
+  display:flex;align-items:center;gap:8px;margin:-3px 0 13px;padding:9px 11px;
+  border:1px solid var(--border-dim);border-radius:var(--radius-sm);background:rgba(3,16,30,.7);
+}
+.camera-searchbar label{display:flex;align-items:center;gap:8px;flex:1;min-width:180px;margin:0;color:var(--primary-light)}
+.camera-searchbar input{width:100%;height:34px;margin:0;padding:0 10px;border:1px solid rgba(28,62,102,.7);border-radius:5px;background:rgba(1,9,16,.7);color:var(--text-primary)}
+.camera-searchbar input:focus{outline:none;border-color:var(--cyan);box-shadow:0 0 0 2px rgba(0,229,255,.12)}
+.camera-searchbar button{height:34px;padding:0 12px}.camera-searchbar>span{margin-left:auto;white-space:nowrap;color:var(--text-muted);font:10px var(--font-hud)}
+.camera-searchbar>span b{color:var(--cyan);font-size:16px}.camera-searchbar>span small{font-size:8px;letter-spacing:1px}
+.camera-searchbar.compact{margin:0 0 8px}
 .camera-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:15px;margin-bottom:22px}
 .camera-card{
   position:relative;display:flex;flex-direction:column;
@@ -399,6 +409,8 @@ input[readonly]{opacity:.75}
 .camera-card:hover{border-color:var(--border-primary);
   box-shadow:0 0 24px rgba(0,140,255,.14),0 12px 34px rgba(0,0,0,.4);
   transform:translateY(-2px)}
+.camera-card.camera-focus{border-color:var(--cyan);box-shadow:0 0 0 2px rgba(0,229,255,.35),0 0 34px rgba(0,229,255,.3);animation:camera-focus-pulse .7s ease-in-out 2}
+@keyframes camera-focus-pulse{50%{box-shadow:0 0 0 4px rgba(0,229,255,.18),0 0 44px rgba(0,229,255,.42)}}
 .camera-shot{
   position:relative;aspect-ratio:16/9;background:#010910;cursor:default;overflow:hidden;
 }
@@ -939,6 +951,8 @@ tr.severity-critical .event-type{color:var(--danger);background:rgba(255,77,90,.
 .ranking-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
 .podium-panel{overflow:hidden}.podium{height:260px;display:flex;align-items:end;justify-content:center;gap:8px;padding:12px 4% 0}
 .podium article{width:31%;min-width:0;text-align:center}.podium-person{display:grid;justify-items:center;gap:3px;margin-bottom:9px}
+.podium article.clickable,.traffic-camera-card.clickable{cursor:pointer;transition:transform .16s,border-color .16s,box-shadow .16s}
+.podium article.clickable:hover,.podium article.clickable:focus-visible,.traffic-camera-card.clickable:hover,.traffic-camera-card.clickable:focus-visible{outline:none;transform:translateY(-3px);border-color:var(--cyan);box-shadow:0 0 22px rgba(0,229,255,.18)}
 .podium-person>span{width:30px;height:30px;display:grid;place-items:center;border-radius:50%;font:700 15px var(--font-hud);color:var(--primary-light);background:rgba(0,140,255,.13);border:1px solid var(--border-primary)}
 .podium-person b{width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.podium-person small{width:100%;overflow:hidden;text-overflow:ellipsis;color:var(--text-muted);font:9px var(--font-mono)}
 .podium-person strong{font:700 25px var(--font-hud);color:var(--cyan)}
@@ -979,6 +993,9 @@ tr.severity-critical .event-type{color:var(--danger);background:rgba(255,77,90,.
   .clock-stack small{display:none}
   .editor-body{grid-template-columns:1fr}
   .editor-right{border-left:none;padding-left:0;border-top:1px solid var(--border-dim);padding-top:14px}
+}
+@media(max-width:720px){
+  .camera-searchbar{flex-wrap:wrap}.camera-searchbar label{flex-basis:100%}.camera-searchbar>span{margin-left:0}
 }
 @media(max-width:640px){
   .traffic-chart{height:230px}.traffic-chart svg{height:200px}.chart-time-axis{left:30px;right:20px}
