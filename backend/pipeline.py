@@ -168,7 +168,6 @@ class MonitoringRuntime:
                 model_settings.base_url,
                 self.cipher.decrypt(model_settings.api_key_encrypted),
                 model_settings.economy_model,
-                model_settings.enhanced_model,
                 log_writer=self.repository.add_model_call_log,
             )
 
@@ -741,11 +740,11 @@ class MonitoringRuntime:
             return output
         try:
             if isinstance(self.vlm, VisionModelClient):
-                response = await self.vlm.tiered_analyze_behaviors(
+                response = await self.vlm.analyze_behaviors(
                     modes, frame_jpeg, camera_id=camera.id, camera_name=camera.name
                 )
             else:
-                response = await self.vlm.tiered_analyze_behaviors(modes, frame_jpeg)
+                response = await self.vlm.analyze_behaviors(modes, frame_jpeg)
             VLM_CALLS.labels(mode="behavior_combined", status="completed").inc()
             output = []
             for mode in sorted(modes, key=lambda item: item.value):

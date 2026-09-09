@@ -322,7 +322,7 @@ const deleteSelectedAlerts=async()=>{
   }catch(error:any){notify(error.message,'error')}
 }
 
-const modelSettings=reactive<any>({provider:'mock',base_url:'',api_key:'',economy_model:'qwen-vl',enhanced_model:'qwen-vl-max',api_key_configured:false})
+const modelSettings=reactive<any>({provider:'mock',base_url:'',api_key:'',economy_model:'qwen-vl',api_key_configured:false})
 const detectorSettings=reactive<any>({general_model:'yolo26s.pt',general_device:'cpu',fire_smoke_model:'models/fire_smoke_yolov8.pt',fire_smoke_device:'cpu',model_sha256:'',license_name:'AGPL-3.0 (internal pilot only)',runtime:{}})
 const retentionSettings=reactive<any>({alert_retention_days:30,log_retention_days:30,auto_cleanup_enabled:true})
 const displaySettings=reactive({show_traffic_report:true,show_current_store_count:true})
@@ -676,6 +676,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             </div>
             <div class="camera-directory-layout">
               <div class="directory-bar">
+                <div class="directory-summary"><span>目录数量</span><b>{{cameraDirectories.length}}</b></div>
                 <button :class="{active:activeDirectory==='all'}" @click="activeDirectory='all';selectedCameraIds=[]"><span>全部</span><b>{{cameras.length}}</b></button>
                 <button :class="{active:activeDirectory==='unassigned'}" @click="activeDirectory='unassigned';selectedCameraIds=[]"><span>未分组</span><b>{{unassignedCameraCount}}</b></button>
                 <span v-for="directory in cameraDirectories" :key="directory.id" :class="{active:activeDirectory===String(directory.id)}">
@@ -851,7 +852,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <template v-if="logCategory==='audit'"><label>用户<input v-model.trim="logFilters.username" placeholder="用户名"></label><label>操作<input v-model.trim="logFilters.action" placeholder="操作名称"></label></template>
             <template v-else><label>摄像头<input v-model.trim="logFilters.camera_id" placeholder="摄像头 ID"></label></template>
             <template v-if="logCategory==='analyses'"><label>检测模式<select v-model="logFilters.mode"><option value="">全部</option><option v-for="(_,mode) in modeInfo" :key="mode" :value="mode">{{modeName(mode)}}</option></select></label><label>分析状态<select v-model="logFilters.status"><option value="">全部</option><option value="confirmed">confirmed</option><option value="suspected">suspected</option><option value="uncertain">uncertain</option><option value="none">none</option></select></label></template>
-            <template v-if="logCategory==='model-calls'"><label>模型<input v-model.trim="logFilters.model" placeholder="模型名称"></label><label>阶段<select v-model="logFilters.stage"><option value="">全部</option><option value="economy">经济模型</option><option value="enhanced">增强模型</option></select></label></template>
+            <template v-if="logCategory==='model-calls'"><label>模型<input v-model.trim="logFilters.model" placeholder="模型名称"></label><label>阶段<select v-model="logFilters.stage"><option value="">全部</option><option value="single">单模型检测</option></select></label></template>
             <label v-if="logCategory!=='analyses'">结果<select v-model="logFilters.outcome"><option value="">全部</option><option value="success">成功</option><option value="failure">失败</option><option value="error">错误</option></select></label>
             <div class="actions"><button class="primary" @click="loadLogs(1)">查询</button><button class="ghost" @click="resetLogFilters">重置</button></div>
           </div>
@@ -863,7 +864,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
                 <template v-for="row in logData.items" :key="row.id">
                   <tr v-if="logCategory==='audit'"><td>{{formatTime(row.created_at)}}</td><td><b>{{row.actor_display_name||row.actor_username||'未知用户'}}</b><small>{{row.actor_username}}</small></td><td>{{row.action}}<small>{{row.method}} {{row.path}}</small></td><td>{{row.target_type}} {{row.target_id}}</td><td><span class="log-result" :class="row.outcome">{{logResultText(row)}} · {{row.status_code}}</span></td><td><button class="link" @click="toggleLogDetail(row)">详情</button></td></tr>
                   <tr v-else-if="logCategory==='analyses'"><td>{{formatTime(row.created_at)}}</td><td><b>{{row.camera_name||row.camera_id||'已删除摄像头'}}</b><small>{{row.camera_id}}</small></td><td>{{modeName(row.mode)}}</td><td><span class="log-result" :class="row.status">{{row.status}}</span></td><td>{{Math.round(row.confidence*100)}}%</td><td>{{row.latency_ms}} ms</td><td><button class="link" @click="toggleLogDetail(row)">详情</button></td></tr>
-                  <tr v-else><td>{{formatTime(row.created_at)}}</td><td><b>{{row.camera_name||row.camera_id||'已删除摄像头'}}</b><small>{{row.camera_id}}</small></td><td><b>{{row.stage==='economy'?'经济':'增强'}}</b><small>{{row.model}}</small></td><td>{{row.modes?.map((m:Mode)=>modeName(m)).join('、')}}</td><td><span class="log-result" :class="row.outcome">{{logResultText(row)}}<template v-if="row.http_status"> · {{row.http_status}}</template></span></td><td>{{row.latency_ms}} ms</td><td><button class="link" @click="toggleLogDetail(row)">详情</button></td></tr>
+                  <tr v-else><td>{{formatTime(row.created_at)}}</td><td><b>{{row.camera_name||row.camera_id||'已删除摄像头'}}</b><small>{{row.camera_id}}</small></td><td><b>{{row.stage==='single'?'单模型':row.stage==='economy'?'经济':'增强'}}</b><small>{{row.model}}</small></td><td>{{row.modes?.map((m:Mode)=>modeName(m)).join('、')}}</td><td><span class="log-result" :class="row.outcome">{{logResultText(row)}}<template v-if="row.http_status"> · {{row.http_status}}</template></span></td><td>{{row.latency_ms}} ms</td><td><button class="link" @click="toggleLogDetail(row)">详情</button></td></tr>
                   <tr v-if="expandedLogId===row.id" class="log-detail-row"><td :colspan="logCategory==='audit'?6:7"><pre>{{prettyLog(logDetails[logDetailKey(row.id)]||row)}}</pre></td></tr>
                 </template>
                 <tr v-if="!logData.items.length"><td :colspan="7" class="empty-cell">{{logLoading?'正在加载…':'暂无日志'}}</td></tr>
@@ -915,7 +916,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
           <label>提供商<select v-model="modelSettings.provider"><option value="openai_compatible">OpenAI 兼容接口</option><option value="mock">模拟模式</option></select></label>
           <label>Base URL<input v-model.trim="modelSettings.base_url" placeholder="http://192.168.1.100:8000/v1"><small class="field-hint">支持 HTTP / HTTPS：内网模型服务可使用 HTTP，公网服务建议 HTTPS。地址需包含 /v1，末尾斜杠可省略。HTTP 明文传输存在 API Key 泄露风险，建议仅用于受信内网。</small></label>
           <label>API Key<input v-model="modelSettings.api_key" type="password" placeholder="留空表示保持现有密钥"><small class="field-hint">首次配置必须填写；保存后留空表示继续使用现有密钥。密钥不会回显。</small></label>
-          <div class="form-row"><label>经济模型<input v-model.trim="modelSettings.economy_model"></label><label>增强模型<input v-model.trim="modelSettings.enhanced_model"></label></div>
+          <label>检测模型<input v-model.trim="modelSettings.economy_model"></label>
           <div class="actions"><button class="primary" @click="saveModels">保存</button><button class="ghost" :disabled="testing" @click="testModels"><TechIcon name="zap" :size="13"/>{{testing?'TESTING…':'测试已保存配置'}}</button></div>
         </section>
 

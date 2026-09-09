@@ -22,7 +22,6 @@ async def get_models() -> dict[str, Any]:
         "provider": row.provider,
         "base_url": row.base_url,
         "economy_model": row.economy_model,
-        "enhanced_model": row.enhanced_model,
         "api_key_configured": bool(row.api_key_encrypted),
         "updated_at": row.updated_at,
     }
@@ -40,7 +39,6 @@ async def put_models(payload: ModelSettingsUpdate) -> dict[str, Any]:
         "provider": payload.provider,
         "base_url": payload.base_url,
         "economy_model": payload.economy_model,
-        "enhanced_model": payload.enhanced_model,
     }
     if payload.api_key:
         values["api_key_encrypted"] = context.cipher.encrypt(payload.api_key)

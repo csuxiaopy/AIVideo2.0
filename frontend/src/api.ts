@@ -7,8 +7,7 @@ const fieldNames: Record<string, string> = {
   geometry: '检测区域',
   base_url: 'Base URL',
   api_key: 'API Key',
-  economy_model: '经济模型',
-  enhanced_model: '增强模型'
+  economy_model: '检测模型'
 }
 
 function errorMessage(detail: unknown, fallback: string): string {

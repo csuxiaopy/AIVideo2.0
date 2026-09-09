@@ -258,7 +258,6 @@ class ModelSettingsUpdate(BaseModel):
     base_url: str = ""
     api_key: str = Field(default="", max_length=1000)
     economy_model: str = Field(min_length=1, max_length=200)
-    enhanced_model: str = Field(min_length=1, max_length=200)
 
     @field_validator("base_url")
     @classmethod

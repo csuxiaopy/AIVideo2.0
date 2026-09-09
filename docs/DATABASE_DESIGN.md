@@ -255,8 +255,7 @@ JSON 字段示例：
 | `provider` | `varchar(100)` | 否 | `openai_compatible` | 提供方，可选 `openai_compatible`、`mock` |
 | `base_url` | `text` | 否 | 空字符串 | VLM API 基础地址；公网必须 HTTPS |
 | `api_key_encrypted` | `text` | 否 | 空字符串 | 加密后的 API Key |
-| `economy_model` | `varchar(200)` | 否 | `qwen3.7-flash` | 经济模型，用于初筛 |
-| `enhanced_model` | `varchar(200)` | 否 | `qwen3.7-plus` | 增强模型，用于确认 |
+| `economy_model` | `varchar(200)` | 否 | `qwen3.7-flash` | 玩手机与吸烟联合检测模型 |
 | `updated_at` | `timestamptz` | 否 | 应用写入 UTC 当前时间 | 修改时间 |
 
 ### 5.6 `webhook_settings` Webhook 配置表

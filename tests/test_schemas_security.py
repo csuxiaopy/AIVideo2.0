@@ -184,7 +184,7 @@ def test_model_base_url_allows_http_and_https():
     ]:
         model = ModelSettingsUpdate(
             provider="openai_compatible", base_url=url, api_key="k",
-            economy_model="qwen-vl", enhanced_model="qwen-vl-max",
+            economy_model="qwen-vl",
         )
         assert model.base_url == url.rstrip("/")
 
@@ -201,5 +201,5 @@ def test_model_base_url_rejects_non_http(bad_url):
     with pytest.raises(ValueError):
         ModelSettingsUpdate(
             provider="openai_compatible", base_url=bad_url, api_key="k",
-            economy_model="qwen-vl", enhanced_model="qwen-vl-max",
+            economy_model="qwen-vl",
         )

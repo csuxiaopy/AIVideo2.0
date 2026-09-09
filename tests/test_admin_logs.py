@@ -36,7 +36,7 @@ def test_model_call_log_contains_raw_and_parsed_response_but_not_image():
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=payload, request=request)
 
-    client = VisionModelClient("https://model.test/v1", "secret", "economy", "enhanced",
+    client = VisionModelClient("https://model.test/v1", "secret", "economy",
                                log_writer=lambda **values: records.append(values))
     original = client.client
     client.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -50,6 +50,8 @@ def test_model_call_log_contains_raw_and_parsed_response_but_not_image():
 
     assert result.results[Mode.PHONE_USE].status == "confirmed"
     assert records[0]["outcome"] == "success"
+    assert records[0]["stage"] == "single"
+    assert records[0]["model"] == "economy"
     assert json.loads(records[0]["parsed_response_json"])["results"][0]["mode"] == "phone_use"
     assert "data:image" not in records[0]["raw_response"]
     assert "secret" not in records[0]["raw_response"]

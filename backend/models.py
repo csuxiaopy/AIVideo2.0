@@ -113,7 +113,6 @@ class ModelSettings(Base):
     base_url: Mapped[str] = mapped_column(Text, default="")
     api_key_encrypted: Mapped[str] = mapped_column(Text, default="")
     economy_model: Mapped[str] = mapped_column(String(200), default="qwen3.7-flash")
-    enhanced_model: Mapped[str] = mapped_column(String(200), default="qwen3.7-plus")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 

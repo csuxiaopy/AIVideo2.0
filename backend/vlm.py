@@ -55,12 +55,10 @@ def extract_json(text: str) -> dict[str, Any]:
 
 
 class VisionModelClient:
-    def __init__(self, base_url: str, api_key: str, economy_model: str, enhanced_model: str,
-                 log_writer=None):
+    def __init__(self, base_url: str, api_key: str, economy_model: str, log_writer=None):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.economy_model = economy_model
-        self.enhanced_model = enhanced_model
         self.log_writer = log_writer
         self.client = httpx.AsyncClient(timeout=90)
 
@@ -77,13 +75,13 @@ class VisionModelClient:
         await self.client.aclose()
 
     async def analyze_behaviors(
-        self, modes: set[Mode], frame: bytes, enhanced: bool = False,
+        self, modes: set[Mode], frame: bytes,
         camera_id: str | None = None, camera_name: str = "",
     ) -> VLMResponse:
         allowed = {Mode.PHONE_USE, Mode.SMOKING}
         if not modes or not modes <= allowed:
             raise ValueError("联合行为检测模式必须是玩手机或吸烟")
-        model = self.enhanced_model if enhanced else self.economy_model
+        model = self.economy_model
         if not self.base_url or not self.api_key:
             raise VLMError("视觉大模型尚未配置")
         content: list[dict[str, Any]] = [{
@@ -103,7 +101,7 @@ class VisionModelClient:
             "response_format": {"type": "json_object"},
         }
         started = time.perf_counter()
-        stage = "enhanced" if enhanced else "economy"
+        stage = "single"
         common = {
             "camera_id": camera_id, "camera_name": camera_name,
             "modes_json": as_json(sorted(mode.value for mode in modes)),
@@ -192,15 +190,6 @@ class VisionModelClient:
             provider="openai_compatible",
             model=model,
         )
-
-    async def tiered_analyze_behaviors(
-        self, modes: set[Mode], frame: bytes, camera_id: str | None = None, camera_name: str = ""
-    ) -> VLMResponse:
-        context = {"camera_id": camera_id, "camera_name": camera_name} if camera_id or camera_name else {}
-        economy = await self.analyze_behaviors(modes, frame, enhanced=False, **context)
-        if all(result.status == "none" for result in economy.results.values()):
-            return economy
-        return await self.analyze_behaviors(modes, frame, enhanced=True, **context)
 
     async def test(self) -> dict[str, Any]:
         started = time.perf_counter()

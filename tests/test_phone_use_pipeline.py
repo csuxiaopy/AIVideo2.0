@@ -47,12 +47,12 @@ def test_combined_behaviors_split_records_and_alerts_using_same_frame():
             Mode.SMOKING: make_result(Mode.SMOKING, "confirmed"),
         },
         request_id="request-1", usage={"total_tokens": 10}, latency_ms=10,
-        provider="test", model="enhanced-model",
+        provider="test", model="economy-model",
     )
     received, analyses, alerts = [], [], []
 
     class VLM:
-        async def tiered_analyze_behaviors(self, modes, jpeg):
+        async def analyze_behaviors(self, modes, jpeg):
             received.append((modes, jpeg))
             return response
 
@@ -81,7 +81,7 @@ def test_phone_use_alerts_at_threshold_and_resolution():
     alerts = []
 
     class VLM:
-        async def tiered_analyze_behaviors(self, modes, jpeg):
+        async def analyze_behaviors(self, modes, jpeg):
             result = make_result(Mode.PHONE_USE, current["status"])
             return VLMResponse(results={Mode.PHONE_USE: result}, request_id="r", usage={},
                                latency_ms=1, provider="test", model="test")
@@ -113,7 +113,7 @@ def test_combined_behavior_error_records_uncertain_for_every_requested_mode():
     analyses = []
 
     class VLM:
-        async def tiered_analyze_behaviors(self, modes, jpeg):
+        async def analyze_behaviors(self, modes, jpeg):
             raise VLMError("bad json", "request-2")
 
     class Repository:
@@ -131,42 +131,25 @@ def test_combined_behavior_error_records_uncertain_for_every_requested_mode():
     assert {item["mode"] for item in analyses} == {"phone_use", "smoking"}
 
 
-def test_tiered_behavior_analysis_skips_enhanced_when_all_none(monkeypatch):
+def test_behavior_analysis_uses_single_configured_model(monkeypatch):
     client = object.__new__(VisionModelClient)
+    client.base_url = "https://model.test/v1"
+    client.api_key = "secret"
+    client.economy_model = "economy"
+    client.log_writer = None
+    client.client = SimpleNamespace(post=None)
     calls = []
-    economy = VLMResponse(
-        results={Mode.PHONE_USE: make_result(Mode.PHONE_USE), Mode.SMOKING: make_result(Mode.SMOKING)},
-        request_id="economy", usage={}, latency_ms=1, provider="test", model="economy",
-    )
 
-    async def analyze(modes, frame, enhanced=False):
-        calls.append(enhanced)
-        return economy
+    async def post(url, headers, json):
+        calls.append(json["model"])
+        payload = {"choices": [{"message": {"content": (
+            '{"results":[{"mode":"phone_use","status":"suspected","confidence":0.8},'
+            '{"mode":"smoking","status":"none","confidence":0.9}]}'
+        )}}]}
+        return SimpleNamespace(status_code=200, headers={}, text=str(payload), is_error=False,
+                               json=lambda: payload)
 
-    monkeypatch.setattr(client, "analyze_behaviors", analyze)
-    returned = asyncio.run(client.tiered_analyze_behaviors({Mode.PHONE_USE, Mode.SMOKING}, b"frame"))
-    assert returned is economy
-    assert calls == [False]
-
-
-def test_tiered_behavior_analysis_enhances_all_modes_on_any_non_none(monkeypatch):
-    client = object.__new__(VisionModelClient)
-    calls = []
-    modes = {Mode.PHONE_USE, Mode.SMOKING}
-    economy = VLMResponse(
-        results={Mode.PHONE_USE: make_result(Mode.PHONE_USE, "suspected"), Mode.SMOKING: make_result(Mode.SMOKING)},
-        request_id="economy", usage={}, latency_ms=1, provider="test", model="economy",
-    )
-    enhanced_response = VLMResponse(
-        results={Mode.PHONE_USE: make_result(Mode.PHONE_USE), Mode.SMOKING: make_result(Mode.SMOKING)},
-        request_id="enhanced", usage={}, latency_ms=1, provider="test", model="enhanced",
-    )
-
-    async def analyze(requested, frame, enhanced=False):
-        calls.append((set(requested), enhanced))
-        return enhanced_response if enhanced else economy
-
-    monkeypatch.setattr(client, "analyze_behaviors", analyze)
-    returned = asyncio.run(client.tiered_analyze_behaviors(modes, b"frame"))
-    assert returned is enhanced_response
-    assert calls == [(modes, False), (modes, True)]
+    client.client.post = post
+    returned = asyncio.run(client.analyze_behaviors({Mode.PHONE_USE, Mode.SMOKING}, b"frame"))
+    assert returned.model == "economy"
+    assert calls == ["economy"]

@@ -46,7 +46,7 @@ pydantic-settings 的覆盖顺序（高 → 低）：
 运行时还有一层 **DB 覆盖**（动态配置优先于启动参数）：
 
 - `MonitoringRuntime.__init__`（`backend/pipeline.py` L70–82）：检测器模型路径/设备取自 `detector_settings` 表，**表中值非空时覆盖** `Settings.yolo_model` / `fire_smoke_model` 等。
-- `reload_models()`（L135–148）：VLM（玩手机/抽烟复核）的 Base URL / API Key / 模型名完全取自 `model_settings` 表，不走环境变量。
+- `reload_models()`：VLM（玩手机/抽烟单模型联合检测）的 Base URL / API Key / 模型名完全取自 `model_settings` 表，不走环境变量。
 - 摄像头级配置（模式、几何、排班、参数、抽帧频率）全部取自 `cameras` 表，UI 修改即时生效。
 
 ### 1.3 启动时加载进内存、重启即重置的配置（内存态）
@@ -147,7 +147,7 @@ pydantic-settings 的覆盖顺序（高 → 低）：
 
 | 表 | 列 | 内容 |
 | --- | --- | --- |
-| `model_settings` | `provider`、`base_url`、`api_key_encrypted`、`economy_model`、`enhanced_model` | 视觉大模型（玩手机/抽烟复核）：Provider、Base URL、API Key（密文）、经济/增强模型 |
+| `model_settings` | `provider`、`base_url`、`api_key_encrypted`、`economy_model` | 视觉大模型（玩手机/抽烟联合检测）：Provider、Base URL、API Key（密文）、检测模型 |
 | `webhook_targets` | 名称、启用状态、URL、密钥密文、自动告警级别 | 多个 Webhook 外发目标；旧单条配置升级时自动迁入 |
 | `webhook_deliveries` | 告警、目标快照、自动/手动、状态、错误 | 每条告警到每个目标的最新投递结果 |
 | `detector_settings` | `general_model`、`general_device`、`fire_smoke_model`、`fire_smoke_device`、`model_sha256`、`license_name` | 检测器模型路径/设备/SHA256 |

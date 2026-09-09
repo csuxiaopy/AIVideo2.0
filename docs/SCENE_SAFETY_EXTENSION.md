@@ -14,7 +14,7 @@
 
 - 通用 YOLO：人员、手机候选、岗位占用、新人员轨迹计数和入侵人员。
 - 独立烟火 YOLO：`fire/smoke` 两类，独立 critical 队列；火焰连续 2 帧、烟雾最近 5 帧至少 3 帧确认。
-- 外部视觉模型：只复核玩手机与实验性人员吸烟；模型失败不产生业务告警。
+- 外部视觉模型：单模型联合检测玩手机与实验性人员吸烟；模型失败不产生业务告警。
 - 黑屏：亮度、方差和近黑比例连续 3 次异常；与 RTSP 断流分开记录。
 
 优先级为 `fire_smoke=critical`、`intrusion/black_screen=high`、`off_duty/phone_use=normal`、`people_flow=low`。普通队列与安全队列分离，同一摄像头通过进程内锁和 Redis 分布式锁保证最多一个在途任务。
