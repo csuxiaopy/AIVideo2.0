@@ -96,6 +96,14 @@ class ScheduleSpec(BaseModel):
         return value
 
 
+def default_intrusion_schedule() -> ScheduleSpec:
+    return ScheduleSpec.model_validate({
+        "timezone": "Asia/Shanghai",
+        "weekly": {str(day): [{"start": "20:00", "end": "05:00"}] for day in range(7)},
+        "holidays": [],
+    })
+
+
 class CameraCreate(BaseModel):
     id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     name: str = Field(min_length=1, max_length=200)
@@ -105,6 +113,8 @@ class CameraCreate(BaseModel):
     modes: list[Mode] = Field(min_length=1, max_length=len(Mode))
     geometry: GeometrySpec = Field(default_factory=GeometrySpec)
     schedule: ScheduleSpec = Field(default_factory=ScheduleSpec)
+    intrusion_schedule: ScheduleSpec = Field(default_factory=default_intrusion_schedule)
+    directory_id: int | None = Field(default=None, ge=1)
     options: CameraOptions = Field(default_factory=CameraOptions)
     frame_interval_seconds: int = 1
 
@@ -150,6 +160,8 @@ class CameraPatch(BaseModel):
     modes: list[Mode] | None = Field(default=None, min_length=1, max_length=len(Mode))
     geometry: GeometrySpec | None = None
     schedule: ScheduleSpec | None = None
+    intrusion_schedule: ScheduleSpec | None = None
+    directory_id: int | None = Field(default=None, ge=1)
     options: CameraOptions | None = None
     frame_interval_seconds: int | None = None
 
@@ -202,6 +214,39 @@ class CameraBatchDelete(BaseModel):
         if any(not camera_id or len(camera_id) > 100 for camera_id in ids):
             raise ValueError("摄像头 ID 不能为空且不能超过100个字符")
         return ids
+
+
+class CameraDirectoryWrite(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+    @field_validator("name")
+    @classmethod
+    def normalized_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("目录名称不能为空")
+        return value
+
+
+class CameraBatchMove(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=500)
+    directory_id: int | None = Field(default=None, ge=1)
+
+
+class AlertExportRequest(BaseModel):
+    alert_ids: list[int] | None = Field(default=None, min_length=1, max_length=500)
+    date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    mode: str | None = None
+    severity: str | None = None
+
+
+class AlertBatchDelete(BaseModel):
+    alert_ids: list[Annotated[int, Field(ge=1)]] = Field(min_length=1, max_length=500)
+
+    @field_validator("alert_ids")
+    @classmethod
+    def unique_alert_ids(cls, value: list[int]) -> list[int]:
+        return list(dict.fromkeys(value))
 
 
 class PreviewSessionRequest(BaseModel):
@@ -274,6 +319,7 @@ class WebhookManualSend(BaseModel):
 
 class RetentionSettingsUpdate(BaseModel):
     alert_retention_days: int = Field(default=30, ge=1, le=365)
+    log_retention_days: int = Field(default=30, ge=1, le=365)
     auto_cleanup_enabled: bool = True
 
 

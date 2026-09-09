@@ -36,6 +36,15 @@ def test_cross_midnight_schedule():
     assert not is_scheduled(schedule, datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc))
 
 
+def test_default_intrusion_schedule_crosses_midnight_and_stops_at_five():
+    from backend.schemas import default_intrusion_schedule
+
+    schedule = default_intrusion_schedule()
+    assert is_scheduled(schedule, datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc))  # 20:00 Shanghai
+    assert is_scheduled(schedule, datetime(2026, 8, 3, 20, 59, tzinfo=timezone.utc))  # 04:59 Shanghai
+    assert not is_scheduled(schedule, datetime(2026, 8, 3, 21, 0, tzinfo=timezone.utc))  # 05:00 Shanghai
+
+
 def test_black_and_behavior_windows():
     state = CameraRuleState()
     assert not state.black_update(True)

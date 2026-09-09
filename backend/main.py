@@ -13,9 +13,11 @@ from backend.api.cameras import router as cameras_router
 from backend.api.auth import router as auth_router
 from backend.api.context import context
 from backend.api.monitoring import router as monitoring_router
+from backend.api.logs import router as logs_router
 from backend.api.settings import router as settings_router
 from backend.database import bootstrap_admin, upgrade_schema
 from backend.auth import current_user
+from backend.audit import audit_http_request
 from backend.pipeline import MonitoringRuntime
 
 
@@ -48,9 +50,11 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.middleware("http")(audit_http_request)
     app.include_router(auth_router)
     app.include_router(cameras_router)
     app.include_router(monitoring_router)
+    app.include_router(logs_router)
     app.include_router(settings_router)
 
     @app.get("/metrics")

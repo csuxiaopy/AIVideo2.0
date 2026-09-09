@@ -43,9 +43,45 @@ class CleanupService:
             except OSError:
                 logger.warning("Failed to remove evidence file: %s", path)
         deleted = self.repository.delete_alerts_before(cutoff, severity)
+        log_cutoff = utc_now() - timedelta(days=getattr(retention, "log_retention_days", 30))
+        log_deleted = (
+            self.repository.delete_logs_before(log_cutoff)
+            if override_days is None and hasattr(self.repository, "delete_logs_before") else {}
+        )
         return {
             "deleted": deleted,
             "evidence_removed": evidence_removed,
             "cutoff": cutoff.isoformat(),
             "days": effective_days,
+            "log_deleted": log_deleted,
+            "log_cutoff": log_cutoff.isoformat(),
+        }
+
+    def delete_selected(self, alert_ids: list[int]) -> dict[str, Any]:
+        requested_ids = list(dict.fromkeys(alert_ids))
+        rows = self.repository.list_alerts_by_ids(requested_ids)
+        existing_ids = {row.id for row in rows}
+        root = self.settings.evidence_dir.resolve()
+        evidence_removed = 0
+        for row in rows:
+            if not row.evidence_path:
+                continue
+            try:
+                path = (self.settings.evidence_dir / row.evidence_path).resolve()
+                path.relative_to(root)
+            except ValueError:
+                logger.warning("Skip out-of-bounds evidence path: %s", row.evidence_path)
+                continue
+            try:
+                if path.is_file():
+                    os.remove(path)
+                    evidence_removed += 1
+            except OSError:
+                logger.warning("Failed to remove evidence file: %s", path)
+        deleted_ids = self.repository.delete_alerts_by_ids(requested_ids)
+        return {
+            "deleted": len(deleted_ids),
+            "evidence_removed": evidence_removed,
+            "deleted_ids": deleted_ids,
+            "missing_ids": [alert_id for alert_id in requested_ids if alert_id not in existing_ids],
         }

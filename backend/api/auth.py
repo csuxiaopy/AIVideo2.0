@@ -61,7 +61,8 @@ def _set_cookie(response: Response, token: str) -> None:
 
 
 @router.post("/auth/login")
-async def login(payload: LoginRequest, response: Response) -> dict:
+async def login(payload: LoginRequest, request: Request, response: Response) -> dict:
+    request.state.audit_username = payload.username.strip()
     answer_hash = token_hash(f"{payload.captcha_id}:{payload.captcha_answer.strip().upper()}")
     if not context.repository.consume_captcha(payload.captcha_id, answer_hash):
         context.repository.invalidate_captcha(payload.captcha_id)
@@ -75,6 +76,9 @@ async def login(payload: LoginRequest, response: Response) -> dict:
         user_id=user.id, token_hash=token_hash(raw), csrf_token=csrf,
         last_seen_at=now, expires_at=now + timedelta(hours=context.settings.session_idle_hours)))
     _set_cookie(response, raw)
+    request.state.audit_user = user
+    request.state.audit_target_type = "auth"
+    request.state.audit_target_id = str(user.id)
     return {"user": user_public(user), "csrf_token": csrf}
 
 

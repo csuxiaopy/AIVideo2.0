@@ -10,7 +10,12 @@ from fastapi.responses import StreamingResponse
 from backend import models
 from backend.api.context import context
 from backend.api.presenters import camera_public
-from backend.capabilities import SCENE_TEMPLATES, capabilities_public, scene_templates_public
+from backend.capabilities import (
+    OFF_DUTY_DEFAULT_SCHEDULE,
+    SCENE_TEMPLATES,
+    capabilities_public,
+    scene_templates_public,
+)
 from backend.media_capture import PreviewLimitError
 from backend.auth import admin_user, current_user
 from backend.repository import as_json, from_json
@@ -18,6 +23,8 @@ from backend.schemas import (
     CameraCreate,
     CameraBatchCreate,
     CameraBatchDelete,
+    CameraBatchMove,
+    CameraDirectoryWrite,
     CameraPatch,
     GeometrySpec,
     Mode,
@@ -81,6 +88,8 @@ def _effective_patch(camera: models.Camera, payload: CameraPatch) -> CameraCreat
         modes=payload.modes if payload.modes is not None else from_json(camera.modes_json, []),
         geometry=payload.geometry or from_json(camera.geometry_json, {}),
         schedule=payload.schedule or from_json(camera.schedule_json, {}),
+        intrusion_schedule=payload.intrusion_schedule or from_json(camera.intrusion_schedule_json, {}),
+        directory_id=payload.directory_id if "directory_id" in payload.model_fields_set else camera.directory_id,
         options=payload.options or from_json(camera.options_json, {}),
         frame_interval_seconds=payload.frame_interval_seconds or camera.frame_interval_seconds,
     )
@@ -96,6 +105,8 @@ def _camera_model(payload: CameraCreate) -> models.Camera:
         modes_json=as_json([mode.value for mode in payload.modes]),
         geometry_json=payload.geometry.model_dump_json(),
         schedule_json=payload.schedule.model_dump_json(),
+        intrusion_schedule_json=payload.intrusion_schedule.model_dump_json(),
+        directory_id=payload.directory_id,
         options_json=payload.options.model_dump_json(),
         frame_interval_seconds=payload.frame_interval_seconds,
     )
@@ -116,6 +127,7 @@ def _batch_default_camera(camera_id: str, name: str, rtsp_url: str) -> CameraCre
             "intrusion_zone": None,
         },
         schedule=template["schedule"],
+        intrusion_schedule=template["intrusion_schedule"],
         frame_interval_seconds=1,
     )
 
@@ -123,6 +135,39 @@ def _batch_default_camera(camera_id: str, name: str, rtsp_url: str) -> CameraCre
 @router.get("/cameras", dependencies=[Depends(current_user)])
 async def list_cameras() -> list[dict[str, Any]]:
     return [_public(camera) for camera in context.repository.list_cameras()]
+
+
+@router.get("/camera-directories", dependencies=[Depends(current_user)])
+async def list_camera_directories() -> list[dict[str, Any]]:
+    return context.repository.list_camera_directories()
+
+
+@router.post("/camera-directories", status_code=status.HTTP_201_CREATED, dependencies=[Depends(admin_user)])
+async def create_camera_directory(payload: CameraDirectoryWrite) -> dict[str, Any]:
+    try:
+        row = context.repository.create_camera_directory(payload.name)
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="目录名称已存在") from exc
+    return {"id": row.id, "name": row.name, "camera_count": 0}
+
+
+@router.patch("/camera-directories/{directory_id}", dependencies=[Depends(admin_user)])
+async def update_camera_directory(directory_id: int, payload: CameraDirectoryWrite) -> dict[str, Any]:
+    try:
+        row = context.repository.update_camera_directory(directory_id, payload.name)
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="目录名称已存在") from exc
+    if not row:
+        raise HTTPException(status_code=404, detail="目录不存在")
+    count = next((item["camera_count"] for item in context.repository.list_camera_directories() if item["id"] == row.id), 0)
+    return {"id": row.id, "name": row.name, "camera_count": count}
+
+
+@router.delete("/camera-directories/{directory_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(admin_user)])
+async def delete_camera_directory(directory_id: int) -> Response:
+    if not context.repository.delete_camera_directory(directory_id):
+        raise HTTPException(status_code=404, detail="目录不存在")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/scene-templates", dependencies=[Depends(admin_user)])
@@ -139,6 +184,8 @@ async def capabilities() -> list[dict[str, Any]]:
 async def create_camera(payload: CameraCreate) -> dict[str, Any]:
     if context.repository.get_camera(payload.id):
         raise HTTPException(status_code=409, detail="摄像头 ID 已存在")
+    if payload.directory_id is not None and not context.repository.get_camera_directory(payload.directory_id):
+        raise HTTPException(status_code=404, detail="目录不存在")
     camera = _camera_model(payload)
     context.repository.create_camera(camera)
     await context.require_runtime().sync_cameras()
@@ -197,6 +244,28 @@ async def delete_cameras_batch(payload: CameraBatchDelete) -> dict[str, Any]:
     return {"success": True, "deleted": len(deleted_ids), "deleted_ids": deleted_ids, "missing_ids": missing_ids}
 
 
+@router.post("/cameras/batch-move", dependencies=[Depends(admin_user)])
+async def move_cameras_batch(payload: CameraBatchMove) -> dict[str, Any]:
+    if payload.directory_id is not None and not context.repository.get_camera_directory(payload.directory_id):
+        raise HTTPException(status_code=404, detail="目录不存在")
+    existing = context.repository.existing_camera_ids(payload.ids)
+    moved = context.repository.move_cameras(list(existing), payload.directory_id)
+    return {"moved": moved, "missing_ids": [camera_id for camera_id in payload.ids if camera_id not in existing]}
+
+
+@router.post("/cameras/batch-off-duty-schedule", dependencies=[Depends(admin_user)])
+async def configure_off_duty_schedules(payload: ScheduleSpec | None = None) -> dict[str, Any]:
+    camera_ids = [
+        camera.id
+        for camera in context.repository.list_cameras()
+        if Mode.OFF_DUTY.value in from_json(camera.modes_json, [])
+    ]
+    schedule = payload.model_dump(mode="json") if payload is not None else OFF_DUTY_DEFAULT_SCHEDULE
+    updated = context.repository.update_cameras_schedule(camera_ids, as_json(schedule))
+    await context.require_runtime().sync_cameras()
+    return {"success": True, "updated": updated, "camera_ids": camera_ids}
+
+
 @router.get("/cameras/{camera_id}", dependencies=[Depends(current_user)])
 async def get_camera(camera_id: str) -> dict[str, Any]:
     return _public(_camera_or_404(camera_id))
@@ -209,10 +278,14 @@ async def patch_camera(camera_id: str, payload: CameraPatch) -> dict[str, Any]:
     new_camera_id = effective.id
     if new_camera_id != camera_id and context.repository.get_camera(new_camera_id):
         raise HTTPException(status_code=409, detail="摄像头 ID 已存在")
+    if "directory_id" in payload.model_fields_set and payload.directory_id is not None and not context.repository.get_camera_directory(payload.directory_id):
+        raise HTTPException(status_code=404, detail="目录不存在")
     values = payload.model_dump(
         exclude_none=True,
-        exclude={"id", "rtsp_url", "options", "modes", "geometry", "schedule"},
+        exclude={"id", "rtsp_url", "options", "modes", "geometry", "schedule", "intrusion_schedule", "directory_id"},
     )
+    if "directory_id" in payload.model_fields_set:
+        values["directory_id"] = payload.directory_id
     if "scene_type" in values:
         values["scene_type"] = effective.scene_type.value
     if payload.rtsp_url:
@@ -225,6 +298,8 @@ async def patch_camera(camera_id: str, payload: CameraPatch) -> dict[str, Any]:
         values["geometry_json"] = payload.geometry.model_dump_json()
     if payload.schedule is not None:
         values["schedule_json"] = payload.schedule.model_dump_json()
+    if payload.intrusion_schedule is not None:
+        values["intrusion_schedule_json"] = payload.intrusion_schedule.model_dump_json()
     if new_camera_id != camera_id:
         runtime = context.require_runtime()
         await runtime.media.remove(camera_id)

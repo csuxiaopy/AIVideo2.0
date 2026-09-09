@@ -157,6 +157,92 @@ def test_cleanup_tolerates_missing_evidence_file(evidence_dir):
         _cleanup_camera(camera_id)
 
 
+def test_delete_selected_removes_only_requested_alerts_and_evidence(evidence_dir):
+    Base.metadata.create_all(engine)
+    camera_id = "test-delete-selected"
+    selected_file = evidence_dir / "selected.jpg"
+    kept_file = evidence_dir / "kept.jpg"
+    selected_file.write_bytes(b"selected")
+    kept_file.write_bytes(b"kept")
+    _add_camera(camera_id)
+    selected_id = _add_alert(camera_id, "off_duty", "normal", utc_now(), "selected.jpg")
+    kept_id = _add_alert(camera_id, "off_duty", "normal", utc_now(), "kept.jpg")
+    try:
+        result = CleanupService(Settings(evidence_dir=evidence_dir), Repository()).delete_selected(
+            [selected_id, selected_id, 2147483647]
+        )
+        assert result["deleted"] == 1
+        assert result["deleted_ids"] == [selected_id]
+        assert result["missing_ids"] == [2147483647]
+        assert result["evidence_removed"] == 1
+        assert not selected_file.exists()
+        assert kept_file.exists()
+        with session_scope() as session:
+            assert session.get(models.Alert, selected_id) is None
+            assert session.get(models.Alert, kept_id) is not None
+    finally:
+        _cleanup_camera(camera_id)
+
+
+def test_delete_selected_skips_out_of_bounds_and_missing_evidence(evidence_dir, tmp_path):
+    Base.metadata.create_all(engine)
+    camera_id = "test-delete-selected-paths"
+    outside = tmp_path / "outside-selected.jpg"
+    outside.write_bytes(b"outside")
+    _add_camera(camera_id)
+    unsafe_id = _add_alert(camera_id, "intrusion", "high", utc_now(), "../outside-selected.jpg")
+    missing_id = _add_alert(camera_id, "intrusion", "high", utc_now(), "missing.jpg")
+    try:
+        result = CleanupService(Settings(evidence_dir=evidence_dir), Repository()).delete_selected(
+            [unsafe_id, missing_id]
+        )
+        assert result["deleted"] == 2
+        assert result["evidence_removed"] == 0
+        assert outside.exists()
+    finally:
+        _cleanup_camera(camera_id)
+
+
+def test_delete_selected_removes_deliveries_but_keeps_analysis(evidence_dir):
+    Base.metadata.create_all(engine)
+    camera_id = "test-delete-selected-relations"
+    _add_camera(camera_id)
+    with session_scope() as session:
+        analysis = models.Analysis(
+            camera_id=camera_id, mode="off_duty", status="confirmed", severity="normal"
+        )
+        session.add(analysis)
+        session.flush()
+        analysis_id = analysis.id
+        alert = models.Alert(
+            camera_id=camera_id, analysis_id=analysis_id, mode="off_duty",
+            status="confirmed", severity="normal",
+        )
+        session.add(alert)
+        session.flush()
+        alert_id = alert.id
+        delivery = models.WebhookDelivery(
+            alert_id=alert_id, webhook_target_id=None, target_name="test",
+            target_url="https://example.invalid/webhook", trigger="manual", status="delivered",
+        )
+        session.add(delivery)
+        session.flush()
+        delivery_id = delivery.id
+    try:
+        result = CleanupService(Settings(evidence_dir=evidence_dir), Repository()).delete_selected([alert_id])
+        assert result["deleted_ids"] == [alert_id]
+        with session_scope() as session:
+            assert session.get(models.Alert, alert_id) is None
+            assert session.get(models.WebhookDelivery, delivery_id) is None
+            assert session.get(models.Analysis, analysis_id) is not None
+    finally:
+        with session_scope() as session:
+            analysis = session.get(models.Analysis, analysis_id)
+            if analysis:
+                session.delete(analysis)
+        _cleanup_camera(camera_id)
+
+
 def test_retention_settings_get_or_create_defaults():
     Base.metadata.create_all(engine)
     repository = Repository()

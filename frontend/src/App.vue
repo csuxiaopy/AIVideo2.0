@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { api, setCsrfToken, setUnauthorizedHandler } from './api'
+import { api, download, setCsrfToken, setUnauthorizedHandler } from './api'
 import TechIcon from './components/TechIcon.vue'
 import EvidencePreview from './components/EvidencePreview.vue'
 import CameraBasicFields from './components/CameraBasicFields.vue'
 import BatchCameraModal from './components/BatchCameraModal.vue'
-import type { Camera, DrawLayer, Mode, Point, SceneType, SceneTemplate, TrafficCameraSummary, TrafficSummary } from './types'
+import type { Camera, CameraDirectory, DrawLayer, Mode, Point, SceneType, SceneTemplate, TrafficCameraSummary, TrafficSummary } from './types'
 
 const modeInfo:Record<Mode,{name:string;icon:string;note:string}> = {
   off_duty:{name:'离岗检测',icon:'offDuty',note:'排班内持续无人'},
@@ -31,6 +31,7 @@ const tabs = [
   {key:'webhooks',name:'企业微信机器人',icon:'webhook',en:'WECOM DELIVERY'},
   {key:'settings',name:'系统配置',icon:'settings',en:'SYSTEM SETTINGS'},
   {key:'users',name:'账号管理',icon:'users',en:'ACCOUNT MANAGEMENT'},
+  {key:'logs',name:'日志管理',icon:'database',en:'SYSTEM LOGS'},
 ]
 type AuthUser = {id:number;username:string;display_name:string;role:'admin'|'user';enabled:boolean;created_at:string;updated_at:string}
 const authReady=ref(false)
@@ -48,15 +49,26 @@ const active = ref('dashboard')
 const loading = ref(false)
 const dashboard = ref<any>({runtime:{}})
 const cameras = ref<Camera[]>([])
+const cameraDirectories = ref<CameraDirectory[]>([])
+const activeDirectory = ref('all')
+const moveDirectory = ref('')
 const dashboardCameraSearch = ref('')
 const cameraSettingsSearch = ref('')
 const focusedCameraId = ref('')
 let focusCameraTimer:number|undefined
 const matchesCameraName=(camera:Camera,query:string)=>camera.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
 const filteredDashboardCameras=computed(()=>cameras.value.filter(camera=>matchesCameraName(camera,dashboardCameraSearch.value)))
-const filteredSettingsCameras=computed(()=>cameras.value.filter(camera=>matchesCameraName(camera,cameraSettingsSearch.value)))
+const directoryCameras=computed(()=>cameras.value.filter(camera=>activeDirectory.value==='all'||(activeDirectory.value==='unassigned'?!camera.directory_id:String(camera.directory_id)===activeDirectory.value)))
+const filteredSettingsCameras=computed(()=>directoryCameras.value.filter(camera=>matchesCameraName(camera,cameraSettingsSearch.value)))
+const unassignedCameraCount=computed(()=>cameras.value.filter(camera=>!camera.directory_id).length)
 const alerts = ref<any[]>([])
-const analyses = ref<any[]>([])
+type LogCategory = 'audit'|'analyses'|'model-calls'
+const logCategory=ref<LogCategory>('audit')
+const logData=reactive<{items:any[];total:number;page:number;page_size:number}>({items:[],total:0,page:1,page_size:50})
+const logFilters=reactive({start:'',end:'',username:'',action:'',camera_id:'',mode:'',status:'',model:'',stage:'',outcome:''})
+const logLoading=ref(false)
+const expandedLogId=ref<number|null>(null)
+const logDetails=reactive<Record<string,any>>({})
 const emptyTrafficSummary = ():TrafficSummary => ({date:'',timezone:'Asia/Shanghai',total_flow_today:0,current_people:0,entered_today:0,exited_today:0,flow_camera_count:0,store_trend:[],cameras:[],current_ranking:[],flow_ranking:[]})
 const trafficSummary = ref<TrafficSummary>(emptyTrafficSummary())
 const templates = ref<SceneTemplate[]>([])
@@ -69,6 +81,13 @@ const previewLoading = ref(false)
 const previewError = ref('')
 const editor = ref<Camera|null>(null)
 const batchModal = ref(false)
+const offDutyScheduleModal = ref(false)
+const offDutyScheduleSaving = ref(false)
+const offDutyScheduleForm = reactive({
+  days:['0','1','2','3','4','5','6'] as string[],
+  first:{start:'09:00',end:'11:00'},
+  second:{start:'12:00',end:'17:00'},
+})
 const selectedCameraIds = ref<string[]>([])
 const allCamerasSelected = computed(()=>filteredSettingsCameras.value.length>0&&filteredSettingsCameras.value.every(camera=>selectedCameraIds.value.includes(camera.id)))
 watch(cameraSettingsSearch,()=>{selectedCameraIds.value=[]})
@@ -119,10 +138,10 @@ const notify = (message:string, kind='ok') => {
 const severityLevels = [
   {value:'normal',label:'NORMAL'},{value:'high',label:'HIGH'},{value:'critical',label:'CRITICAL'},
 ] as const
-const alertFilter = reactive({mode:'',severity:''})
+const alertFilter = reactive({date:'',mode:'',severity:''})
 const filteredAlerts = ref<any[]|null>(null)
 let alertFilterSeq = 0
-const hasAlertFilter = computed(()=>!!alertFilter.mode||!!alertFilter.severity)
+const hasAlertFilter = computed(()=>!!alertFilter.date||!!alertFilter.mode||!!alertFilter.severity)
 const alertRows = computed(()=>filteredAlerts.value??alerts.value)
 const selectedAlertIds=ref<number[]>([])
 const expandedDeliveryIds=ref<number[]>([])
@@ -139,21 +158,23 @@ const applyAlertFilter = async () => {
   const seq=++alertFilterSeq
   try{
     const params=new URLSearchParams({limit:'100'})
+    if(alertFilter.date)params.set('date',alertFilter.date)
     if(alertFilter.mode)params.set('mode',alertFilter.mode)
     if(alertFilter.severity)params.set('severity',alertFilter.severity)
     const rows=await api(`/api/alerts?${params.toString()}`)
     if(seq===alertFilterSeq)filteredAlerts.value=rows
   }catch(error:any){notify(`告警筛选加载失败：${error.message}`,'error')}
 }
-const resetAlertFilter = () => {alertFilter.mode='';alertFilter.severity='';filteredAlerts.value=null}
+const resetAlertFilter = () => {alertFilter.date='';alertFilter.mode='';alertFilter.severity='';filteredAlerts.value=null;selectedAlertIds.value=[]}
+watch(()=>[alertFilter.date,alertFilter.mode,alertFilter.severity],()=>{selectedAlertIds.value=[]})
 const loadAll = async (silent=false) => {
   if (!silent) loading.value=true
   try {
-    const [d,c,a,n,t,ds] = await Promise.all([
-      api('/api/dashboard'), api('/api/cameras'), api('/api/alerts?limit=100'), api('/api/analyses?limit=100'),
+    const [d,c,dirs,a,t,ds] = await Promise.all([
+      api('/api/dashboard'), api('/api/cameras'), api('/api/camera-directories'), api('/api/alerts?limit=100'),
       api<TrafficSummary>('/api/traffic/summary'), api('/api/settings/display'),
     ])
-    dashboard.value=d; cameras.value=c; alerts.value=a; analyses.value=n; trafficSummary.value=t
+    dashboard.value=d; cameras.value=c; cameraDirectories.value=dirs; alerts.value=a; trafficSummary.value=t
     selectedCameraIds.value=selectedCameraIds.value.filter(id=>cameras.value.some(camera=>camera.id===id))
     Object.assign(displaySettings,ds)
     if(isAdmin.value){const [st,cp]=await Promise.all([api('/api/scene-templates'),api('/api/capabilities')]);templates.value=st;capabilities.value=cp}
@@ -165,18 +186,19 @@ const loadAll = async (silent=false) => {
 
 const defaultOptions = () => ({health_interval_seconds:5,yolo_fps:.1,behavior_interval_seconds:180,phone_use_seconds:600,off_duty_seconds:600,person_confidence:.3,shift_grace_seconds:60,alert_cooldown_seconds:300,black_mean_max:18,black_std_max:12,black_ratio_min:.92,fire_smoke_fps:1,fire_confidence:.3,smoke_confidence:.3,intrusion_confidence:.5,intrusion_cooldown_seconds:60,flow_min_stable_frames:3,stream_recovery_grace_seconds:15,flow_debug:false})
 const emptySchedule = () => ({timezone:'Asia/Shanghai',weekly:{},holidays:[]})
+const defaultIntrusionSchedule = () => ({timezone:'Asia/Shanghai',weekly:Object.fromEntries(Array.from({length:7},(_,day)=>[String(day),[{start:'20:00',end:'05:00'}]])),holidays:[]})
 const deepCopy = <T,>(value:T):T => JSON.parse(JSON.stringify(value))
-const newCamera = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'workstation' as SceneType,modes:[] as Mode[],schedule:emptySchedule(),options:defaultOptions(),frame_interval_seconds:1})
+const newCamera = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'workstation' as SceneType,modes:[] as Mode[],schedule:emptySchedule(),intrusion_schedule:defaultIntrusionSchedule(),directory_id:null,options:defaultOptions(),frame_interval_seconds:1})
 const selectTemplate = (scene:SceneType) => {
   newCamera.scene_type=scene
   const item=templates.value.find(t=>t.scene_type===scene)
-  if(item){newCamera.modes=[...item.modes];newCamera.schedule=deepCopy(item.schedule);newCamera.options={...defaultOptions(),...item.options}}
+  if(item){newCamera.modes=[...item.modes];newCamera.schedule=deepCopy(item.schedule);newCamera.intrusion_schedule=deepCopy(item.intrusion_schedule||defaultIntrusionSchedule());newCamera.options={...defaultOptions(),...item.options}}
   else {newCamera.modes=['black_screen'];newCamera.schedule=emptySchedule()}
 }
 const defaultGeometry = (scene:SceneType) => {
   const flow_roi=[[0,0],[1,0],[1,1],[0,1]]
   if(scene==='workstation') return {post_roi:[[0,0],[1,0],[1,1],[0,1]],flow_roi,intrusion_zone:null}
-  if(scene==='security_area') return {post_roi:[],flow_roi,intrusion_zone:{name:'禁区',points:[[.12,.12],[.88,.12],[.88,.9],[.12,.9]]}}
+  if(scene==='security_area') return {post_roi:[],flow_roi,intrusion_zone:{name:'禁区',points:[[0,0],[1,0],[1,1],[0,1]]}}
   return {post_roi:[],flow_roi,intrusion_zone:null}
 }
 const toggleMode = (target:any, mode:Mode) => {
@@ -191,7 +213,7 @@ const createCamera = async () => {
     if(!newCamera.modes.length) throw new Error('请至少选择一种检测模式')
     const created=await api('/api/cameras',{method:'POST',body:JSON.stringify({...newCamera,geometry:defaultGeometry(newCamera.scene_type)})})
     notify('摄像头已添加，请继续校准检测区域'); await loadAll(true)
-    Object.assign(newCamera,{id:'',name:'',rtsp_url:'',enabled:true,scene_type:'workstation',modes:[],schedule:emptySchedule(),options:defaultOptions(),frame_interval_seconds:1}); selectTemplate('workstation')
+    Object.assign(newCamera,{id:'',name:'',rtsp_url:'',enabled:true,scene_type:'workstation',modes:[],schedule:emptySchedule(),intrusion_schedule:defaultIntrusionSchedule(),directory_id:null,options:defaultOptions(),frame_interval_seconds:1}); selectTemplate('workstation')
     openEditor(created)
   } catch(error:any){notify(error.message,'error')}
 }
@@ -204,17 +226,34 @@ const analyze = async (camera:Camera) => {
   try{notify(`${camera.name} 已提交即时分析`);await api(`/api/cameras/${camera.id}/analyze`,{method:'POST'});await loadAll(true)}catch(error:any){notify(error.message,'error')}
 }
 const batchCreated=async(count:number)=>{batchModal.value=false;notify(`成功添加 ${count} 个视频源`);await loadAll(true)}
+const configureOffDutySchedules=async()=>{
+  const count=cameras.value.filter(camera=>camera.modes.includes('off_duty')).length
+  if(!count){notify('当前没有启用离岗检测的摄像头','error');return}
+  offDutyScheduleModal.value=true
+}
+const saveOffDutySchedules=async()=>{
+  if(!offDutyScheduleForm.days.length){notify('请至少选择一天','error');return}
+  const shifts=[deepCopy(offDutyScheduleForm.first),deepCopy(offDutyScheduleForm.second)]
+  if(shifts.some(shift=>!shift.start||!shift.end||shift.start===shift.end)){notify('请填写有效的开始和结束时间','error');return}
+  const weekly=Object.fromEntries(offDutyScheduleForm.days.map(day=>[day,deepCopy(shifts)]))
+  offDutyScheduleSaving.value=true
+  try{
+    const result=await api<{updated:number}>('/api/cameras/batch-off-duty-schedule',{method:'POST',body:JSON.stringify({timezone:'Asia/Shanghai',weekly,holidays:[]})})
+    offDutyScheduleModal.value=false;notify(`已统一配置 ${result.updated} 个摄像头的离岗时间`);await loadAll(true)
+  }catch(error:any){notify(error.message,'error')}
+  finally{offDutyScheduleSaving.value=false}
+}
 
-const editForm = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'custom',modes:[],geometry:defaultGeometry('custom'),schedule:emptySchedule(),options:defaultOptions(),zone_name:'禁区',frame_interval_seconds:60})
+const editForm = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'custom',modes:[],geometry:defaultGeometry('custom'),schedule:emptySchedule(),intrusion_schedule:defaultIntrusionSchedule(),directory_id:null,options:defaultOptions(),zone_name:'禁区',frame_interval_seconds:60})
 const openEditor = (camera:Camera) => {
   editor.value=camera
-  Object.assign(editForm,{id:camera.id,name:camera.name,rtsp_url:'',enabled:camera.enabled,scene_type:camera.scene_type,modes:[...camera.modes],geometry:deepCopy(camera.geometry||defaultGeometry('custom')),schedule:deepCopy(camera.schedule||emptySchedule()),options:{...defaultOptions(),...(camera.options||{})},zone_name:camera.geometry?.intrusion_zone?.name||'禁区',frame_interval_seconds:camera.frame_interval_seconds||60})
+  Object.assign(editForm,{id:camera.id,name:camera.name,rtsp_url:'',enabled:camera.enabled,scene_type:camera.scene_type,modes:[...camera.modes],geometry:deepCopy(camera.geometry||defaultGeometry('custom')),schedule:deepCopy(camera.schedule||emptySchedule()),intrusion_schedule:deepCopy(camera.intrusion_schedule||defaultIntrusionSchedule()),directory_id:camera.directory_id??null,options:{...defaultOptions(),...(camera.options||{})},zone_name:camera.geometry?.intrusion_zone?.name||'禁区',frame_interval_seconds:camera.frame_interval_seconds||60})
   drawLayer.value = camera.scene_type==='security_area'?'intrusion_zone':'post_roi'
 }
 const editorTemplate = (scene:SceneType) => {
   editForm.scene_type=scene
   const item=templates.value.find(t=>t.scene_type===scene)
-  if(item){editForm.modes=[...item.modes];editForm.schedule=deepCopy(item.schedule);editForm.options={...defaultOptions(),...item.options};editForm.geometry=defaultGeometry(scene)}
+  if(item){editForm.modes=[...item.modes];editForm.schedule=deepCopy(item.schedule);editForm.intrusion_schedule=deepCopy(item.intrusion_schedule||defaultIntrusionSchedule());editForm.options={...defaultOptions(),...item.options};editForm.geometry=defaultGeometry(scene)}
 }
 const pointsFor = (layer:DrawLayer):Point[] => layer==='intrusion_zone' ? (editForm.geometry.intrusion_zone?.points||[]) : (editForm.geometry[layer]||[])
 const setPoints = (layer:DrawLayer, points:Point[]) => {
@@ -230,6 +269,7 @@ const canvasClick = (event:MouseEvent) => {
 }
 const clearLayer = () => setPoints(drawLayer.value,[])
 const fullScreenFlow = () => setPoints('flow_roi',[[0,0],[1,0],[1,1],[0,1]])
+const fullScreenIntrusion = () => setPoints('intrusion_zone',[[0,0],[1,0],[1,1],[0,1]])
 const optionMinutes = (key:string) => Math.round(Number(editForm.options[key]||0)/60)
 const setOptionMinutes = (key:string,event:Event) => {editForm.options[key]=Number((event.target as HTMLInputElement).value)*60}
 const usesPersonDetection = computed(()=>editForm.modes.some((mode:Mode)=>['off_duty','on_duty','people_flow','intrusion'].includes(mode)))
@@ -254,14 +294,37 @@ const saveEditor = async () => {
 }
 const weekdays=[['0','一'],['1','二'],['2','三'],['3','四'],['4','五'],['5','六'],['6','日']]
 const dayEnabled=(d:string)=>Boolean(editForm.schedule.weekly?.[d]?.length)
-const toggleDay=(d:string)=>{if(dayEnabled(d)) delete editForm.schedule.weekly[d];else editForm.schedule.weekly[d]=[{start:'09:30',end:'11:00'},{start:'14:00',end:'17:00'}]}
-const firstShift = computed(()=>{const d=Object.keys(editForm.schedule.weekly||{})[0];return d?editForm.schedule.weekly[d][0]:{start:'09:30',end:'11:00'}})
-const secondShift = computed(()=>{const d=Object.keys(editForm.schedule.weekly||{})[0];return d?(editForm.schedule.weekly[d][1]||{start:'14:00',end:'17:00'}):{start:'14:00',end:'17:00'}})
+const toggleDay=(d:string)=>{if(dayEnabled(d)) delete editForm.schedule.weekly[d];else editForm.schedule.weekly[d]=[{start:'09:00',end:'11:00'},{start:'12:00',end:'17:00'}]}
+const firstShift = computed(()=>{const d=Object.keys(editForm.schedule.weekly||{})[0];return d?editForm.schedule.weekly[d][0]:{start:'09:00',end:'11:00'}})
+const secondShift = computed(()=>{const d=Object.keys(editForm.schedule.weekly||{})[0];return d?(editForm.schedule.weekly[d][1]||{start:'12:00',end:'17:00'}):{start:'12:00',end:'17:00'}})
 const syncShifts=()=>{for(const d of Object.keys(editForm.schedule.weekly||{})) editForm.schedule.weekly[d]=[deepCopy(firstShift.value),deepCopy(secondShift.value)]}
+const intrusionShift=computed(()=>editForm.intrusion_schedule?.weekly?.['0']?.[0]||{start:'20:00',end:'05:00'})
+const syncIntrusionShift=()=>{const shift=deepCopy(intrusionShift.value);editForm.intrusion_schedule=defaultIntrusionSchedule();for(const d of Object.keys(editForm.intrusion_schedule.weekly))editForm.intrusion_schedule.weekly[d]=[deepCopy(shift)]}
+
+const createDirectory=async()=>{const name=await dialogConfirm({title:'新建目录',message:'为摄像头目录设置名称。',input:true,inputLabel:'目录名称',confirmText:'创建'});if(!name)return;try{await api('/api/camera-directories',{method:'POST',body:JSON.stringify({name})});notify('目录已创建');await loadAll(true)}catch(error:any){notify(error.message,'error')}}
+const renameDirectory=async(directory:CameraDirectory)=>{const name=await dialogConfirm({title:'重命名目录',message:`当前名称：${directory.name}`,input:true,inputLabel:'目录名称',inputValue:directory.name,confirmText:'保存'});if(!name)return;try{await api(`/api/camera-directories/${directory.id}`,{method:'PATCH',body:JSON.stringify({name})});notify('目录已重命名');await loadAll(true)}catch(error:any){notify(error.message,'error')}}
+const removeDirectory=async(directory:CameraDirectory)=>{const ok=await dialogConfirm({title:'删除目录',message:`删除「${directory.name}」？其中 ${directory.camera_count} 个摄像头将移到未分组。`,confirmText:'删除目录',danger:true});if(!ok)return;try{await api(`/api/camera-directories/${directory.id}`,{method:'DELETE'});if(activeDirectory.value===String(directory.id))activeDirectory.value='unassigned';notify('目录已删除，摄像头已移到未分组');await loadAll(true)}catch(error:any){notify(error.message,'error')}}
+const moveSelectedCameras=async()=>{if(!selectedCameraIds.value.length)return;const directoryId=moveDirectory.value?Number(moveDirectory.value):null;try{const result=await api('/api/cameras/batch-move',{method:'POST',body:JSON.stringify({ids:selectedCameraIds.value,directory_id:directoryId})});selectedCameraIds.value=[];notify(`已移动 ${result.moved} 个摄像头`);await loadAll(true)}catch(error:any){notify(error.message,'error')}}
+
+const exportSelectedAlerts=async()=>{if(!selectedAlertIds.value.length)return;try{await download('/api/alerts/export',{alert_ids:selectedAlertIds.value},`告警-已选择-${new Date().toISOString().slice(0,10)}.xlsx`);notify(`已导出 ${selectedAlertIds.value.length} 条告警`)}catch(error:any){notify(error.message,'error')}}
+const exportFilteredAlerts=async()=>{try{await download('/api/alerts/export',{date:alertFilter.date||null,mode:alertFilter.mode||null,severity:alertFilter.severity||null},`告警-${alertFilter.date||'全部'}.xlsx`);notify('筛选结果已导出')}catch(error:any){notify(error.message,'error')}}
+const deleteSelectedAlerts=async()=>{
+  if(!selectedAlertIds.value.length)return
+  const ids=[...selectedAlertIds.value]
+  const confirmed=await dialogConfirm({title:'删除勾选告警',message:`确定永久删除已勾选的 ${ids.length} 条告警及其证据图片？此操作不可恢复。`,confirmText:`删除 ${ids.length} 条`,danger:true})
+  if(!confirmed)return
+  try{
+    const result=await api<{deleted:number;deleted_ids:number[];missing_ids:number[]}>('/api/alerts/batch-delete',{method:'POST',body:JSON.stringify({alert_ids:ids})})
+    selectedAlertIds.value=[]
+    expandedDeliveryIds.value=expandedDeliveryIds.value.filter(id=>!result.deleted_ids.includes(id))
+    notify(`已删除 ${result.deleted} 条告警`)
+    await loadAll(true)
+  }catch(error:any){notify(error.message,'error')}
+}
 
 const modelSettings=reactive<any>({provider:'mock',base_url:'',api_key:'',economy_model:'qwen-vl',enhanced_model:'qwen-vl-max',api_key_configured:false})
 const detectorSettings=reactive<any>({general_model:'yolo26s.pt',general_device:'cpu',fire_smoke_model:'models/fire_smoke_yolov8.pt',fire_smoke_device:'cpu',model_sha256:'',license_name:'AGPL-3.0 (internal pilot only)',runtime:{}})
-const retentionSettings=reactive<any>({alert_retention_days:30,auto_cleanup_enabled:true})
+const retentionSettings=reactive<any>({alert_retention_days:30,log_retention_days:30,auto_cleanup_enabled:true})
 const displaySettings=reactive({show_traffic_report:true,show_current_store_count:true})
 const visibleTabs=computed(()=>tabs.filter(tab=>(isAdmin.value||['dashboard','traffic','alerts'].includes(tab.key))&&(tab.key!=='traffic'||displaySettings.show_traffic_report)))
 const loadSettings=async()=>{try{const [m,d,r,s]=await Promise.all([api('/api/settings/models'),api('/api/settings/detectors'),api('/api/settings/retention'),api('/api/settings/display')]);Object.assign(modelSettings,m);Object.assign(detectorSettings,d);Object.assign(retentionSettings,r);Object.assign(displaySettings,s)}catch(error:any){notify(`系统配置读取失败：${error.message}`,'error')}}
@@ -293,7 +356,24 @@ const cleanupAlerts=async()=>{
   try{const r=await api(`/api/alerts?before_days=${n}`,{method:'DELETE'});notify(`已清理 ${r.deleted} 条告警`);await loadAll(true)}catch(error:any){notify(error.message,'error')}
 }
 const saveDetectors=async()=>{try{const body={...detectorSettings};delete body.runtime;delete body.updated_at;await api('/api/settings/detectors',{method:'PUT',body:JSON.stringify(body)});notify('本地检测器配置已保存并重新加载');await loadSettings()}catch(error:any){notify(error.message,'error')}}
-const setTab=(name:string)=>{if(!visibleTabs.value.some(tab=>tab.key===name))name='dashboard';if(name==='traffic'&&!displaySettings.show_traffic_report){notify('人流报表已在系统配置中关闭','error');name='dashboard'}active.value=name;location.hash=name;if(name==='settings')loadSettings();if(name==='webhooks')loadWebhooks();if(name==='users')loadUsers()}
+const logPages=computed(()=>Math.max(1,Math.ceil(logData.total/logData.page_size)))
+const logDateValue=(value:string,end=false)=>{if(!value)return '';const date=new Date(`${value}T00:00:00`);if(end)date.setDate(date.getDate()+1);return date.toISOString()}
+const activeLogFilters=()=>{
+  const values:any={start:logDateValue(logFilters.start),end:logDateValue(logFilters.end,true)}
+  if(logCategory.value==='audit')Object.assign(values,{username:logFilters.username,action:logFilters.action,outcome:logFilters.outcome})
+  if(logCategory.value==='analyses')Object.assign(values,{camera_id:logFilters.camera_id,mode:logFilters.mode,status:logFilters.status})
+  if(logCategory.value==='model-calls')Object.assign(values,{camera_id:logFilters.camera_id,model:logFilters.model,stage:logFilters.stage,outcome:logFilters.outcome})
+  return Object.fromEntries(Object.entries(values).filter(([,value])=>value!==''))
+}
+const loadLogs=async(page=1)=>{if(!isAdmin.value)return;logLoading.value=true;try{const params=new URLSearchParams({...activeLogFilters(),page:String(page),page_size:String(logData.page_size)});const result=await api(`/api/logs/${logCategory.value}?${params}`);Object.assign(logData,result);expandedLogId.value=null}catch(error:any){notify(`日志加载失败：${error.message}`,'error')}finally{logLoading.value=false}}
+const switchLogCategory=(category:LogCategory)=>{logCategory.value=category;logData.page=1;expandedLogId.value=null;void loadLogs(1)}
+const resetLogFilters=()=>{Object.assign(logFilters,{start:'',end:'',username:'',action:'',camera_id:'',mode:'',status:'',model:'',stage:'',outcome:''});void loadLogs(1)}
+const logDetailKey=(id:number)=>`${logCategory.value}:${id}`
+const toggleLogDetail=async(row:any)=>{if(expandedLogId.value===row.id){expandedLogId.value=null;return}try{const key=logDetailKey(row.id);if(!logDetails[key])logDetails[key]=await api(`/api/logs/${logCategory.value}/${row.id}`);expandedLogId.value=row.id}catch(error:any){notify(error.message,'error')}}
+const exportLogs=async()=>{try{await download(`/api/logs/${logCategory.value}/export`,activeLogFilters(),`${logCategory.value}-logs.csv`);notify('日志已导出')}catch(error:any){notify(error.message,'error')}}
+const logResultText=(row:any)=>row.outcome==='success'?'成功':row.outcome==='failure'||row.outcome==='error'?'失败':row.status||row.outcome
+const prettyLog=(value:any)=>JSON.stringify(value,null,2)
+const setTab=(name:string)=>{if(!visibleTabs.value.some(tab=>tab.key===name))name='dashboard';if(name==='traffic'&&!displaySettings.show_traffic_report){notify('人流报表已在系统配置中关闭','error');name='dashboard'}active.value=name;location.hash=name;if(name==='settings')loadSettings();if(name==='webhooks')loadWebhooks();if(name==='users')loadUsers();if(name==='logs')loadLogs(logData.page)}
 const focusDashboardCamera=async(row:TrafficCameraSummary|null)=>{
   if(!row)return
   const camera=cameras.value.find(item=>item.id===row.camera_id)
@@ -572,12 +652,13 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
                 <button v-for="scene in (['workstation','customer_area','security_area','custom'] as SceneType[])" :key="scene" :class="{selected:newCamera.scene_type===scene}" @click="selectTemplate(scene)"><TechIcon :name="sceneInfo[scene].icon" :size="20"/><b>{{sceneInfo[scene].name}}</b></button>
               </div>
               <CameraBasicFields :model="newCamera" />
+              <label>所属目录<select v-model="newCamera.directory_id"><option :value="null">未分组</option><option v-for="directory in cameraDirectories" :key="directory.id" :value="directory.id">{{directory.name}}</option></select></label>
               <div class="field-title">启用能力 <small>可多选</small></div>
               <div class="mode-picker">
                 <button v-for="(info,mode) in modeInfo" :key="mode" :class="{selected:newCamera.modes.includes(mode)}" @click="toggleMode(newCamera,mode)"><TechIcon :name="info.icon" :size="17"/><span><b>{{info.name}}</b><small>{{info.note}}</small></span></button>
               </div>
               <button class="primary wide" @click="createCamera"><TechIcon name="plus" :size="14"/>添加并配置区域</button>
-              <div class="config-note"><b>安全说明</b><p>烟火、入侵、黑屏始终全天运行，不受普通排班影响。视频烟火预警不能替代认证消防设备。</p></div>
+              <div class="config-note"><b>安全说明</b><p>烟火、黑屏全天运行；区域入侵默认每天 20:00 至次日 05:00。视频烟火预警不能替代认证消防设备。</p></div>
             </div>
           </section>
 
@@ -585,35 +666,51 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <div class="section-head">
               <div><h2>已有监控源</h2><span class="head-en">CAMERA SOURCES · {{cameras.length}}</span><p>原有摄像头保持自定义场景与原配置</p></div>
               <div class="actions">
+                <button class="ghost" @click="createDirectory"><TechIcon name="plus" :size="13"/>新建目录</button>
+                <button class="ghost" @click="configureOffDutySchedules"><TechIcon name="refresh" :size="13"/>一键配置离岗时间</button>
                 <label v-if="cameras.length" class="camera-select-all"><input type="checkbox" :checked="allCamerasSelected" @change="toggleAllCameras">全选</label>
                 <button class="danger" :disabled="!selectedCameraIds.length" @click="removeSelectedCameras"><TechIcon name="trash" :size="13"/>批量删除 ({{selectedCameraIds.length}})</button>
                 <button class="ghost" @click="batchModal=true"><TechIcon name="layers" :size="13"/>批量添加</button>
                 <button class="primary" @click="scrollToAdd"><TechIcon name="plus" :size="13"/>添加视频源</button>
               </div>
             </div>
-            <div class="camera-searchbar compact">
-              <label><TechIcon name="search" :size="14"/><input v-model="cameraSettingsSearch" type="search" placeholder="按监控名称搜索" aria-label="搜索摄像头设置"></label>
-              <button v-if="cameraSettingsSearch" class="ghost" @click="cameraSettingsSearch=''">清除</button>
-              <span><b>{{filteredSettingsCameras.length}}</b> / {{cameras.length}}</span>
+            <div class="camera-directory-layout">
+              <div class="directory-bar">
+                <button :class="{active:activeDirectory==='all'}" @click="activeDirectory='all';selectedCameraIds=[]"><span>全部</span><b>{{cameras.length}}</b></button>
+                <button :class="{active:activeDirectory==='unassigned'}" @click="activeDirectory='unassigned';selectedCameraIds=[]"><span>未分组</span><b>{{unassignedCameraCount}}</b></button>
+                <span v-for="directory in cameraDirectories" :key="directory.id" :class="{active:activeDirectory===String(directory.id)}">
+                  <button :title="directory.name" @click="activeDirectory=String(directory.id);selectedCameraIds=[]"><span>{{directory.name}}</span><b>{{directory.camera_count}}</b></button>
+                  <button class="directory-action" title="重命名" @click="renameDirectory(directory)">✎</button>
+                  <button class="directory-action danger" title="删除" @click="removeDirectory(directory)">×</button>
+                </span>
+              </div>
+              <div class="source-list-content">
+                <div v-if="selectedCameraIds.length" class="batch-move-bar"><select v-model="moveDirectory"><option value="">未分组</option><option v-for="directory in cameraDirectories" :key="directory.id" :value="String(directory.id)">{{directory.name}}</option></select><button class="primary" @click="moveSelectedCameras">移动所选 ({{selectedCameraIds.length}})</button></div>
+                <div class="camera-searchbar compact">
+                  <label><TechIcon name="search" :size="14"/><input v-model="cameraSettingsSearch" type="search" placeholder="按监控名称搜索" aria-label="搜索摄像头设置"></label>
+                  <button v-if="cameraSettingsSearch" class="ghost" @click="cameraSettingsSearch=''">清除</button>
+                  <span><b>{{filteredSettingsCameras.length}}</b> / {{directoryCameras.length}}</span>
+                </div>
+                <article v-for="camera in filteredSettingsCameras" :key="camera.id">
+                  <label class="camera-select" :aria-label="`选择 ${camera.name}`"><input v-model="selectedCameraIds" type="checkbox" :value="camera.id"></label>
+                  <i class="source-state" :class="camera.online?'ok':'bad'"></i>
+                  <div class="source-main">
+                    <h3>{{camera.name}}<small>{{sceneInfo[camera.scene_type]?.name}} · 每 {{camera.frame_interval_seconds}} 秒 · {{camera.id}}</small></h3>
+                    <p>{{maskedSource(camera.source)}}</p>
+                    <div class="chips"><span v-for="mode in camera.modes" :key="mode">{{modeName(mode)}}</span></div>
+                    <small v-if="camera.last_error" class="error-text" :title="camera.last_error">最近抓帧失败：{{camera.last_error}}</small>
+                  </div>
+                  <div class="source-actions">
+                    <button @click="openPreview(camera)"><TechIcon name="play" :size="12"/>实时视频</button>
+                    <button @click="analyze(camera)"><TechIcon name="zap" :size="12"/>立即分析</button>
+                    <button @click="openEditor(camera)"><TechIcon name="edit" :size="12"/>编辑</button>
+                    <button class="danger" @click="removeCamera(camera)"><TechIcon name="trash" :size="12"/>删除</button>
+                  </div>
+                </article>
+                <div v-if="!cameras.length" class="empty"><b>NO CAMERA SOURCE</b><p>暂无监控源，请在左侧添加</p></div>
+                <div v-else-if="!filteredSettingsCameras.length" class="empty"><b>NO MATCHED CAMERA</b><p>没有名称匹配“{{cameraSettingsSearch.trim()}}”的监控</p></div>
+              </div>
             </div>
-            <article v-for="camera in filteredSettingsCameras" :key="camera.id">
-              <label class="camera-select" :aria-label="`选择 ${camera.name}`"><input v-model="selectedCameraIds" type="checkbox" :value="camera.id"></label>
-              <i class="source-state" :class="camera.online?'ok':'bad'"></i>
-              <div class="source-main">
-                <h3>{{camera.name}}<small>{{sceneInfo[camera.scene_type]?.name}} · 每 {{camera.frame_interval_seconds}} 秒 · {{camera.id}}</small></h3>
-                <p>{{maskedSource(camera.source)}}</p>
-                <div class="chips"><span v-for="mode in camera.modes" :key="mode">{{modeName(mode)}}</span></div>
-                <small v-if="camera.last_error" class="error-text" :title="camera.last_error">最近抓帧失败：{{camera.last_error}}</small>
-              </div>
-              <div class="source-actions">
-                <button @click="openPreview(camera)"><TechIcon name="play" :size="12"/>实时视频</button>
-                <button @click="analyze(camera)"><TechIcon name="zap" :size="12"/>立即分析</button>
-                <button @click="openEditor(camera)"><TechIcon name="edit" :size="12"/>编辑</button>
-                <button class="danger" @click="removeCamera(camera)"><TechIcon name="trash" :size="12"/>删除</button>
-              </div>
-            </article>
-            <div v-if="!cameras.length" class="empty"><b>NO CAMERA SOURCE</b><p>暂无监控源，请在左侧添加</p></div>
-            <div v-else-if="!filteredSettingsCameras.length" class="empty"><b>NO MATCHED CAMERA</b><p>没有名称匹配“{{cameraSettingsSearch.trim()}}”的监控</p></div>
           </section>
         </div>
       </section>
@@ -623,9 +720,10 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         <section class="panel table-panel">
           <div class="section-head">
             <div><h2>告警中心</h2><span class="head-en">AI ALERT CENTER</span><p>烟火紧急告警置顶；仅确认违规才告警</p></div>
-            <div class="actions"><button class="primary" :disabled="!selectedAlertIds.length" @click="openWebhookSend"><TechIcon name="webhook" :size="13"/>发送企业微信 ({{selectedAlertIds.length}})</button><button v-if="isAdmin" class="link" @click="cleanupAlerts"><TechIcon name="trash" :size="13"/>清理历史</button></div>
+            <div class="actions"><button class="ghost" :disabled="!selectedAlertIds.length" @click="exportSelectedAlerts">导出勾选 ({{selectedAlertIds.length}})</button><button class="ghost" @click="exportFilteredAlerts">导出筛选结果</button><button class="primary" :disabled="!selectedAlertIds.length" @click="openWebhookSend"><TechIcon name="webhook" :size="13"/>发送企业微信 ({{selectedAlertIds.length}})</button><button v-if="isAdmin" class="danger" :disabled="!selectedAlertIds.length" @click="deleteSelectedAlerts"><TechIcon name="trash" :size="13"/>删除勾选 ({{selectedAlertIds.length}})</button><button v-if="isAdmin" class="link" @click="cleanupAlerts"><TechIcon name="trash" :size="13"/>清理历史</button></div>
           </div>
           <div class="filter-bar">
+            <label class="filter-item"><span class="filter-label">日期 / DATE</span><input v-model="alertFilter.date" type="date" @change="applyAlertFilter"></label>
             <label class="filter-item"><span class="filter-label">事件类型 / EVENT</span>
               <select v-model="alertFilter.mode" @change="applyAlertFilter">
                 <option value="">全部事件</option>
@@ -642,14 +740,14 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <span class="filter-count"><b>{{alertRows.length}}</b> / {{alerts.length}} <small>MATCHED / TOTAL</small></span>
           </div>
           <table v-if="alertRows.length">
-            <thead><tr><th><input type="checkbox" :checked="allAlertsSelected" @change="toggleAllAlerts"></th><th>级别</th><th>证据</th><th>摄像头 / 名称</th><th>事件</th><th>原因</th><th>Webhook</th><th>时间</th></tr></thead>
+            <thead><tr><th><input type="checkbox" :checked="allAlertsSelected" @change="toggleAllAlerts"></th><th>级别</th><th>证据</th><th>名称</th><th>事件</th><th>原因</th><th>Webhook</th><th>时间</th></tr></thead>
             <tbody>
               <template v-for="item in alertRows" :key="item.id">
               <tr :class="`severity-${item.severity}`">
                 <td><input v-model="selectedAlertIds" type="checkbox" :value="item.id"></td>
                 <td><span class="severity-badge" :class="item.severity">{{item.severity||'normal'}}</span></td>
                 <td><EvidencePreview :src="item.evidence_url" alt="告警证据" /></td>
-                <td>{{item.camera_id}}<br><small>{{cameras.find(c=>c.id===item.camera_id)?.name||'未知摄像头'}}</small></td>
+                <td>{{item.camera_name||'未知摄像头'}}</td>
                 <td><span class="event-type">{{modeName(item.mode)}}</span><small v-if="item.event_phase"><br>{{eventPhaseName(item.event_phase)}}<br>{{eventRange(item)}}</small></td>
                 <td class="reason">{{item.reason}}</td>
                 <td><button v-if="item.webhook_delivery?.total" class="delivery-summary" @click="toggleDeliveryDetails(item.id)">{{item.webhook_delivery.delivered}}/{{item.webhook_delivery.total}} 成功</button><span v-else class="muted">未发送</span></td>
@@ -739,6 +837,43 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         </section>
       </section>
 
+      <!-- ============ 日志管理 ADMIN LOGS ============ -->
+      <section v-else-if="active==='logs'" class="page logs-page">
+        <section class="panel logs-shell">
+          <div class="section-head"><div><h2>日志管理</h2><span class="head-en">ADMINISTRATOR LOGS</span><p>用户审计、摄像头分析与外部大模型调用记录</p></div><button class="ghost" @click="exportLogs"><TechIcon name="database" :size="13"/>导出当前筛选</button></div>
+          <div class="log-tabs">
+            <button :class="{active:logCategory==='audit'}" @click="switchLogCategory('audit')">用户操作日志</button>
+            <button :class="{active:logCategory==='analyses'}" @click="switchLogCategory('analyses')">摄像头分析日志</button>
+            <button :class="{active:logCategory==='model-calls'}" @click="switchLogCategory('model-calls')">大模型调用日志</button>
+          </div>
+          <div class="log-filters">
+            <label>开始日期<input v-model="logFilters.start" type="date"></label><label>结束日期<input v-model="logFilters.end" type="date"></label>
+            <template v-if="logCategory==='audit'"><label>用户<input v-model.trim="logFilters.username" placeholder="用户名"></label><label>操作<input v-model.trim="logFilters.action" placeholder="操作名称"></label></template>
+            <template v-else><label>摄像头<input v-model.trim="logFilters.camera_id" placeholder="摄像头 ID"></label></template>
+            <template v-if="logCategory==='analyses'"><label>检测模式<select v-model="logFilters.mode"><option value="">全部</option><option v-for="(_,mode) in modeInfo" :key="mode" :value="mode">{{modeName(mode)}}</option></select></label><label>分析状态<select v-model="logFilters.status"><option value="">全部</option><option value="confirmed">confirmed</option><option value="suspected">suspected</option><option value="uncertain">uncertain</option><option value="none">none</option></select></label></template>
+            <template v-if="logCategory==='model-calls'"><label>模型<input v-model.trim="logFilters.model" placeholder="模型名称"></label><label>阶段<select v-model="logFilters.stage"><option value="">全部</option><option value="economy">经济模型</option><option value="enhanced">增强模型</option></select></label></template>
+            <label v-if="logCategory!=='analyses'">结果<select v-model="logFilters.outcome"><option value="">全部</option><option value="success">成功</option><option value="failure">失败</option><option value="error">错误</option></select></label>
+            <div class="actions"><button class="primary" @click="loadLogs(1)">查询</button><button class="ghost" @click="resetLogFilters">重置</button></div>
+          </div>
+          <div class="log-summary"><span>共 {{logData.total}} 条</span><span>第 {{logData.page}} / {{logPages}} 页</span></div>
+          <div class="log-table-wrap">
+            <table class="log-table">
+              <thead><tr v-if="logCategory==='audit'"><th>时间</th><th>用户</th><th>操作</th><th>目标</th><th>结果</th><th></th></tr><tr v-else-if="logCategory==='analyses'"><th>时间</th><th>摄像头</th><th>模式</th><th>状态</th><th>置信度</th><th>耗时</th><th></th></tr><tr v-else><th>时间</th><th>摄像头</th><th>阶段 / 模型</th><th>模式</th><th>结果</th><th>耗时</th><th></th></tr></thead>
+              <tbody>
+                <template v-for="row in logData.items" :key="row.id">
+                  <tr v-if="logCategory==='audit'"><td>{{formatTime(row.created_at)}}</td><td><b>{{row.actor_display_name||row.actor_username||'未知用户'}}</b><small>{{row.actor_username}}</small></td><td>{{row.action}}<small>{{row.method}} {{row.path}}</small></td><td>{{row.target_type}} {{row.target_id}}</td><td><span class="log-result" :class="row.outcome">{{logResultText(row)}} · {{row.status_code}}</span></td><td><button class="link" @click="toggleLogDetail(row)">详情</button></td></tr>
+                  <tr v-else-if="logCategory==='analyses'"><td>{{formatTime(row.created_at)}}</td><td><b>{{row.camera_name||row.camera_id||'已删除摄像头'}}</b><small>{{row.camera_id}}</small></td><td>{{modeName(row.mode)}}</td><td><span class="log-result" :class="row.status">{{row.status}}</span></td><td>{{Math.round(row.confidence*100)}}%</td><td>{{row.latency_ms}} ms</td><td><button class="link" @click="toggleLogDetail(row)">详情</button></td></tr>
+                  <tr v-else><td>{{formatTime(row.created_at)}}</td><td><b>{{row.camera_name||row.camera_id||'已删除摄像头'}}</b><small>{{row.camera_id}}</small></td><td><b>{{row.stage==='economy'?'经济':'增强'}}</b><small>{{row.model}}</small></td><td>{{row.modes?.map((m:Mode)=>modeName(m)).join('、')}}</td><td><span class="log-result" :class="row.outcome">{{logResultText(row)}}<template v-if="row.http_status"> · {{row.http_status}}</template></span></td><td>{{row.latency_ms}} ms</td><td><button class="link" @click="toggleLogDetail(row)">详情</button></td></tr>
+                  <tr v-if="expandedLogId===row.id" class="log-detail-row"><td :colspan="logCategory==='audit'?6:7"><pre>{{prettyLog(logDetails[logDetailKey(row.id)]||row)}}</pre></td></tr>
+                </template>
+                <tr v-if="!logData.items.length"><td :colspan="7" class="empty-cell">{{logLoading?'正在加载…':'暂无日志'}}</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="log-pagination"><button class="ghost" :disabled="logData.page<=1||logLoading" @click="loadLogs(logData.page-1)">上一页</button><span>{{logData.page}} / {{logPages}}</span><button class="ghost" :disabled="logData.page>=logPages||logLoading" @click="loadLogs(logData.page+1)">下一页</button></div>
+        </section>
+      </section>
+
       <!-- ============ 账号管理 ACCOUNT MANAGEMENT ============ -->
       <section v-else-if="active==='users'" class="page account-page">
         <section class="panel account-create">
@@ -771,6 +906,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         <section class="panel settings-card settings-card-retention">
           <div class="section-head"><div><h2>数据保留</h2><span class="head-en">DATA RETENTION</span><p>到期自动清理告警记录与证据图片</p></div><label class="switch"><input v-model="retentionSettings.auto_cleanup_enabled" type="checkbox"><span></span></label></div>
           <label>告警保留天数<input v-model.number="retentionSettings.alert_retention_days" type="number" min="1" max="365"><small class="field-hint">超过该天数的告警与证据会被自动清理；也可在告警中心手动清理</small></label>
+          <label>日志保留天数<input v-model.number="retentionSettings.log_retention_days" type="number" min="1" max="365"><small class="field-hint">用户操作、摄像头分析和大模型调用日志统一保留，默认 30 天</small></label>
           <button class="primary" @click="saveRetention">保存保留策略</button>
         </section>
 
@@ -830,6 +966,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         <div class="editor-body">
           <div class="editor-left">
             <CameraBasicFields :model="editForm" editing />
+            <label>所属目录<select v-model="editForm.directory_id"><option :value="null">未分组</option><option v-for="directory in cameraDirectories" :key="directory.id" :value="directory.id">{{directory.name}}</option></select></label>
             <div class="scene-picker compact-scenes">
               <button v-for="scene in (['workstation','customer_area','security_area','custom'] as SceneType[])" :key="scene" :class="{selected:editForm.scene_type===scene}" @click="editorTemplate(scene)"><TechIcon :name="sceneInfo[scene].icon" :size="18"/><b>{{sceneInfo[scene].name}}</b></button>
             </div>
@@ -841,6 +978,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
               <button :class="{active:drawLayer==='flow_roi'}" class="ghost" @click="drawLayer='flow_roi'">人流区域</button>
               <button :class="{active:drawLayer==='intrusion_zone'}" class="ghost" @click="drawLayer='intrusion_zone'">禁区</button>
               <button v-if="drawLayer==='flow_roi'" class="ghost" @click="fullScreenFlow">恢复全屏</button>
+              <button v-if="drawLayer==='intrusion_zone'" class="ghost" @click="fullScreenIntrusion">恢复全屏</button>
               <button class="danger" @click="clearLayer"><TechIcon name="trash" :size="12"/>清空当前图层</button>
             </div>
             <div ref="canvasRef" class="geometry-stage" @click="canvasClick">
@@ -852,11 +990,12 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
                 <g v-for="(p,index) in pointsFor(drawLayer)" :key="index"><circle :cx="p[0]*100" :cy="p[1]*100" r="1.1"/><text :x="p[0]*100+1.5" :y="p[1]*100-1">{{index+1}}</text></g>
               </svg>
             </div>
-            <p class="hint">岗位区域、人流 ROI 和禁区至少需要 3 个点。人流 ROI 默认为全屏。当前图层已有 {{pointsFor(drawLayer).length}} 个点。</p>
+            <p class="hint">岗位区域、人流 ROI 和禁区至少需要 3 个点。人流 ROI 与新建禁区默认为全屏。当前图层已有 {{pointsFor(drawLayer).length}} 个点。</p>
           </div>
           <aside class="editor-right">
             <label>抽帧频率<select v-model.number="editForm.frame_interval_seconds"><option v-for="seconds in frameIntervalOptions" :key="seconds" :value="seconds">每 {{seconds}} 秒抓取一帧</option></select></label>
             <label v-if="editForm.modes.includes('intrusion')">禁区名称<input v-model="editForm.zone_name"></label>
+            <template v-if="editForm.modes.includes('intrusion')"><div class="field-title">区域入侵时段 <small>每天，支持跨午夜</small></div><div class="form-row"><label>开始时间<input v-model="intrusionShift.start" type="time" @change="syncIntrusionShift"></label><label>结束时间<input v-model="intrusionShift.end" type="time" @change="syncIntrusionShift"></label></div></template>
             <div class="field-title">普通模式排班</div>
             <div class="weekday"><button v-for="d in weekdays" :key="d[0]" :class="{selected:dayEnabled(d[0])}" @click="toggleDay(d[0])">{{d[1]}}</button></div>
             <div class="form-row"><label>上午开始<input v-model="firstShift.start" type="time" @change="syncShifts"></label><label>上午结束<input v-model="firstShift.end" type="time" @change="syncShifts"></label></div>
@@ -870,7 +1009,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <div v-if="editForm.modes.includes('phone_use') || editForm.modes.includes('smoking')" class="form-row"><label>大模型检测间隔（分钟）<input :value="optionMinutes('behavior_interval_seconds')" type="number" min="1" max="60" @input="setOptionMinutes('behavior_interval_seconds',$event)"></label><label v-if="editForm.modes.includes('phone_use')">玩手机判定时间（分钟）<input :value="optionMinutes('phone_use_seconds')" type="number" min="1" max="1440" @input="setOptionMinutes('phone_use_seconds',$event)"></label></div>
             <div class="form-row"><label>火焰阈值<input v-model.number="editForm.options.fire_confidence" type="number" min="0" max="1" step=".05"></label><label>烟雾阈值<input v-model.number="editForm.options.smoke_confidence" type="number" min="0" max="1" step=".05"></label></div>
             <label>入侵置信度<input v-model.number="editForm.options.intrusion_confidence" type="number" min="0" max="1" step=".05"></label>
-            <div class="config-note"><b>全天安全模式</b><p>烟火、区域入侵、黑屏忽略此处排班，始终运行。</p></div>
+            <div class="config-note"><b>安全模式</b><p>烟火和黑屏始终运行；区域入侵仅在上方独立时段内运行。</p></div>
             <button class="primary wide" @click="saveEditor">保存策略</button>
           </aside>
         </div>
@@ -878,6 +1017,20 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
     </div>
 
     <!-- ============ 手动发送 Webhook ============ -->
+    <div v-if="offDutyScheduleModal" class="modal" role="dialog" aria-modal="true" @click.self="offDutyScheduleModal=false">
+      <section class="confirm-modal">
+        <header class="modal-head"><div><h2>统一设置离岗时间</h2><span class="head-en">BATCH OFF-DUTY SCHEDULE</span><p>将覆盖 {{cameras.filter(camera=>camera.modes.includes('off_duty')).length}} 个离岗检测摄像头的普通模式排班</p></div><button type="button" aria-label="关闭" @click="offDutyScheduleModal=false"><TechIcon name="close" :size="16"/></button></header>
+        <div class="confirm-body">
+          <label>生效星期</label>
+          <div class="weekday"><button v-for="d in weekdays" :key="d[0]" type="button" :class="{selected:offDutyScheduleForm.days.includes(d[0])}" @click="offDutyScheduleForm.days=offDutyScheduleForm.days.includes(d[0])?offDutyScheduleForm.days.filter(day=>day!==d[0]):[...offDutyScheduleForm.days,d[0]]">{{d[1]}}</button></div>
+          <div class="form-row"><label>第一时段开始<input v-model="offDutyScheduleForm.first.start" type="time"></label><label>第一时段结束<input v-model="offDutyScheduleForm.first.end" type="time"></label></div>
+          <div class="form-row"><label>第二时段开始<input v-model="offDutyScheduleForm.second.start" type="time"></label><label>第二时段结束<input v-model="offDutyScheduleForm.second.end" type="time"></label></div>
+          <p>离岗检测只在所选时段内运行；同一摄像头的在岗、玩手机等普通模式也会共用此排班。</p>
+        </div>
+        <footer class="confirm-foot"><button class="ghost" :disabled="offDutyScheduleSaving" @click="offDutyScheduleModal=false">取消</button><button class="primary" :disabled="offDutyScheduleSaving" @click="saveOffDutySchedules">{{offDutyScheduleSaving?'保存中…':'统一应用'}}</button></footer>
+      </section>
+    </div>
+
     <div v-if="sendModal" class="modal" role="dialog" aria-modal="true" @click.self="sendModal=false">
       <section class="confirm-modal">
         <header class="modal-head"><div><h2>发送告警到企业微信</h2><span class="head-en">MANUAL DELIVERY</span><p>已选择 {{selectedAlertIds.length}} 条告警</p></div><button @click="sendModal=false"><TechIcon name="close" :size="16"/></button></header>

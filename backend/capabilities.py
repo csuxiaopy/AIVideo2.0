@@ -34,15 +34,19 @@ def _weekday_schedule(shifts: list[dict[str, str]], days: range) -> dict[str, An
     }
 
 
+OFF_DUTY_DEFAULT_SCHEDULE = _weekday_schedule(
+    [{"start": "09:00", "end": "11:00"}, {"start": "12:00", "end": "17:00"}], range(7)
+)
+
+
 SCENE_TEMPLATES: dict[SceneType, dict[str, Any]] = {
     SceneType.WORKSTATION: {
         "name": "员工工位",
         "description": "员工行为规范与离岗管理",
         "modes": [Mode.OFF_DUTY.value, Mode.PHONE_USE.value, Mode.BLACK_SCREEN.value],
-        "schedule": _weekday_schedule(
-            [{"start": "09:30", "end": "11:00"}, {"start": "14:00", "end": "17:00"}], range(5)
-        ),
+        "schedule": deepcopy(OFF_DUTY_DEFAULT_SCHEDULE),
         "required_geometry": ["post_roi"],
+        "intrusion_schedule": _weekday_schedule([{"start": "20:00", "end": "05:00"}], range(7)),
     },
     SceneType.CUSTOMER_AREA: {
         "name": "客户位/入口",
@@ -50,18 +54,20 @@ SCENE_TEMPLATES: dict[SceneType, dict[str, Any]] = {
         "modes": [Mode.PEOPLE_FLOW.value, Mode.BLACK_SCREEN.value],
         "schedule": _weekday_schedule([{"start": "08:30", "end": "17:30"}], range(7)),
         "required_geometry": ["flow_roi"],
+        "intrusion_schedule": _weekday_schedule([{"start": "20:00", "end": "05:00"}], range(7)),
     },
     SceneType.SECURITY_AREA: {
         "name": "库房/全局区域",
         "description": "全天烟火与禁区安全检测",
         "modes": [Mode.FIRE_SMOKE.value, Mode.INTRUSION.value, Mode.BLACK_SCREEN.value],
         "schedule": {"timezone": "Asia/Shanghai", "weekly": {}, "holidays": []},
+        "intrusion_schedule": _weekday_schedule([{"start": "20:00", "end": "05:00"}], range(7)),
         "required_geometry": ["intrusion_zone"],
     },
 }
 
 
-ALWAYS_ON_MODES = {Mode.FIRE_SMOKE.value, Mode.INTRUSION.value, Mode.BLACK_SCREEN.value}
+ALWAYS_ON_MODES = {Mode.FIRE_SMOKE.value, Mode.BLACK_SCREEN.value}
 
 
 def scene_templates_public() -> list[dict[str, Any]]:
@@ -79,6 +85,10 @@ def scene_templates_public() -> list[dict[str, Any]]:
     for template in templates:
         if template["scene_type"] == SceneType.WORKSTATION.value:
             template["geometry"]["post_roi"] = [[0, 0], [1, 0], [1, 1], [0, 1]]
+        if template["scene_type"] == SceneType.SECURITY_AREA.value:
+            template["geometry"]["intrusion_zone"] = {
+                "name": "禁区", "points": [[0, 0], [1, 0], [1, 1], [0, 1]]
+            }
     return templates
 
 

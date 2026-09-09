@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import socket
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -36,6 +37,8 @@ class AnalysisQueue:
         self.consumer = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
         self.group = f"{prefix.replace(':', '-')}-workers"
         self.sequence = 0
+        self.recovered: asyncio.Queue[TaskEnvelope] = asyncio.Queue(maxsize=maxsize)
+        self.last_reclaim_at = 0.0
 
     async def start(self) -> None:
         try:
@@ -84,6 +87,15 @@ class AnalysisQueue:
         if self.redis_available and self.redis is not None:
             streams = {stream: ">" for stream in self.streams.values()}
             while True:
+                try:
+                    return self.recovered.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                await self._reclaim_stale()
+                try:
+                    return self.recovered.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
                 messages = await self.redis.xreadgroup(
                     self.group, self.consumer, streams=streams, count=1, block=1000
                 )
@@ -96,6 +108,29 @@ class AnalysisQueue:
                     )
         _, _, envelope = await self.fallback.get()
         return envelope
+
+    async def _reclaim_stale(self) -> None:
+        """Recover work abandoned by a dead worker without stealing normal long VLM calls."""
+        now = time.monotonic()
+        if now - self.last_reclaim_at < 30 or self.redis is None:
+            return
+        self.last_reclaim_at = now
+        for stream in self.streams.values():
+            start_id = "0-0"
+            while not self.recovered.full():
+                claimed = await self.redis.xautoclaim(
+                    stream, self.group, self.consumer,
+                    min_idle_time=600_000, start_id=start_id, count=100,
+                )
+                start_id, rows = claimed[0], claimed[1]
+                for message_id, fields in rows:
+                    self.recovered.put_nowait(TaskEnvelope(
+                        camera_id=fields["camera_id"], priority=fields.get("priority", "normal"),
+                        task_id=fields.get("task_id", message_id), stream=stream,
+                        message_id=message_id,
+                    ))
+                if not rows or start_id == "0-0":
+                    break
 
     async def ack(self, task: TaskEnvelope) -> None:
         if self.redis_available and self.redis is not None and task.stream and task.message_id:

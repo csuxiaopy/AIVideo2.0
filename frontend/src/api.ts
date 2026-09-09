@@ -67,3 +67,20 @@ export async function api<T = any>(path: string, options: RequestInit = {}): Pro
   if (response.status === 204) return undefined as T
   return response.json()
 }
+
+export async function download(path: string, body: unknown, filename: string): Promise<void> {
+  const response = await fetch(path, {
+    method: 'POST', credentials: 'same-origin',
+    headers: {'Content-Type': 'application/json', ...(csrfToken ? {'X-CSRF-Token': csrfToken} : {})},
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    let detail: unknown
+    try { detail = (await response.json()).detail } catch {}
+    throw new ApiError(errorMessage(detail, `${response.status} ${response.statusText}`), detail, response.status)
+  }
+  const url = URL.createObjectURL(await response.blob())
+  const anchor = document.createElement('a')
+  anchor.href = url; anchor.download = filename; anchor.click()
+  URL.revokeObjectURL(url)
+}

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -126,6 +126,62 @@ class Repository:
         with session_scope() as session:
             return list(session.scalars(select(models.Camera).order_by(models.Camera.created_at)))
 
+    def list_camera_directories(self) -> list[dict[str, Any]]:
+        with session_scope() as session:
+            rows = session.execute(
+                select(models.CameraDirectory, func.count(models.Camera.id))
+                .outerjoin(models.Camera, models.Camera.directory_id == models.CameraDirectory.id)
+                .group_by(models.CameraDirectory.id).order_by(models.CameraDirectory.name)
+            ).all()
+            return [{"id": row.id, "name": row.name, "camera_count": int(count),
+                     "created_at": row.created_at, "updated_at": row.updated_at}
+                    for row, count in rows]
+
+    def get_camera_directory(self, directory_id: int) -> models.CameraDirectory | None:
+        with session_scope() as session:
+            return session.get(models.CameraDirectory, directory_id)
+
+    def create_camera_directory(self, name: str) -> models.CameraDirectory:
+        row = models.CameraDirectory(name=name)
+        with session_scope() as session:
+            session.add(row); session.flush(); session.refresh(row)
+        return row
+
+    def update_camera_directory(self, directory_id: int, name: str) -> models.CameraDirectory | None:
+        with session_scope() as session:
+            row = session.get(models.CameraDirectory, directory_id)
+            if not row:
+                return None
+            row.name = name; row.updated_at = utc_now(); session.flush(); session.refresh(row)
+        return row
+
+    def delete_camera_directory(self, directory_id: int) -> bool:
+        with session_scope() as session:
+            row = session.get(models.CameraDirectory, directory_id)
+            if not row:
+                return False
+            session.execute(update(models.Camera).where(models.Camera.directory_id == directory_id).values(directory_id=None))
+            session.delete(row)
+        return True
+
+    def move_cameras(self, camera_ids: list[str], directory_id: int | None) -> int:
+        with session_scope() as session:
+            result = session.execute(update(models.Camera).where(models.Camera.id.in_(camera_ids)).values(
+                directory_id=directory_id, updated_at=utc_now()))
+            return result.rowcount
+
+    def update_cameras_schedule(self, camera_ids: list[str], schedule_json: str) -> int:
+        """Update multiple camera schedules atomically."""
+        if not camera_ids:
+            return 0
+        with session_scope() as session:
+            result = session.execute(
+                update(models.Camera)
+                .where(models.Camera.id.in_(camera_ids))
+                .values(schedule_json=schedule_json, updated_at=utc_now())
+            )
+            return result.rowcount
+
     def get_camera(self, camera_id: str) -> models.Camera | None:
         with session_scope() as session:
             return session.get(models.Camera, camera_id)
@@ -214,6 +270,9 @@ class Repository:
                 camera.last_analysis_at = analyzed_at or utc_now()
 
     def add_analysis(self, **values: Any) -> models.Analysis:
+        if "camera_name" not in values:
+            camera = self.get_camera(values.get("camera_id", ""))
+            values["camera_name"] = camera.name if camera else values.get("camera_id", "")
         row = models.Analysis(**values)
         with session_scope() as session:
             session.add(row)
@@ -239,6 +298,24 @@ class Repository:
         with session_scope() as session:
             return session.get(models.Alert, alert_id)
 
+    def list_alerts_by_ids(self, alert_ids: list[int]) -> list[models.Alert]:
+        if not alert_ids:
+            return []
+        with session_scope() as session:
+            return list(session.scalars(select(models.Alert).where(models.Alert.id.in_(alert_ids))))
+
+    def delete_alerts_by_ids(self, alert_ids: list[int]) -> list[int]:
+        """Delete existing alerts and their delivery rows atomically."""
+        if not alert_ids:
+            return []
+        with session_scope() as session:
+            existing = list(session.scalars(select(models.Alert.id).where(models.Alert.id.in_(alert_ids))))
+            if existing:
+                session.execute(delete(models.WebhookDelivery).where(models.WebhookDelivery.alert_id.in_(existing)))
+                session.execute(delete(models.Alert).where(models.Alert.id.in_(existing)))
+            existing_set = set(existing)
+            return [alert_id for alert_id in alert_ids if alert_id in existing_set]
+
     def list_webhook_targets(self, enabled_only: bool = False) -> list[models.WebhookTarget]:
         with session_scope() as session:
             stmt = select(models.WebhookTarget).order_by(models.WebhookTarget.id)
@@ -257,6 +334,109 @@ class Repository:
             session.flush()
             session.refresh(row)
         return row
+
+    def add_audit_log(self, **values: Any) -> models.AuditLog:
+        row = models.AuditLog(**values)
+        with session_scope() as session:
+            session.add(row)
+            session.flush()
+            session.refresh(row)
+        return row
+
+    def add_model_call_log(self, **values: Any) -> models.ModelCallLog:
+        row = models.ModelCallLog(**values)
+        with session_scope() as session:
+            session.add(row)
+            session.flush()
+            session.refresh(row)
+        return row
+
+    def get_log(self, category: str, row_id: int):
+        model = {"audit": models.AuditLog, "analyses": models.Analysis,
+                 "model-calls": models.ModelCallLog}.get(category)
+        if model is None:
+            return None
+        with session_scope() as session:
+            return session.get(model, row_id)
+
+    def list_audit_logs(
+        self, *, page: int, page_size: int, start: datetime | None = None,
+        end: datetime | None = None, username: str | None = None,
+        action: str | None = None, outcome: str | None = None,
+    ) -> tuple[list[models.AuditLog], int]:
+        filters = []
+        if start:
+            filters.append(models.AuditLog.created_at >= start)
+        if end:
+            filters.append(models.AuditLog.created_at < end)
+        if username:
+            filters.append(models.AuditLog.actor_username.ilike(f"%{username}%"))
+        if action:
+            filters.append(models.AuditLog.action.ilike(f"%{action}%"))
+        if outcome:
+            filters.append(models.AuditLog.outcome == outcome)
+        with session_scope() as session:
+            total = session.scalar(select(func.count()).select_from(models.AuditLog).where(*filters)) or 0
+            stmt = (select(models.AuditLog).where(*filters).order_by(desc(models.AuditLog.created_at))
+                    .offset((page - 1) * page_size).limit(page_size))
+            return list(session.scalars(stmt)), total
+
+    def list_analysis_logs(
+        self, *, page: int, page_size: int, start: datetime | None = None,
+        end: datetime | None = None, camera_id: str | None = None,
+        mode: str | None = None, status: str | None = None,
+    ) -> tuple[list[models.Analysis], int]:
+        filters = []
+        if start:
+            filters.append(models.Analysis.created_at >= start)
+        if end:
+            filters.append(models.Analysis.created_at < end)
+        if camera_id:
+            filters.append(models.Analysis.camera_id == camera_id)
+        if mode:
+            filters.append(models.Analysis.mode == mode)
+        if status:
+            filters.append(models.Analysis.status == status)
+        with session_scope() as session:
+            total = session.scalar(select(func.count()).select_from(models.Analysis).where(*filters)) or 0
+            stmt = (select(models.Analysis).where(*filters).order_by(desc(models.Analysis.created_at))
+                    .offset((page - 1) * page_size).limit(page_size))
+            return list(session.scalars(stmt)), total
+
+    def list_model_call_logs(
+        self, *, page: int, page_size: int, start: datetime | None = None,
+        end: datetime | None = None, camera_id: str | None = None,
+        model: str | None = None, stage: str | None = None,
+        outcome: str | None = None,
+    ) -> tuple[list[models.ModelCallLog], int]:
+        filters = []
+        if start:
+            filters.append(models.ModelCallLog.created_at >= start)
+        if end:
+            filters.append(models.ModelCallLog.created_at < end)
+        if camera_id:
+            filters.append(models.ModelCallLog.camera_id == camera_id)
+        if model:
+            filters.append(models.ModelCallLog.model.ilike(f"%{model}%"))
+        if stage:
+            filters.append(models.ModelCallLog.stage == stage)
+        if outcome:
+            filters.append(models.ModelCallLog.outcome == outcome)
+        with session_scope() as session:
+            total = session.scalar(select(func.count()).select_from(models.ModelCallLog).where(*filters)) or 0
+            stmt = (select(models.ModelCallLog).where(*filters)
+                    .order_by(desc(models.ModelCallLog.created_at))
+                    .offset((page - 1) * page_size).limit(page_size))
+            return list(session.scalars(stmt)), total
+
+    def delete_logs_before(self, cutoff: datetime) -> dict[str, int]:
+        with session_scope() as session:
+            counts = {}
+            for key, model in (("audit", models.AuditLog), ("analyses", models.Analysis),
+                               ("model_calls", models.ModelCallLog)):
+                result = session.execute(delete(model).where(model.created_at < cutoff))
+                counts[key] = result.rowcount or 0
+            return counts
 
     def update_webhook_target(self, target_id: int, values: dict[str, Any]) -> models.WebhookTarget | None:
         with session_scope() as session:
@@ -325,10 +505,12 @@ class Repository:
 
     def list_alerts(
         self,
-        limit: int = 100,
+        limit: int | None = 100,
         camera_id: str | None = None,
         mode: str | None = None,
         severity: str | None = None,
+        alert_date: date | None = None,
+        alert_ids: list[int] | None = None,
     ):
         with session_scope() as session:
             priority = case(
@@ -337,14 +519,29 @@ class Repository:
                 (models.Alert.severity == "normal", 2),
                 else_=3,
             )
-            stmt = select(models.Alert).order_by(priority, desc(models.Alert.created_at)).limit(limit)
+            stmt = select(models.Alert, models.Camera.name).join(
+                models.Camera, models.Camera.id == models.Alert.camera_id
+            ).order_by(priority, desc(models.Alert.created_at))
+            if limit is not None:
+                stmt = stmt.limit(limit)
             if camera_id:
                 stmt = stmt.where(models.Alert.camera_id == camera_id)
             if mode:
                 stmt = stmt.where(models.Alert.mode == mode)
             if severity:
                 stmt = stmt.where(models.Alert.severity == severity)
-            return list(session.scalars(stmt))
+            if alert_date:
+                zone = ZoneInfo("Asia/Shanghai")
+                start = datetime.combine(alert_date, datetime.min.time(), tzinfo=zone).astimezone(timezone.utc)
+                end = (datetime.combine(alert_date, datetime.min.time(), tzinfo=zone) + timedelta(days=1)).astimezone(timezone.utc)
+                stmt = stmt.where(models.Alert.created_at >= start, models.Alert.created_at < end)
+            if alert_ids is not None:
+                stmt = stmt.where(models.Alert.id.in_(alert_ids))
+            rows = []
+            for alert, camera_name in session.execute(stmt):
+                alert.camera_name = camera_name
+                rows.append(alert)
+            return rows
 
     def list_analyses(self, limit: int = 100, camera_id: str | None = None):
         with session_scope() as session:

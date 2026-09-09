@@ -19,6 +19,10 @@ class Camera(Base):
     modes_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     geometry_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     schedule_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    intrusion_schedule_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    directory_id: Mapped[int | None] = mapped_column(
+        ForeignKey("camera_directories.id", ondelete="SET NULL"), index=True
+    )
     options_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     frame_interval_seconds: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     online: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -34,7 +38,10 @@ class Analysis(Base):
     __tablename__ = "analyses"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    camera_id: Mapped[str] = mapped_column(ForeignKey("cameras.id", ondelete="CASCADE", onupdate="CASCADE"), index=True)
+    camera_id: Mapped[str | None] = mapped_column(
+        ForeignKey("cameras.id", ondelete="SET NULL", onupdate="CASCADE"), index=True
+    )
+    camera_name: Mapped[str] = mapped_column(String(200), default="", nullable=False)
     mode: Mapped[str] = mapped_column(String(40), index=True)
     status: Mapped[str] = mapped_column(String(30), index=True)
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
@@ -120,6 +127,15 @@ class WebhookSettings(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
+class CameraDirectory(Base):
+    __tablename__ = "camera_directories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
+
 class WebhookTarget(Base):
     __tablename__ = "webhook_targets"
 
@@ -169,6 +185,7 @@ class RetentionSettings(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     alert_retention_days: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
+    log_retention_days: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     auto_cleanup_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
@@ -205,3 +222,52 @@ class UserSession(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    actor_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    actor_username: Mapped[str] = mapped_column(String(64), default="", nullable=False, index=True)
+    actor_display_name: Mapped[str] = mapped_column(String(100), default="", nullable=False)
+    action: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    target_type: Mapped[str] = mapped_column(String(80), default="", nullable=False, index=True)
+    target_id: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    method: Mapped[str] = mapped_column(String(10), nullable=False)
+    path: Mapped[str] = mapped_column(String(500), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    status_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    summary_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    ip_address: Mapped[str] = mapped_column(String(100), default="", nullable=False)
+    user_agent: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+
+class ModelCallLog(Base):
+    __tablename__ = "model_call_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    camera_id: Mapped[str | None] = mapped_column(
+        ForeignKey("cameras.id", ondelete="SET NULL", onupdate="CASCADE"), nullable=True, index=True
+    )
+    camera_name: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    modes_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    stage: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(100), default="", nullable=False)
+    model: Mapped[str] = mapped_column(String(200), default="", nullable=False, index=True)
+    request_id: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
+    http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    usage_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    raw_response: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    parsed_response_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )

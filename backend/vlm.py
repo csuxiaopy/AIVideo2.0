@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from typing import Any
 import httpx
 
 from backend.schemas import BehaviorVLMResult, Mode, VLMResult
+from backend.repository import as_json
 
 
 SYSTEM_PROMPT = """你是监控视频行为检测器，只判断请求中指定的行为。每次输入一张当前监控图片。
@@ -20,6 +22,7 @@ results 必须且只能包含请求中列出的每个模式一次，不能缺少
 phone_use 只有明确看到人员正在操作或注视手机才可 confirmed；仅看到手机不能确认。
 smoking 只有明确看到持烟、吸食动作或可关联的烟雾证据才可 confirmed。
 不要把喝水、吃东西、摸脸、打电话或普通手部动作误判为抽烟。"""
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -52,18 +55,30 @@ def extract_json(text: str) -> dict[str, Any]:
 
 
 class VisionModelClient:
-    def __init__(self, base_url: str, api_key: str, economy_model: str, enhanced_model: str):
+    def __init__(self, base_url: str, api_key: str, economy_model: str, enhanced_model: str,
+                 log_writer=None):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.economy_model = economy_model
         self.enhanced_model = enhanced_model
+        self.log_writer = log_writer
         self.client = httpx.AsyncClient(timeout=90)
+
+    def _log_call(self, **values: Any) -> None:
+        writer = getattr(self, "log_writer", None)
+        if not writer:
+            return
+        try:
+            writer(**values)
+        except Exception:
+            logger.exception("Failed to persist model call log")
 
     async def close(self) -> None:
         await self.client.aclose()
 
     async def analyze_behaviors(
-        self, modes: set[Mode], frame: bytes, enhanced: bool = False
+        self, modes: set[Mode], frame: bytes, enhanced: bool = False,
+        camera_id: str | None = None, camera_name: str = "",
     ) -> VLMResponse:
         allowed = {Mode.PHONE_USE, Mode.SMOKING}
         if not modes or not modes <= allowed:
@@ -88,23 +103,38 @@ class VisionModelClient:
             "response_format": {"type": "json_object"},
         }
         started = time.perf_counter()
-        response = await self.client.post(
-            f"{self.base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            json=body,
-        )
-        if response.status_code == 429:
-            retry_after = min(30.0, float(response.headers.get("Retry-After", "1") or 1))
-            import asyncio
-
-            await asyncio.sleep(retry_after)
+        stage = "enhanced" if enhanced else "economy"
+        common = {
+            "camera_id": camera_id, "camera_name": camera_name,
+            "modes_json": as_json(sorted(mode.value for mode in modes)),
+            "stage": stage, "provider": "openai_compatible", "model": model,
+        }
+        try:
             response = await self.client.post(
                 f"{self.base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
                 json=body,
             )
+            if response.status_code == 429:
+                retry_after = min(30.0, float(response.headers.get("Retry-After", "1") or 1))
+                import asyncio
+
+                await asyncio.sleep(retry_after)
+                response = await self.client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                    json=body,
+                )
+        except httpx.HTTPError as exc:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            error_text = f"{type(exc).__name__}: {str(exc)[:1000]}"
+            self._log_call(**common, request_id=None, http_status=None, outcome="error",
+                           latency_ms=latency_ms, usage_json="{}", raw_response="",
+                           parsed_response_json="{}", error=error_text)
+            raise VLMError(f"大模型请求失败：{str(exc)[:300]}") from exc
         latency_ms = int((time.perf_counter() - started) * 1000)
         request_id = response.headers.get("x-request-id") or response.headers.get("request-id")
+        raw_response = response.text
         if response.is_error:
             code = ""
             message = response.text[:500]
@@ -116,22 +146,44 @@ class VisionModelClient:
                     message = str(error.get("message", message))[:500]
             except ValueError:
                 pass
-            raise VLMError(
-                f"大模型 HTTP {response.status_code}" + (f" {code}" if code else "") + f"：{message}",
-                request_id,
-            )
-        payload = response.json()
-        request_id = payload.get("id") or request_id
-        message = payload["choices"][0]["message"]["content"]
-        if isinstance(message, list):
-            message = "".join(str(item.get("text", "")) for item in message if isinstance(item, dict))
+            error_text = f"大模型 HTTP {response.status_code}" + (f" {code}" if code else "") + f"：{message}"
+            self._log_call(**common, request_id=request_id, http_status=response.status_code,
+                           outcome="error", latency_ms=latency_ms, usage_json="{}",
+                           raw_response=raw_response, parsed_response_json="{}", error=error_text[:2000])
+            raise VLMError(error_text, request_id)
         try:
+            payload = response.json()
+        except ValueError as exc:
+            error_text = f"大模型返回格式错误：{str(exc)[:300]}"
+            self._log_call(**common, request_id=request_id, http_status=response.status_code,
+                           outcome="error", latency_ms=latency_ms, usage_json="{}",
+                           raw_response=raw_response, parsed_response_json="{}", error=error_text)
+            raise VLMError(error_text, request_id) from exc
+        request_id = payload.get("id") or request_id
+        try:
+            message = payload["choices"][0]["message"]["content"]
+            if isinstance(message, list):
+                message = "".join(str(item.get("text", "")) for item in message if isinstance(item, dict))
             combined = BehaviorVLMResult.model_validate(extract_json(str(message)))
         except Exception as exc:
-            raise VLMError(f"大模型返回格式错误：{str(exc)[:300]}", request_id) from exc
+            error_text = f"大模型返回格式错误：{str(exc)[:300]}"
+            self._log_call(**common, request_id=request_id, http_status=response.status_code,
+                           outcome="error", latency_ms=latency_ms,
+                           usage_json=as_json(payload.get("usage", {})), raw_response=raw_response,
+                           parsed_response_json="{}", error=error_text)
+            raise VLMError(error_text, request_id) from exc
         results = {item.mode: item for item in combined.results}
         if set(results) != modes:
-            raise VLMError("大模型返回的检测模式与请求不一致", request_id)
+            error_text = "大模型返回的检测模式与请求不一致"
+            self._log_call(**common, request_id=request_id, http_status=response.status_code,
+                           outcome="error", latency_ms=latency_ms,
+                           usage_json=as_json(payload.get("usage", {})), raw_response=raw_response,
+                           parsed_response_json=as_json(combined.model_dump(mode="json")), error=error_text)
+            raise VLMError(error_text, request_id)
+        self._log_call(**common, request_id=request_id, http_status=response.status_code,
+                       outcome="success", latency_ms=latency_ms,
+                       usage_json=as_json(payload.get("usage", {})), raw_response=raw_response,
+                       parsed_response_json=as_json(combined.model_dump(mode="json")), error=None)
         return VLMResponse(
             results=results,
             request_id=request_id,
@@ -141,11 +193,14 @@ class VisionModelClient:
             model=model,
         )
 
-    async def tiered_analyze_behaviors(self, modes: set[Mode], frame: bytes) -> VLMResponse:
-        economy = await self.analyze_behaviors(modes, frame, enhanced=False)
+    async def tiered_analyze_behaviors(
+        self, modes: set[Mode], frame: bytes, camera_id: str | None = None, camera_name: str = ""
+    ) -> VLMResponse:
+        context = {"camera_id": camera_id, "camera_name": camera_name} if camera_id or camera_name else {}
+        economy = await self.analyze_behaviors(modes, frame, enhanced=False, **context)
         if all(result.status == "none" for result in economy.results.values()):
             return economy
-        return await self.analyze_behaviors(modes, frame, enhanced=True)
+        return await self.analyze_behaviors(modes, frame, enhanced=True, **context)
 
     async def test(self) -> dict[str, Any]:
         started = time.perf_counter()

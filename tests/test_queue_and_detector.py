@@ -22,6 +22,26 @@ async def test_fallback_queue_respects_priority_and_reports_per_priority_depth()
     await queue.ack(first)
 
 
+@pytest.mark.asyncio
+async def test_redis_queue_reclaims_stale_worker_messages():
+    queue = AnalysisQueue("redis://unused")
+
+    class FakeRedis:
+        async def xautoclaim(self, stream, group, consumer, **kwargs):
+            if stream.endswith(":critical"):
+                return ["0-0", [("42-0", {
+                    "camera_id": "camera-stale", "priority": "critical", "task_id": "task-stale"
+                })], []]
+            return ["0-0", [], []]
+
+    queue.redis = FakeRedis()
+    queue.redis_available = True
+    await queue._reclaim_stale()
+    recovered = queue.recovered.get_nowait()
+    assert recovered.camera_id == "camera-stale"
+    assert recovered.message_id == "42-0"
+
+
 def test_fire_detector_rejects_hash_mismatch(tmp_path):
     model = tmp_path / "fire.pt"
     model.write_bytes(b"not-the-reviewed-model")

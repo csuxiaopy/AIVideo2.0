@@ -263,6 +263,11 @@ class CameraRuleState:
         }
         return triggered
 
+    def reset_intrusion(self) -> None:
+        self.intrusion_active.clear()
+        self.intrusion_last_alert.clear()
+        self.intrusion_last_seen.clear()
+
     def flow_update(
         self,
         tracks: list[tuple[int, tuple[float, float]]],

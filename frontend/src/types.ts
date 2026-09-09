@@ -29,6 +29,8 @@ export interface Camera {
   modes: Mode[]
   geometry: any
   schedule: any
+  intrusion_schedule: any
+  directory_id: number | null
   options: any
 }
 
@@ -38,8 +40,15 @@ export interface SceneTemplate {
   description: string
   modes: Mode[]
   schedule: any
+  intrusion_schedule: any
   options: any
   required_geometry: string[]
+}
+
+export interface CameraDirectory {
+  id: number
+  name: string
+  camera_count: number
 }
 
 export interface TrafficTrendPoint {

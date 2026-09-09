@@ -169,6 +169,7 @@ class MonitoringRuntime:
                 self.cipher.decrypt(model_settings.api_key_encrypted),
                 model_settings.economy_model,
                 model_settings.enhanced_model,
+                log_writer=self.repository.add_model_call_log,
             )
 
     async def reload_detectors(self) -> None:
@@ -368,8 +369,10 @@ class MonitoringRuntime:
             raise RuntimeError("视频源尚无可用画面")
         geometry = GeometrySpec.model_validate(from_json(camera.geometry_json, {}))
         schedule = ScheduleSpec.model_validate(from_json(camera.schedule_json, {}))
+        intrusion_schedule = ScheduleSpec.model_validate(from_json(camera.intrusion_schedule_json, {}))
         results: list[dict[str, Any]] = []
         now = utc_now()
+        intrusion_active = is_scheduled(intrusion_schedule, now)
 
         for pending_mode, (began_at, ended_at) in list(state.pending_resolutions.items()):
             if pending_mode != Mode.PHONE_USE.value:
@@ -406,7 +409,8 @@ class MonitoringRuntime:
             if triggered:
                 await self.alerts.create(camera, analysis, frame.jpeg)
 
-        yolo_modes = yolo_required_modes(modes)
+        active_detection_modes = modes if intrusion_active else modes - {Mode.INTRUSION.value}
+        yolo_modes = yolo_required_modes(active_detection_modes)
         detections = []
         if yolo_modes:
             try:
@@ -531,7 +535,7 @@ class MonitoringRuntime:
         ):
             results.extend(await self._behaviors(camera, behavior_modes, frame.jpeg, options, schedule, now))
 
-        if Mode.INTRUSION.value in modes and geometry.intrusion_zone:
+        if Mode.INTRUSION.value in modes and geometry.intrusion_zone and intrusion_active:
             intrusion_people = [
                 item for item in qualified_people
                 if item.confidence >= options.intrusion_confidence and item.track_id is not None
@@ -575,6 +579,8 @@ class MonitoringRuntime:
                 await self.alerts.create(camera, analysis, evidence, bypass_cooldown=True)
                 results.append({"mode": Mode.INTRUSION.value, "status": "confirmed", "track_ids": triggered_ids})
         else:
+            if Mode.INTRUSION.value in modes and not intrusion_active:
+                state.reset_intrusion()
             self.media.set_intrusion(camera.id, [], set())
 
         ANALYSIS_LATENCY.observe(time.perf_counter() - started)
@@ -734,7 +740,12 @@ class MonitoringRuntime:
                 output.append({"mode": mode.value, "status": "uncertain", "reason": analysis.reason})
             return output
         try:
-            response = await self.vlm.tiered_analyze_behaviors(modes, frame_jpeg)
+            if isinstance(self.vlm, VisionModelClient):
+                response = await self.vlm.tiered_analyze_behaviors(
+                    modes, frame_jpeg, camera_id=camera.id, camera_name=camera.name
+                )
+            else:
+                response = await self.vlm.tiered_analyze_behaviors(modes, frame_jpeg)
             VLM_CALLS.labels(mode="behavior_combined", status="completed").inc()
             output = []
             for mode in sorted(modes, key=lambda item: item.value):

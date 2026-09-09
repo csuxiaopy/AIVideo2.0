@@ -1,6 +1,7 @@
 import pytest
 
 from backend.schemas import (
+    AlertBatchDelete,
     BehaviorVLMResult,
     CameraBatchCreate,
     CameraBatchDelete,
@@ -27,6 +28,16 @@ def test_camera_requires_post_roi_and_people_flow_defaults_to_full_screen_roi():
     )
     assert len(camera.modes) == 2
     assert camera.geometry.flow_roi == [(0, 0), (1, 0), (1, 1), (0, 1)]
+
+
+def test_alert_batch_delete_deduplicates_and_validates_ids():
+    assert AlertBatchDelete(alert_ids=[3, 1, 3]).alert_ids == [3, 1]
+    with pytest.raises(ValueError):
+        AlertBatchDelete(alert_ids=[])
+    with pytest.raises(ValueError):
+        AlertBatchDelete(alert_ids=[0])
+    with pytest.raises(ValueError):
+        AlertBatchDelete(alert_ids=list(range(1, 502)))
 
 
 def test_cipher_redaction_and_signature():

@@ -156,6 +156,7 @@ async def get_retention() -> dict[str, Any]:
     row = context.repository.get_retention_settings()
     return {
         "alert_retention_days": row.alert_retention_days,
+        "log_retention_days": row.log_retention_days,
         "auto_cleanup_enabled": row.auto_cleanup_enabled,
         "updated_at": row.updated_at,
     }

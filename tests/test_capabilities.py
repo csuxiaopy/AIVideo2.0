@@ -11,15 +11,22 @@ def test_scene_templates_have_expected_modes_and_geometry():
     assert templates["workstation"]["required_geometry"] == ["post_roi"]
     assert templates["workstation"]["geometry"]["post_roi"] == [[0, 0], [1, 0], [1, 1], [0, 1]]
     assert templates["workstation"]["schedule"]["weekly"]["0"] == [
-        {"start": "09:30", "end": "11:00"},
-        {"start": "14:00", "end": "17:00"},
+        {"start": "09:00", "end": "11:00"},
+        {"start": "12:00", "end": "17:00"},
     ]
+    assert set(templates["workstation"]["schedule"]["weekly"]) == {str(day) for day in range(7)}
     assert templates["workstation"]["options"]["fire_confidence"] == 0.3
     assert templates["workstation"]["options"]["smoke_confidence"] == 0.3
     assert templates["customer_area"]["required_geometry"] == ["flow_roi"]
     assert templates["customer_area"]["geometry"]["flow_roi"] == [[0, 0], [1, 0], [1, 1], [0, 1]]
     assert templates["security_area"]["required_geometry"] == ["intrusion_zone"]
     assert set(templates["security_area"]["modes"]) == {"fire_smoke", "intrusion", "black_screen"}
+    assert templates["security_area"]["geometry"]["intrusion_zone"]["points"] == [
+        [0, 0], [1, 0], [1, 1], [0, 1]
+    ]
+    assert templates["security_area"]["intrusion_schedule"]["weekly"]["6"] == [
+        {"start": "20:00", "end": "05:00"}
+    ]
 
 
 def test_safety_modes_ignore_closed_schedule():
@@ -31,3 +38,4 @@ def test_safety_modes_ignore_closed_schedule():
     assert not mode_is_active(Mode.OFF_DUTY.value, closed, noon)
     for mode in ALWAYS_ON_MODES:
         assert mode_is_active(mode, closed, noon)
+    assert Mode.INTRUSION.value not in ALWAYS_ON_MODES

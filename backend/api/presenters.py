@@ -4,7 +4,7 @@ from typing import Any
 
 from backend import models
 from backend.repository import from_json
-from backend.schemas import GeometrySpec
+from backend.schemas import GeometrySpec, default_intrusion_schedule
 from backend.security import SecretCipher, redact_rtsp
 
 
@@ -31,6 +31,11 @@ def camera_public(
         "modes": from_json(camera.modes_json, []),
         "geometry": GeometrySpec.model_validate(from_json(camera.geometry_json, {})).model_dump(),
         "schedule": from_json(camera.schedule_json, {}),
+        "intrusion_schedule": from_json(
+            getattr(camera, "intrusion_schedule_json", ""),
+            default_intrusion_schedule().model_dump(mode="json"),
+        ),
+        "directory_id": getattr(camera, "directory_id", None),
         "options": from_json(camera.options_json, {}),
         "created_at": camera.created_at,
         "updated_at": camera.updated_at,
@@ -43,6 +48,7 @@ def alert_public(alert: models.Alert, deliveries: list[models.WebhookDelivery] |
     return {
         "id": alert.id,
         "camera_id": alert.camera_id,
+        "camera_name": getattr(alert, "camera_name", alert.camera_id),
         "analysis_id": alert.analysis_id,
         "mode": alert.mode,
         "status": alert.status,
@@ -80,6 +86,7 @@ def analysis_public(row: models.Analysis) -> dict[str, Any]:
     return {
         "id": row.id,
         "camera_id": row.camera_id,
+        "camera_name": row.camera_name,
         "mode": row.mode,
         "status": row.status,
         "confidence": row.confidence,
