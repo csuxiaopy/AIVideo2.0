@@ -5,8 +5,16 @@ from types import SimpleNamespace
 from backend.repository import Repository
 
 
-def _camera(camera_id: str, name: str, modes: str = '["people_flow"]', online: bool = True):
-    return SimpleNamespace(id=camera_id, name=name, modes_json=modes, online=online)
+def _camera(
+    camera_id: str,
+    name: str,
+    modes: str = '["people_flow"]',
+    online: bool = True,
+    directory_id: int | None = None,
+):
+    return SimpleNamespace(
+        id=camera_id, name=name, modes_json=modes, online=online, directory_id=directory_id
+    )
 
 
 def _row(camera_id: str, timestamp: datetime, current: int, entered: int = 0, exited: int = 0):
@@ -17,7 +25,11 @@ def _row(camera_id: str, timestamp: datetime, current: int, entered: int = 0, ex
 
 
 def test_traffic_summary_uses_shanghai_day_and_carries_camera_state(monkeypatch):
-    cameras = [_camera("cam-a", "一号门"), _camera("cam-b", "二号门"), _camera("other", "仓库", "[]")]
+    cameras = [
+        _camera("cam-a", "一号门", directory_id=1),
+        _camera("cam-b", "二号门"),
+        _camera("other", "仓库", "[]"),
+    ]
     # 2026-09-01 16:00 UTC is 2026-09-02 00:00 in Shanghai.
     prior = {
         "cam-a": _row("cam-a", datetime(2026, 9, 1, 15, 59, tzinfo=timezone.utc), 2),
@@ -33,7 +45,12 @@ def test_traffic_summary_uses_shanghai_day_and_carries_camera_state(monkeypatch)
         scalars_index = 0
 
         def scalars(self, _statement):
-            result = [cameras, today, [prior["cam-a"]]][self.scalars_index]
+            result = [
+                cameras,
+                today,
+                [prior["cam-a"]],
+                [SimpleNamespace(id=1, name="滨湖")],
+            ][self.scalars_index]
             self.scalars_index += 1
             return result
 
@@ -54,6 +71,7 @@ def test_traffic_summary_uses_shanghai_day_and_carries_camera_state(monkeypatch)
     # Equal daily flow is resolved by camera ID for stable podium ordering.
     assert [item["camera_id"] for item in result["flow_ranking"]] == ["cam-a", "cam-b"]
     assert [item["camera_id"] for item in result["current_ranking"]] == ["cam-a", "cam-b"]
+    assert [item["camera_name"] for item in result["cameras"]] == ["滨湖营业厅", "未分组营业厅"]
 
 
 def test_traffic_summary_returns_empty_dashboard_without_flow_cameras(monkeypatch):

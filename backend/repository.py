@@ -642,6 +642,17 @@ class Repository:
                 ).where(ranked_prior.c.row_number == 1)
             ))
             prior = {row.camera_id: row for row in prior_rows}
+            directory_ids = {
+                camera.directory_id for camera in flow_cameras if camera.directory_id is not None
+            }
+            directory_names = {
+                directory.id: directory.name
+                for directory in session.scalars(
+                    select(models.CameraDirectory).where(
+                        models.CameraDirectory.id.in_(directory_ids)
+                    )
+                )
+            } if directory_ids else {}
 
         latest: dict[str, models.TrafficAggregate] = {
             camera_id: row for camera_id, row in prior.items() if row is not None
@@ -670,8 +681,11 @@ class Repository:
         camera_items = []
         for camera in flow_cameras:
             last = latest.get(camera.id)
+            directory_name = directory_names.get(camera.directory_id, "未分组")
             camera_items.append({
-                "camera_id": camera.id, "camera_name": camera.name, "online": camera.online,
+                "camera_id": camera.id,
+                "camera_name": f"{directory_name}营业厅",
+                "online": camera.online,
                 "current_count": int(last.current_count or 0) if last else 0,
                 "entered_today": int(entered[camera.id]), "exited_today": int(exited[camera.id]),
                 "last_stat_at": self._aware_utc(last.bucket_start) if last else None,
