@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as ExcelImage
 from openpyxl.styles import Alignment, Font
+from openpyxl.utils import get_column_letter
 
 from backend.api.context import context
 from backend.api.presenters import alert_public, analysis_public
@@ -52,32 +53,43 @@ def _alert_workbook(rows: list[Any]) -> BytesIO:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "告警记录"
-    sheet.append(["摄像头名称", "事件", "原因", "证据", "时间"])
+    max_evidence = max((len(getattr(row, "evidences", []) or []) or bool(row.evidence_path) for row in rows), default=1)
+    max_evidence = max(1, int(max_evidence))
+    evidence_headers = [f"证据{index}" for index in range(1, max_evidence + 1)]
+    sheet.append(["告警名称", "事件", "原因", *evidence_headers, "时间"])
     for cell in sheet[1]:
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal="center")
     sheet.column_dimensions["A"].width = 24
     sheet.column_dimensions["B"].width = 18
     sheet.column_dimensions["C"].width = 48
-    sheet.column_dimensions["D"].width = 24
-    sheet.column_dimensions["E"].width = 22
+    for index in range(max_evidence):
+        sheet.column_dimensions[get_column_letter(4 + index)].width = 24
+    time_column = 4 + max_evidence
+    sheet.column_dimensions[get_column_letter(time_column)].width = 22
     for row_index, alert in enumerate(rows, start=2):
         created_at = context.repository._aware_utc(alert.created_at).astimezone(
             ZoneInfo("Asia/Shanghai")
         ).strftime("%Y-%m-%d %H:%M:%S")
         mode_name = CORE_CAPABILITIES.get(alert.mode, {}).get("name", alert.mode)
-        sheet.append([getattr(alert, "camera_name", alert.camera_id), mode_name, alert.reason, "无证据", created_at])
+        alert_name = alert.alert_name or getattr(alert, "camera_name", alert.camera_id)
+        sheet.append([alert_name, mode_name, alert.reason, *(["无证据"] * max_evidence), created_at])
         sheet.row_dimensions[row_index].height = 76
-        if alert.evidence_path:
+        evidence_rows = list(getattr(alert, "evidences", []) or [])
+        evidence_paths = [item.evidence_path for item in evidence_rows]
+        if not evidence_paths and alert.evidence_path:
+            evidence_paths = [alert.evidence_path]
+        for evidence_index, evidence_path in enumerate(evidence_paths):
             root = context.settings.evidence_dir.resolve()
-            evidence = (root / Path(alert.evidence_path).name).resolve()
+            evidence = (root / Path(evidence_path).name).resolve()
             try:
                 evidence.relative_to(root)
                 if evidence.is_file():
                     image = ExcelImage(str(evidence))
                     image.width, image.height = 120, 90
-                    sheet.add_image(image, f"D{row_index}")
-                    sheet.cell(row_index, 4).value = ""
+                    column = 4 + evidence_index
+                    sheet.add_image(image, f"{get_column_letter(column)}{row_index}")
+                    sheet.cell(row_index, column).value = ""
             except (ValueError, OSError):
                 pass
     output = BytesIO()

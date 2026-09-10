@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -25,7 +25,13 @@ from backend.eventbus import EventBus
 from backend.media_capture import MediaGateway
 from backend.queueing import AnalysisQueue
 from backend.repository import Repository, as_json, from_json
-from backend.rules import RuleStateRegistry, box_intersects_polygon, is_scheduled, point_in_polygon
+from backend.rules import (
+    RuleStateRegistry,
+    active_schedule_shift,
+    box_intersects_polygon,
+    is_scheduled,
+    point_in_polygon,
+)
 from backend.schemas import CameraOptions, Detection, GeometrySpec, Mode, ScheduleSpec
 from backend.security import SecretCipher
 from backend.vlm import VLMError, VisionModelClient
@@ -39,10 +45,26 @@ ONLINE_GAUGE = Gauge("monitor_cameras_online", "Online cameras")
 QUEUE_GAUGE = Gauge("monitor_queue_depth", "Queue depth", ["priority"])
 VLM_CALLS = Counter("monitor_vlm_calls_total", "VLM calls", ["mode", "status"])
 BEHAVIOR_INTERVAL_SECONDS = 180
+OFF_DUTY_REVIEW_INTERVAL_SECONDS = 30 * 60
 
 
 def event_time(value: datetime, schedule: ScheduleSpec) -> str:
     return value.astimezone(ZoneInfo(schedule.timezone)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def off_duty_schedule_context(
+    schedule: ScheduleSpec, fallback_seconds: int, now: datetime,
+) -> tuple[bool, str | None, int]:
+    active_period = active_schedule_shift(schedule, now)
+    if active_period is None:
+        return False, None, fallback_seconds
+    schedule_key, active_shift = active_period
+    threshold_seconds = (
+        active_shift.off_duty_seconds
+        if active_shift and active_shift.off_duty_seconds is not None
+        else fallback_seconds
+    )
+    return True, schedule_key, threshold_seconds
 
 
 def yolo_required_modes(modes: set[str]) -> set[str]:
@@ -115,6 +137,8 @@ class MonitoringRuntime:
         self.queued: set[str] = set()
         self.fire_queued: set[str] = set()
         self.camera_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self.directory_locks: dict[int | None, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self.off_duty_memberships: dict[int | None, tuple[str, ...]] = {}
         self.processed = 0
         self.failures = 0
         self.last_heartbeat = utc_now()
@@ -204,6 +228,20 @@ class MonitoringRuntime:
 
     async def sync_cameras(self) -> None:
         cameras = self.repository.list_cameras()
+        memberships: dict[int | None, list[str]] = defaultdict(list)
+        for camera in cameras:
+            if camera.enabled and Mode.OFF_DUTY.value in from_json(camera.modes_json, []):
+                memberships[getattr(camera, "directory_id", None)].append(camera.id)
+        current_memberships = {
+            key: tuple(sorted(camera_ids)) for key, camera_ids in memberships.items()
+        }
+        for key in set(self.off_duty_memberships) | set(current_memberships):
+            previous = self.off_duty_memberships.get(key, ())
+            current = current_memberships.get(key, ())
+            if previous != current:
+                for camera_id in set(previous) | set(current):
+                    self.rules.for_camera(camera_id).reset_off_duty_confirmation(reset_review=True)
+        self.off_duty_memberships = current_memberships
         media_specs = [
             (camera.id, self.cipher.decrypt(camera.rtsp_url_encrypted), camera.enabled) for camera in cameras
         ]
@@ -435,34 +473,41 @@ class MonitoringRuntime:
             results.append({"mode": Mode.ON_DUTY.value, "status": analysis.status, "reason": analysis.reason})
 
         if Mode.OFF_DUTY.value in modes:
-            scheduled = mode_is_active(Mode.OFF_DUTY.value, schedule, now)
-            event_phase, event_start = state.absence_event_update(
-                occupied, scheduled, options.off_duty_seconds, now, options.shift_grace_seconds
+            scheduled, schedule_key, threshold_seconds = off_duty_schedule_context(
+                schedule, options.off_duty_seconds, now
             )
-            if self._mode_due(camera.id, Mode.OFF_DUTY.value, 15, force) or event_phase:
-                status = "confirmed" if event_phase == "threshold" else "none"
-                reason = ("排班内岗位区域持续无人，达到离岗阈值" if event_phase == "threshold"
-                          else "离岗事件已结束" if event_phase == "resolved" else (
-                    "岗位有人或尚未达到离岗阈值" if scheduled else "当前不在排班时段"
+            event_phase, event_start = state.absence_event_update(
+                occupied, scheduled, threshold_seconds, now, options.shift_grace_seconds,
+                schedule_key=schedule_key,
+            )
+            review_due = event_start is not None and state.off_duty_review_due(
+                now, OFF_DUTY_REVIEW_INTERVAL_SECONDS
+            )
+            if review_due:
+                evidence = annotate_detections(
+                    frame.jpeg, qualified_people, zone=geometry.post_roi,
+                    event_started_at=event_time(event_start, schedule),
+                    event_ended_at=event_time(now, schedule),
+                )
+                results.append(await self._review_off_duty(
+                    camera, evidence, event_start, now
                 ))
+            elif self._mode_due(camera.id, Mode.OFF_DUTY.value, 15, force) or event_phase:
+                reason = (
+                    "离岗事件已结束" if event_phase == "resolved"
+                    else "离岗事件持续中，已通过大模型终审" if state.absence_vlm_confirmed
+                    else "岗位区域持续无人，等待大模型再次终审" if state.absence_alerted
+                    else "岗位有人或尚未达到离岗阈值" if scheduled
+                    else "当前不在排班时段"
+                )
                 analysis = self.repository.add_analysis(
-                    camera_id=camera.id, mode=Mode.OFF_DUTY.value, status=status,
+                    camera_id=camera.id, mode=Mode.OFF_DUTY.value, status="none",
                     confidence=0.99, severity="normal", local_model=self.yolo.model_name,
                     model_version=self.yolo.model_name, reason=reason, latency_ms=0,
                 )
-                results.append({"mode": Mode.OFF_DUTY.value, "status": status, "reason": reason})
-                if event_phase == "threshold" and event_start:
-                    end = now
-                    evidence = annotate_detections(
-                        frame.jpeg, qualified_people, zone=geometry.post_roi,
-                        event_started_at=event_time(event_start, schedule),
-                        event_ended_at=event_time(end, schedule),
-                    )
-                    await self.alerts.create(
-                        camera, analysis, evidence, bypass_cooldown=True,
-                        event_phase=event_phase, event_started_at=event_start,
-                        event_ended_at=end,
-                    )
+                results.append({"mode": Mode.OFF_DUTY.value, "status": "none", "reason": reason})
+            if state.absence_vlm_confirmed:
+                await self._maybe_create_off_duty_alert(camera, None, now)
 
         if Mode.PEOPLE_FLOW.value in modes and mode_is_active(Mode.PEOPLE_FLOW.value, schedule, now):
             tracks = [
@@ -667,6 +712,187 @@ class MonitoringRuntime:
         self.last_mode_run[key] = now
         return True
 
+    @staticmethod
+    def _directory_key(camera: models.Camera) -> int | None:
+        return getattr(camera, "directory_id", None)
+
+    def _directory_mode_cameras(self, camera: models.Camera, mode: Mode) -> list[models.Camera]:
+        key = self._directory_key(camera)
+        return sorted([
+            item for item in self.repository.list_cameras()
+            if item.enabled
+            and self._directory_key(item) == key
+            and mode.value in from_json(item.modes_json, [])
+        ], key=lambda item: item.id)
+
+    async def _maybe_create_off_duty_alert(
+        self, camera: models.Camera, analysis: models.Analysis | None, now: datetime,
+    ) -> bool:
+        state = self.rules.for_camera(camera.id)
+        if not hasattr(self.repository, "list_cameras") or not hasattr(self.alerts, "create_group"):
+            if analysis is not None and state.absence_evidence_jpeg is not None:
+                await self.alerts.create(
+                    camera, analysis, state.absence_evidence_jpeg, bypass_cooldown=True,
+                    event_phase="threshold", event_started_at=state.absence_since,
+                    event_ended_at=now,
+                )
+                return True
+            return False
+        current_camera = self.repository.get_camera(camera.id) if hasattr(self.repository, "get_camera") else None
+        if current_camera is not None:
+            camera = current_camera
+        if not camera.enabled or Mode.OFF_DUTY.value not in from_json(camera.modes_json, []):
+            state.reset_off_duty_confirmation(reset_review=True)
+            return False
+        if not hasattr(self, "directory_locks"):
+            self.directory_locks = defaultdict(asyncio.Lock)
+        key = self._directory_key(camera)
+        async with self.directory_locks.setdefault(key, asyncio.Lock()):
+            members = self._directory_mode_cameras(camera, Mode.OFF_DUTY)
+            if not members:
+                return False
+            if not all(
+                getattr(item, "online", True)
+                and mode_is_active(
+                    Mode.OFF_DUTY.value,
+                    ScheduleSpec.model_validate(from_json(item.schedule_json, {})),
+                    now,
+                )
+                for item in members
+            ):
+                return False
+            member_states = [self.rules.for_camera(item.id) for item in members]
+            if not all(
+                item.absence_vlm_confirmed
+                and item.absence_evidence_jpeg is not None
+                and item.absence_since is not None
+                for item in member_states
+            ):
+                return False
+            confidence = min(item.absence_confidence for item in member_states)
+            event_started_at = max(item.absence_since for item in member_states if item.absence_since)
+            cooldown_seconds = max(
+                CameraOptions.model_validate(from_json(item.options_json, {})).alert_cooldown_seconds
+                for item in members
+            )
+            last_alert = self.repository.latest_directory_alert_time(key, Mode.OFF_DUTY.value)
+            if last_alert and last_alert.tzinfo is None:
+                last_alert = last_alert.replace(tzinfo=timezone.utc)
+            if last_alert and utc_now() - last_alert < timedelta(seconds=cooldown_seconds):
+                return False
+            reason = f"目录内 {len(members)} 个监控源均经大模型确认离岗"
+            anchor_analysis = analysis or self.repository.add_analysis(
+                camera_id=camera.id, mode=Mode.OFF_DUTY.value, status="confirmed",
+                confidence=confidence, reason=reason, severity="normal",
+                local_model=self.yolo.model_name, model_version=self.yolo.model_name,
+                latency_ms=0,
+            )
+            evidence_items = [{
+                "camera_id": member.id,
+                "camera_name": member.name,
+                "confidence": member_state.absence_confidence,
+                "jpeg": member_state.absence_evidence_jpeg,
+            } for member, member_state in zip(members, member_states)]
+            alert = await self.alerts.create_group(
+                camera, anchor_analysis, evidence_items, reason, confidence, cooldown_seconds,
+                event_phase="threshold", event_started_at=event_started_at,
+                event_ended_at=now,
+            )
+            if alert is None:
+                return False
+            for member_state in member_states:
+                member_state.reset_off_duty_confirmation()
+            return True
+
+    async def _create_phone_alert(
+        self, camera: models.Camera, analysis: models.Analysis, evidence: bytes,
+        phase: str, started_at: datetime, now: datetime,
+    ) -> None:
+        if not hasattr(self.repository, "list_cameras"):
+            await self.alerts.create(
+                camera, analysis, evidence, bypass_cooldown=True,
+                event_phase=phase, event_started_at=started_at, event_ended_at=now,
+            )
+            return
+        current_camera = self.repository.get_camera(camera.id) if hasattr(self.repository, "get_camera") else None
+        if current_camera is not None:
+            camera = current_camera
+        if not hasattr(self, "directory_locks"):
+            self.directory_locks = defaultdict(asyncio.Lock)
+        key = self._directory_key(camera)
+        async with self.directory_locks.setdefault(key, asyncio.Lock()):
+            members = self._directory_mode_cameras(camera, Mode.PHONE_USE)
+            cooldown_seconds = max(
+                (CameraOptions.model_validate(from_json(item.options_json, {})).alert_cooldown_seconds
+                 for item in members),
+                default=CameraOptions.model_validate(from_json(camera.options_json, {})).alert_cooldown_seconds,
+            )
+            await self.alerts.create(
+                camera, analysis, evidence,
+                event_phase=phase, event_started_at=started_at, event_ended_at=now,
+                directory_cooldown_seconds=cooldown_seconds,
+            )
+
+    async def _review_off_duty(
+        self,
+        camera: models.Camera,
+        evidence_jpeg: bytes,
+        event_started_at: datetime,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Use the VLM as a fail-closed final gate for an off-duty alert."""
+        state = self.rules.for_camera(camera.id)
+        if not self.vlm:
+            state.record_off_duty_review(False, now)
+            analysis = self.repository.add_analysis(
+                camera_id=camera.id, mode=Mode.OFF_DUTY.value, status="uncertain",
+                confidence=0, severity="normal", local_model=self.yolo.model_name,
+                model_version=self.yolo.model_name, reason="离岗终审大模型尚未配置",
+                error="model_not_configured", latency_ms=0,
+            )
+            return {"mode": Mode.OFF_DUTY.value, "status": analysis.status, "reason": analysis.reason}
+        try:
+            if isinstance(self.vlm, VisionModelClient):
+                response = await self.vlm.analyze_off_duty(
+                    evidence_jpeg, camera_id=camera.id, camera_name=camera.name
+                )
+            else:
+                response = await self.vlm.analyze_off_duty(evidence_jpeg)
+            result = response.results[Mode.OFF_DUTY]
+            VLM_CALLS.labels(mode=Mode.OFF_DUTY.value, status=result.status).inc()
+            confirmed = result.status == "confirmed"
+            analysis = self.repository.add_analysis(
+                camera_id=camera.id, mode=Mode.OFF_DUTY.value, status=result.status,
+                confidence=result.confidence, reason=result.reason, severity="normal",
+                local_model=self.yolo.model_name, model_version=self.yolo.model_name,
+                request_id=response.request_id, provider=response.provider, model=response.model,
+                usage_json=as_json(response.usage), latency_ms=response.latency_ms,
+            )
+            state.record_off_duty_review(
+                confirmed, now, evidence_jpeg if confirmed else None,
+                result.confidence if confirmed else 0.0,
+            )
+            if confirmed:
+                await self._maybe_create_off_duty_alert(camera, analysis, now)
+            return {
+                "mode": Mode.OFF_DUTY.value, "status": result.status,
+                "final_review": True, "reason": result.reason,
+            }
+        except VLMError as exc:
+            VLM_CALLS.labels(mode=Mode.OFF_DUTY.value, status="error").inc()
+            state.record_off_duty_review(False, now)
+            analysis = self.repository.add_analysis(
+                camera_id=camera.id, mode=Mode.OFF_DUTY.value, status="uncertain",
+                confidence=0, severity="normal", local_model=self.yolo.model_name,
+                model_version=self.yolo.model_name, reason="离岗终审大模型分析失败",
+                request_id=exc.request_id, error=f"{type(exc).__name__}: {str(exc)[:500]}",
+                latency_ms=0,
+            )
+            return {
+                "mode": Mode.OFF_DUTY.value, "status": analysis.status,
+                "final_review": True, "reason": analysis.reason, "error": str(exc),
+            }
+
     async def _behaviors(
         self,
         camera: models.Camera,
@@ -721,9 +947,8 @@ class MonitoringRuntime:
                             frame_jpeg, [], event_started_at=event_time(started_at, schedule),
                             event_ended_at=event_time(now, schedule),
                         )
-                        await self.alerts.create(
-                            camera, analysis, evidence, bypass_cooldown=True,
-                            event_phase=phase, event_started_at=started_at, event_ended_at=now,
+                        await self._create_phone_alert(
+                            camera, analysis, evidence, phase, started_at, now
                         )
                 elif confirmed:
                     await self.alerts.create(camera, analysis, frame_jpeg)

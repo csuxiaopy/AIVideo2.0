@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -193,13 +194,16 @@ def test_phone_use_inactive_schedule_resets_state_without_alert():
     runtime.rules = RuleStateRegistry()
     runtime.media = Media()
     runtime.yolo = SimpleNamespace(people=lambda _detections: [])
+    current = datetime.now(timezone.utc)
+    inactive_schedule = json.dumps({
+        "timezone": "UTC",
+        "weekly": {str(current.weekday()): [{"start": "00:00", "end": "23:59"}]},
+        "holidays": [current.date().isoformat()],
+    })
     camera = SimpleNamespace(
         id="camera-1", modes_json='["phone_use"]',
         options_json='{"phone_use_seconds":600}', geometry_json="{}",
-        schedule_json=(
-            '{"timezone":"UTC","weekly":'
-            '{"0":[],"1":[],"2":[],"3":[],"4":[],"5":[],"6":[]}}'
-        ),
+        schedule_json=inactive_schedule,
         intrusion_schedule_json="{}",
     )
     state = runtime.rules.for_camera(camera.id)

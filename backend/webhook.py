@@ -36,7 +36,7 @@ def build_alert_markdown(payload: dict[str, Any]) -> str:
         "### AI 视频监控告警",
         f"> 告警级别：<font color=\"{SEVERITY_COLORS.get(severity, 'comment')}\">"
         f"{_markdown_text(SEVERITY_LABELS.get(severity, severity))}</font>",
-        f"> 摄像头：{_markdown_text(payload.get('camera_name') or payload.get('camera_id') or '-')}",
+        f"> 告警名称：{_markdown_text(payload.get('alert_name') or payload.get('camera_name') or payload.get('camera_id') or '-')}",
         f"> 告警事件：{_markdown_text(MODE_LABELS.get(mode, mode or '-'))}",
         f"> 置信度：{_markdown_text(confidence_text)}",
         f"> 区域：{_markdown_text(payload.get('zone_name') or '-')}",
@@ -101,12 +101,14 @@ class WebhookClient:
         await self._post(url, {"msgtype": "markdown", "markdown": {"content": content}}, attempts)
 
     async def send(
-        self, url: str, payload: dict[str, Any], evidence_path: Path, attempts: int = 5
+        self, url: str, payload: dict[str, Any], evidence_paths: Path | list[Path], attempts: int = 5
     ) -> None:
         await self.send_markdown(url, build_alert_markdown(payload), attempts)
-        image_bytes = prepare_wecom_image(evidence_path)
-        await self._post(url, {"msgtype": "image", "image": {
-            "base64": base64.b64encode(image_bytes).decode("ascii"),
-            "md5": hashlib.md5(image_bytes, usedforsecurity=False).hexdigest(),
-        }}, attempts)
+        paths = [evidence_paths] if isinstance(evidence_paths, Path) else evidence_paths
+        for evidence_path in paths:
+            image_bytes = prepare_wecom_image(evidence_path)
+            await self._post(url, {"msgtype": "image", "image": {
+                "base64": base64.b64encode(image_bytes).decode("ascii"),
+                "md5": hashlib.md5(image_bytes, usedforsecurity=False).hexdigest(),
+            }}, attempts)
 

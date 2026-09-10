@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base, utc_now
 
@@ -65,6 +65,8 @@ class Alert(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     camera_id: Mapped[str] = mapped_column(ForeignKey("cameras.id", ondelete="CASCADE", onupdate="CASCADE"), index=True)
+    directory_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    alert_name: Mapped[str] = mapped_column(String(400), default="", nullable=False)
     analysis_id: Mapped[int | None] = mapped_column(ForeignKey("analyses.id", ondelete="SET NULL"))
     mode: Mapped[str] = mapped_column(String(40), index=True)
     status: Mapped[str] = mapped_column(String(30), default="confirmed")
@@ -81,6 +83,26 @@ class Alert(Base):
     event_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     event_ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    evidences: Mapped[list["AlertEvidence"]] = relationship(
+        back_populates="alert", cascade="all, delete-orphan", lazy="selectin",
+        order_by="AlertEvidence.sort_order",
+    )
+
+
+class AlertEvidence(Base):
+    __tablename__ = "alert_evidences"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    alert_id: Mapped[int] = mapped_column(
+        ForeignKey("alerts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    camera_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    camera_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    evidence_path: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    alert: Mapped["Alert"] = relationship(back_populates="evidences")
 
 
 class CaptchaChallenge(Base):

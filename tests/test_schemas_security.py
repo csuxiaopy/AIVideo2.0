@@ -11,6 +11,7 @@ from backend.schemas import (
     GeometrySpec,
     Mode,
     ModelSettingsUpdate,
+    OffDutyVLMResult,
     VLMResult,
 )
 from backend.security import SecretCipher, redact_rtsp, sign_webhook
@@ -66,6 +67,17 @@ def test_combined_vlm_result_rejects_duplicate_and_non_behavior_modes():
     with pytest.raises(ValueError):
         BehaviorVLMResult.model_validate({
             "results": [{"mode": "intrusion", "status": "none", "confidence": 0.9}]
+        })
+
+
+def test_off_duty_vlm_result_only_accepts_off_duty_mode():
+    result = OffDutyVLMResult.model_validate({
+        "result": {"mode": "off_duty", "status": "confirmed", "confidence": 0.98}
+    })
+    assert result.result.mode == Mode.OFF_DUTY
+    with pytest.raises(ValueError):
+        OffDutyVLMResult.model_validate({
+            "result": {"mode": "smoking", "status": "none", "confidence": 0.9}
         })
 
 

@@ -803,6 +803,8 @@ tr.severity-critical .event-type{color:var(--danger);background:rgba(255,77,90,.
 .capability-list em.ready{color:var(--success)}
 .capability-list em.experimental{color:var(--warning)}
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+.schedule-row{grid-template-columns:1fr 1fr 1fr auto;align-items:end;margin-top:10px}
+.schedule-row>button{margin-bottom:1px}
 .actions{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
 @media(max-width:1080px){
   .settings-grid{grid-template-columns:1fr}
@@ -892,10 +894,12 @@ tr.severity-critical .event-type{color:var(--danger);background:rgba(255,77,90,.
 
 /* ---------- 确认对话框 ---------- */
 .confirm-modal{width:min(430px,94vw)}
+.confirm-modal.off-duty-modal{width:min(760px,94vw)}
 .confirm-body{padding:20px 22px}
 .confirm-body p{margin:0;color:var(--text-secondary);font-size:12.5px;line-height:1.7}
 .confirm-body label{display:grid;gap:6px;margin-top:14px;color:var(--text-secondary);font-size:11px}
 .confirm-foot{display:flex;justify-content:flex-end;gap:9px;padding:14px 22px 18px}
+@media(max-width:700px){.schedule-row{grid-template-columns:1fr 1fr}.schedule-row>button{width:100%}}
 
 /* ---------- Toast ---------- */
 .toast{

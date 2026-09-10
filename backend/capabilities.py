@@ -35,7 +35,12 @@ def _weekday_schedule(shifts: list[dict[str, str]], days: range) -> dict[str, An
 
 
 OFF_DUTY_DEFAULT_SCHEDULE = _weekday_schedule(
-    [{"start": "09:00", "end": "11:00"}, {"start": "12:00", "end": "17:00"}], range(7)
+    [
+        {"start": "09:00", "end": "11:00", "off_duty_seconds": 300},
+        {"start": "12:00", "end": "13:30", "off_duty_seconds": 900},
+        {"start": "13:30", "end": "17:00", "off_duty_seconds": 300},
+    ],
+    range(7),
 )
 
 

@@ -11,9 +11,11 @@ def test_scene_templates_have_expected_modes_and_geometry():
     assert templates["workstation"]["required_geometry"] == ["post_roi"]
     assert templates["workstation"]["geometry"]["post_roi"] == [[0, 0], [1, 0], [1, 1], [0, 1]]
     assert templates["workstation"]["schedule"]["weekly"]["0"] == [
-        {"start": "09:00", "end": "11:00"},
-        {"start": "12:00", "end": "17:00"},
+        {"start": "09:00", "end": "11:00", "off_duty_seconds": 300},
+        {"start": "12:00", "end": "13:30", "off_duty_seconds": 900},
+        {"start": "13:30", "end": "17:00", "off_duty_seconds": 300},
     ]
+    assert templates["workstation"]["options"]["shift_grace_seconds"] == 0
     assert set(templates["workstation"]["schedule"]["weekly"]) == {str(day) for day in range(7)}
     assert templates["workstation"]["options"]["fire_confidence"] == 0.3
     assert templates["workstation"]["options"]["smoke_confidence"] == 0.3

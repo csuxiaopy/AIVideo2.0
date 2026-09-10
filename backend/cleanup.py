@@ -20,6 +20,13 @@ class CleanupService:
         self.settings = settings
         self.repository = repository
 
+    @staticmethod
+    def _evidence_paths(row: Any) -> list[str]:
+        paths = [item.evidence_path for item in (getattr(row, "evidences", []) or [])]
+        if row.evidence_path:
+            paths.append(row.evidence_path)
+        return list(dict.fromkeys(path for path in paths if path))
+
     def run(self, override_days: int | None = None, severity: str | None = None) -> dict[str, Any]:
         retention = self.repository.get_retention_settings()
         effective_days = override_days or retention.alert_retention_days
@@ -28,20 +35,19 @@ class CleanupService:
         root = self.settings.evidence_dir.resolve()
         evidence_removed = 0
         for row in rows:
-            if not row.evidence_path:
-                continue
-            try:
-                path = (self.settings.evidence_dir / row.evidence_path).resolve()
-                path.relative_to(root)
-            except ValueError:
-                logger.warning("Skip out-of-bounds evidence path: %s", row.evidence_path)
-                continue
-            try:
-                if path.is_file():
-                    os.remove(path)
-                    evidence_removed += 1
-            except OSError:
-                logger.warning("Failed to remove evidence file: %s", path)
+            for evidence_path in self._evidence_paths(row):
+                try:
+                    path = (self.settings.evidence_dir / evidence_path).resolve()
+                    path.relative_to(root)
+                except ValueError:
+                    logger.warning("Skip out-of-bounds evidence path: %s", evidence_path)
+                    continue
+                try:
+                    if path.is_file():
+                        os.remove(path)
+                        evidence_removed += 1
+                except OSError:
+                    logger.warning("Failed to remove evidence file: %s", path)
         deleted = self.repository.delete_alerts_before(cutoff, severity)
         log_cutoff = utc_now() - timedelta(days=getattr(retention, "log_retention_days", 30))
         log_deleted = (
@@ -64,20 +70,19 @@ class CleanupService:
         root = self.settings.evidence_dir.resolve()
         evidence_removed = 0
         for row in rows:
-            if not row.evidence_path:
-                continue
-            try:
-                path = (self.settings.evidence_dir / row.evidence_path).resolve()
-                path.relative_to(root)
-            except ValueError:
-                logger.warning("Skip out-of-bounds evidence path: %s", row.evidence_path)
-                continue
-            try:
-                if path.is_file():
-                    os.remove(path)
-                    evidence_removed += 1
-            except OSError:
-                logger.warning("Failed to remove evidence file: %s", path)
+            for evidence_path in self._evidence_paths(row):
+                try:
+                    path = (self.settings.evidence_dir / evidence_path).resolve()
+                    path.relative_to(root)
+                except ValueError:
+                    logger.warning("Skip out-of-bounds evidence path: %s", evidence_path)
+                    continue
+                try:
+                    if path.is_file():
+                        os.remove(path)
+                        evidence_removed += 1
+                except OSError:
+                    logger.warning("Failed to remove evidence file: %s", path)
         deleted_ids = self.repository.delete_alerts_by_ids(requested_ids)
         return {
             "deleted": len(deleted_ids),

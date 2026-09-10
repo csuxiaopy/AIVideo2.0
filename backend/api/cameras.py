@@ -262,7 +262,10 @@ async def configure_off_duty_schedules(payload: ScheduleSpec | None = None) -> d
     ]
     schedule = payload.model_dump(mode="json") if payload is not None else OFF_DUTY_DEFAULT_SCHEDULE
     updated = context.repository.update_cameras_schedule(camera_ids, as_json(schedule))
-    await context.require_runtime().sync_cameras()
+    runtime = context.require_runtime()
+    for camera_id in camera_ids:
+        runtime.rules.remove(camera_id)
+    await runtime.sync_cameras()
     return {"success": True, "updated": updated, "camera_ids": camera_ids}
 
 
@@ -312,7 +315,7 @@ async def patch_camera(camera_id: str, payload: CameraPatch) -> dict[str, Any]:
         updated = context.repository.rename_and_update_camera(camera_id, new_camera_id, values)
     else:
         updated = context.repository.update_camera(camera_id, values)
-        if payload.geometry is not None or payload.options is not None:
+        if payload.geometry is not None or payload.options is not None or payload.schedule is not None:
             runtime = context.require_runtime()
             runtime.rules.remove(camera_id)
             runtime.yolo.reset_tracker(camera_id)
@@ -352,9 +355,11 @@ async def update_geometry(camera_id: str, payload: GeometrySpec) -> dict[str, An
 @router.put("/cameras/{camera_id}/schedule", dependencies=[Depends(admin_user)])
 async def update_schedule(camera_id: str, payload: ScheduleSpec) -> dict[str, Any]:
     _camera_or_404(camera_id)
-    return _public(
-        context.repository.update_camera(camera_id, {"schedule_json": payload.model_dump_json()})
+    updated = context.repository.update_camera(
+        camera_id, {"schedule_json": payload.model_dump_json()}
     )
+    context.require_runtime().rules.remove(camera_id)
+    return _public(updated)
 
 
 @router.post("/cameras/{camera_id}/analyze", dependencies=[Depends(admin_user)])

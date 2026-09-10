@@ -45,10 +45,32 @@ def camera_public(
 def alert_public(alert: models.Alert, deliveries: list[models.WebhookDelivery] | None = None) -> dict[str, Any]:
     delivery_rows = deliveries or []
     delivered = sum(row.status == "delivered" for row in delivery_rows)
+    evidence_rows = list(getattr(alert, "evidences", []) or [])
+    evidences = [{
+        "camera_id": row.camera_id,
+        "camera_name": row.camera_name,
+        "confidence": row.confidence,
+        "evidence_path": row.evidence_path,
+        "evidence_url": f"/evidence/{row.evidence_path}",
+    } for row in evidence_rows]
+    if not evidences and alert.evidence_path:
+        evidences = [{
+            "camera_id": alert.camera_id,
+            "camera_name": getattr(alert, "source_camera_name", alert.camera_id),
+            "confidence": alert.confidence,
+            "evidence_path": alert.evidence_path,
+            "evidence_url": f"/evidence/{alert.evidence_path}",
+        }]
+    alert_name = alert.alert_name or getattr(alert, "camera_name", alert.camera_id)
     return {
         "id": alert.id,
         "camera_id": alert.camera_id,
-        "camera_name": getattr(alert, "camera_name", alert.camera_id),
+        "camera_name": alert_name,
+        "alert_name": alert_name,
+        "directory_id": alert.directory_id,
+        "source_cameras": [{
+            "camera_id": row["camera_id"], "camera_name": row["camera_name"]
+        } for row in evidences],
         "analysis_id": alert.analysis_id,
         "mode": alert.mode,
         "status": alert.status,
@@ -59,7 +81,9 @@ def alert_public(alert: models.Alert, deliveries: list[models.WebhookDelivery] |
         "model_version": alert.model_version,
         "reason": alert.reason,
         "evidence_path": alert.evidence_path,
-        "evidence_url": f"/evidence/{alert.evidence_path}" if alert.evidence_path else None,
+        "evidence_url": evidences[0]["evidence_url"] if evidences else None,
+        "evidence_urls": [row["evidence_url"] for row in evidences],
+        "evidences": evidences,
         "webhook_status": alert.webhook_status,
         "webhook_delivery": {
             "delivered": delivered,

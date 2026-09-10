@@ -138,7 +138,7 @@ JSON 字段示例：
   "schedule_json": {
     "timezone": "Asia/Shanghai",
     "weekly": {
-      "0": [{"start": "09:30", "end": "11:00"}, {"start": "14:00", "end": "17:00"}]
+      "0": [{"start": "09:00", "end": "11:00", "off_duty_seconds": 300}, {"start": "12:00", "end": "13:30", "off_duty_seconds": 900}, {"start": "13:30", "end": "17:00", "off_duty_seconds": 300}]
     },
     "holidays": ["2026-10-01"]
   },
@@ -146,7 +146,7 @@ JSON 字段示例：
     "health_interval_seconds": 5,
     "behavior_interval_seconds": 15,
     "off_duty_seconds": 300,
-    "shift_grace_seconds": 60,
+    "shift_grace_seconds": 0,
     "alert_cooldown_seconds": 300,
     "black_mean_max": 18.0,
     "black_std_max": 12.0,

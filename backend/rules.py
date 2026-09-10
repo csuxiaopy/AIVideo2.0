@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from backend.schemas import GeometrySpec, ScheduleSpec
+from backend.schemas import GeometrySpec, ScheduleSpec, Shift
 
 logger = logging.getLogger(__name__)
 
@@ -86,33 +86,41 @@ def box_intersects_polygon(
     )
 
 
-def is_scheduled(schedule: ScheduleSpec, now: datetime | None = None) -> bool:
+def active_schedule_shift(
+    schedule: ScheduleSpec, now: datetime | None = None,
+) -> tuple[str, Shift | None] | None:
+    """Return a stable active-period key and its shift, including overnight periods."""
     if not schedule.weekly:
-        return True
+        return ("always", None)
     zone = ZoneInfo(schedule.timezone)
     current = (now or datetime.now(timezone.utc)).astimezone(zone)
     if current.date().isoformat() in schedule.holidays:
-        return False
+        return None
     current_minutes = current.hour * 60 + current.minute
     weekday = current.weekday()
-    for shift in schedule.weekly.get(str(weekday), []):
+    for index, shift in enumerate(schedule.weekly.get(str(weekday), [])):
         start_h, start_m = map(int, shift.start.split(":"))
         end_h, end_m = map(int, shift.end.split(":"))
         start = start_h * 60 + start_m
         end = end_h * 60 + end_m
         if start <= end and start <= current_minutes < end:
-            return True
+            return (f"{current.date().isoformat()}:{index}:{shift.start}-{shift.end}", shift)
         if start > end and current_minutes >= start:
-            return True
+            return (f"{current.date().isoformat()}:{index}:{shift.start}-{shift.end}", shift)
     previous = (weekday - 1) % 7
-    for shift in schedule.weekly.get(str(previous), []):
+    previous_date = current.date() - timedelta(days=1)
+    for index, shift in enumerate(schedule.weekly.get(str(previous), [])):
         start_h, start_m = map(int, shift.start.split(":"))
         end_h, end_m = map(int, shift.end.split(":"))
         start = start_h * 60 + start_m
         end = end_h * 60 + end_m
         if start > end and current_minutes < end:
-            return True
-    return False
+            return (f"{previous_date.isoformat()}:{index}:{shift.start}-{shift.end}", shift)
+    return None
+
+
+def is_scheduled(schedule: ScheduleSpec, now: datetime | None = None) -> bool:
+    return active_schedule_shift(schedule, now) is not None
 
 
 @dataclass
@@ -145,6 +153,12 @@ class CameraRuleState:
     black_consecutive: int = 0
     absence_since: datetime | None = None
     absence_alerted: bool = False
+    absence_last_review_at: datetime | None = None
+    absence_vlm_confirmed: bool = False
+    absence_schedule_key: str | None = None
+    absence_confirmation_at: datetime | None = None
+    absence_evidence_jpeg: bytes | None = None
+    absence_confidence: float = 0.0
     phone_since: datetime | None = None
     phone_alerted: bool = False
     positive_windows: dict[str, deque[datetime]] = field(default_factory=lambda: defaultdict(deque))
@@ -171,10 +185,17 @@ class CameraRuleState:
         threshold_seconds: int,
         now: datetime,
         grace_seconds: int = 0,
+        schedule_key: str | None = None,
     ) -> bool:
-        if scheduled and not self.was_scheduled:
+        period_changed = scheduled and self.was_scheduled and schedule_key != self.absence_schedule_key
+        if period_changed:
+            self.absence_since = None
+            self.absence_alerted = False
+            self.reset_off_duty_confirmation(reset_review=True)
+        if scheduled and (not self.was_scheduled or period_changed):
             self.shift_started_at = now
         self.was_scheduled = scheduled
+        self.absence_schedule_key = schedule_key if scheduled else None
         if not scheduled or occupied:
             self.absence_since = None
             return False
@@ -188,11 +209,15 @@ class CameraRuleState:
 
     def absence_event_update(
         self, occupied: bool, scheduled: bool, threshold_seconds: int, now: datetime,
-        grace_seconds: int = 0,
+        grace_seconds: int = 0, schedule_key: str | None = None,
     ) -> tuple[str | None, datetime | None]:
         """Return threshold/resolved transitions and their event start time."""
         previous_start, previous_alerted = self.absence_since, self.absence_alerted
-        reached = self.absence_update(occupied, scheduled, threshold_seconds, now, grace_seconds)
+        reached = self.absence_update(
+            occupied, scheduled, threshold_seconds, now, grace_seconds, schedule_key
+        )
+        if self.absence_since is None:
+            self.reset_off_duty_confirmation(reset_review=True)
         if previous_alerted and self.absence_since is None:
             self.absence_alerted = False
             return "resolved", previous_start
@@ -200,6 +225,32 @@ class CameraRuleState:
             self.absence_alerted = True
             return "threshold", self.absence_since
         return None, self.absence_since
+
+    def off_duty_review_due(self, now: datetime, retry_seconds: int) -> bool:
+        """Return whether a thresholded absence needs VLM final review."""
+        if not self.absence_alerted or self.absence_vlm_confirmed:
+            return False
+        if self.absence_last_review_at is None:
+            return True
+        return (now - self.absence_last_review_at).total_seconds() >= retry_seconds
+
+    def record_off_duty_review(
+        self, confirmed: bool, now: datetime, evidence_jpeg: bytes | None = None,
+        confidence: float = 0.0,
+    ) -> None:
+        self.absence_last_review_at = now
+        self.absence_vlm_confirmed = confirmed
+        self.absence_confirmation_at = now if confirmed else None
+        self.absence_evidence_jpeg = evidence_jpeg if confirmed else None
+        self.absence_confidence = confidence if confirmed else 0.0
+
+    def reset_off_duty_confirmation(self, reset_review: bool = False) -> None:
+        self.absence_vlm_confirmed = False
+        self.absence_confirmation_at = None
+        self.absence_evidence_jpeg = None
+        self.absence_confidence = 0.0
+        if reset_review:
+            self.absence_last_review_at = None
 
     def phone_event_update(
         self, confirmed: bool, threshold_seconds: int, now: datetime,

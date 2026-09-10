@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
-const props = defineProps<{ src?: string | null; alt?: string }>()
+const props = defineProps<{ src?: string | string[] | null; alt?: string }>()
 
 const MIN_SCALE = 0.5
 const MAX_SCALE = 5
@@ -10,17 +10,22 @@ const open = ref(false)
 const scale = ref(1)
 const translateX = ref(0)
 const translateY = ref(0)
-const thumbError = ref(false)
+const thumbErrors = ref<string[]>([])
 const lightboxError = ref(false)
+const activeIndex = ref(0)
 const dragging = ref(false)
 let dragStartX = 0
 let dragStartY = 0
 let originX = 0
 let originY = 0
 
-const openLightbox = (event: MouseEvent) => {
+const sources = computed(() => (Array.isArray(props.src) ? props.src : props.src ? [props.src] : []).filter(Boolean))
+const currentSrc = computed(() => sources.value[activeIndex.value] || '')
+
+const openLightbox = (event: MouseEvent, index = 0) => {
   event.stopPropagation()
-  if (!props.src || thumbError.value) return
+  if (!sources.value[index] || thumbErrors.value.includes(sources.value[index])) return
+  activeIndex.value = index
   scale.value = 1
   translateX.value = 0
   translateY.value = 0
@@ -34,6 +39,8 @@ const close = () => {
 
 const onKeydown = (event: KeyboardEvent) => {
   if (event.key === 'Escape') close()
+  if (event.key === 'ArrowLeft') changeImage(-1)
+  if (event.key === 'ArrowRight') changeImage(1)
 }
 
 watch(open, (value) => {
@@ -59,6 +66,15 @@ const resetView = () => {
   scale.value = 1
   translateX.value = 0
   translateY.value = 0
+}
+const changeImage = (direction: number) => {
+  if (sources.value.length < 2) return
+  activeIndex.value = (activeIndex.value + direction + sources.value.length) % sources.value.length
+  lightboxError.value = false
+  resetView()
+}
+const markThumbError = (source: string) => {
+  if (!thumbErrors.value.includes(source)) thumbErrors.value = [...thumbErrors.value, source]
 }
 
 const onWheel = (event: WheelEvent) => {
@@ -87,38 +103,43 @@ const onPointerUp = () => {
 <template>
   <span class="evidence-cell" @click.stop>
     <button
-      v-if="src && !thumbError"
+      v-for="(source,index) in sources"
+      v-show="!thumbErrors.includes(source)"
+      :key="source"
       type="button"
       class="evidence-thumb"
       :aria-label="alt || '查看证据大图'"
       :title="alt || '点击查看大图'"
-      @click="openLightbox"
+      @click="openLightbox($event,index)"
     >
       <img
         class="evidence-thumb-img"
-        :src="src"
+        :src="source"
         :alt="alt || '告警证据'"
         loading="lazy"
         draggable="false"
-        @error="thumbError = true"
+        @error="markThumbError(source)"
       >
     </button>
-    <span v-else class="evidence-none">暂无证据</span>
+    <span v-if="!sources.length || thumbErrors.length===sources.length" class="evidence-none">暂无证据</span>
 
     <Teleport to="body">
       <div v-if="open" class="lightbox" role="dialog" aria-modal="true" @click.self="close">
         <div class="lightbox-toolbar">
           <span class="lightbox-scale">{{ Math.round(scale * 100) }}%</span>
+          <span v-if="sources.length>1" class="lightbox-count">{{activeIndex+1}} / {{sources.length}}</span>
+          <button v-if="sources.length>1" type="button" aria-label="上一张" @click.stop="changeImage(-1)">‹</button>
+          <button v-if="sources.length>1" type="button" aria-label="下一张" @click.stop="changeImage(1)">›</button>
           <button type="button" aria-label="放大" @click.stop="zoomBy(1.25)">＋</button>
           <button type="button" aria-label="缩小" @click.stop="zoomBy(1 / 1.25)">－</button>
           <button type="button" class="reset" @click.stop="resetView">100%</button>
           <button type="button" class="close" aria-label="关闭预览" @click.stop="close">×</button>
         </div>
         <img
-          v-if="src && !lightboxError"
+          v-if="currentSrc && !lightboxError"
           class="lightbox-img"
           :class="{ dragging }"
-          :src="src"
+          :src="currentSrc"
           :alt="alt || '告警证据'"
           :style="{ transform: `translate(${translateX}px, ${translateY}px) scale(${scale})` }"
           draggable="false"
@@ -140,9 +161,9 @@ const onPointerUp = () => {
 </template>
 
 <style scoped>
-.evidence-cell{display:inline-flex;align-items:center}
+.evidence-cell{display:flex;align-items:center;flex-wrap:wrap;gap:5px;min-width:80px}
 .evidence-thumb{
-  position:relative;display:block;width:80px;height:50px;padding:0;overflow:hidden;cursor:pointer;
+  position:relative;display:block;width:72px;height:48px;padding:0;overflow:hidden;cursor:pointer;
   background:rgba(4,18,32,.7);border:1px solid var(--border-dim);border-radius:5px;
   transition:transform .15s,box-shadow .15s,border-color .15s;
 }
@@ -169,6 +190,7 @@ const onPointerUp = () => {
 .lightbox-toolbar .reset{font-size:11px;font-variant-numeric:tabular-nums}
 .lightbox-toolbar .close{font-size:17px;padding:6px 12px;color:#fff;background:rgba(200,30,48,.85);border-color:rgba(255,77,90,.7)}
 .lightbox-scale{background:rgba(3,19,38,.92);color:var(--text-secondary);border:1px solid var(--border-dim);padding:6px 10px;border-radius:6px;font-size:11px;font-variant-numeric:tabular-nums;min-width:46px;text-align:center}
+.lightbox-count{color:var(--cyan);font:11px var(--font-mono);padding:0 5px;white-space:nowrap}
 .lightbox-error{background:rgba(38,10,18,.7);border:1px solid rgba(255,77,90,.5);color:#FF8B95;border-radius:9px;padding:22px 30px;text-align:center}
 .lightbox-error b{font-size:14px}
 .lightbox-error p{margin:8px 0 0;font-size:12px;color:var(--text-secondary)}

@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 
-from backend.schemas import BehaviorVLMResult, Mode, VLMResult
+from backend.schemas import BehaviorVLMResult, Mode, OffDutyVLMResult, VLMResult
 from backend.repository import as_json
 
 
@@ -25,6 +25,13 @@ phone_use 出现以下任一场景必须返回 none：工作人员前方有客�
 phone_use 无法确认人物是否为工作人员、物体是否为手机，或无法区分工作用途和娱乐用途时，必须返回 uncertain，不得返回 confirmed。
 smoking 只有明确看到持烟、吸食动作或可关联的烟雾证据才可 confirmed。
 不要把喝水、吃东西、摸脸、打电话或普通手部动作误判为抽烟。"""
+OFF_DUTY_SYSTEM_PROMPT = """你是监控离岗告警的最终复核器。系统已经通过排班、岗位区域和持续计时规则产生了一个候选事件；你只负责检查当前图片中红色半透明多边形标出的岗位区域是否确实无人，不要从单张图片推断持续时间。
+如果岗位区域清晰可见且没有任何人员占用，返回 confirmed。
+如果岗位区域内存在人员，包括只露出部分身体、坐着、弯腰或被物体部分遮挡，返回 none。
+如果画面模糊、黑屏、岗位区域被严重遮挡、区域标记不可辨认或证据不足，返回 uncertain。不要把区域外人员当作在岗人员。
+status 只能是 confirmed、suspected、uncertain、none。只输出 JSON 对象，格式为：
+{"result":{"mode":"off_duty","status":"...","confidence":0到1,"evidence_frames":[0],"reason":"简要说明画面证据","need_review":false}}。
+不得根据身份、服装或画面外信息推断；mode 必须是 off_duty。"""
 logger = logging.getLogger(__name__)
 
 
@@ -192,6 +199,110 @@ class VisionModelClient:
             latency_ms=latency_ms,
             provider="openai_compatible",
             model=model,
+        )
+
+    async def analyze_off_duty(
+        self, frame: bytes, camera_id: str | None = None, camera_name: str = "",
+    ) -> VLMResponse:
+        """Review one annotated threshold frame before an off-duty alert is emitted."""
+        model = self.economy_model
+        if not self.base_url or not self.api_key:
+            raise VLMError("视觉大模型尚未配置")
+        encoded = base64.b64encode(frame).decode("ascii")
+        body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": OFF_DUTY_SYSTEM_PROMPT},
+                {"role": "user", "content": [
+                    {
+                        "type": "text",
+                        "text": "这是达到本地持续离岗阈值时的当前帧。请仅复核红色岗位区域，并严格返回 JSON。",
+                    },
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}},
+                ]},
+            ],
+            "temperature": 0,
+            "max_completion_tokens": 300,
+            "response_format": {"type": "json_object"},
+        }
+        started = time.perf_counter()
+        common = {
+            "camera_id": camera_id, "camera_name": camera_name,
+            "modes_json": as_json([Mode.OFF_DUTY.value]),
+            "stage": "off_duty_final_review", "provider": "openai_compatible", "model": model,
+        }
+        try:
+            response = await self.client.post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                json=body,
+            )
+            if response.status_code == 429:
+                retry_after = min(30.0, float(response.headers.get("Retry-After", "1") or 1))
+                import asyncio
+
+                await asyncio.sleep(retry_after)
+                response = await self.client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                    json=body,
+                )
+        except httpx.HTTPError as exc:
+            latency_ms = int((time.perf_counter() - started) * 1000)
+            error_text = f"{type(exc).__name__}: {str(exc)[:1000]}"
+            self._log_call(**common, request_id=None, http_status=None, outcome="error",
+                           latency_ms=latency_ms, usage_json="{}", raw_response="",
+                           parsed_response_json="{}", error=error_text)
+            raise VLMError(f"大模型请求失败：{str(exc)[:300]}") from exc
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        request_id = response.headers.get("x-request-id") or response.headers.get("request-id")
+        raw_response = response.text
+        if response.is_error:
+            code = ""
+            message = response.text[:500]
+            try:
+                payload = response.json()
+                error = payload.get("error", payload)
+                if isinstance(error, dict):
+                    code = str(error.get("code", ""))
+                    message = str(error.get("message", message))[:500]
+            except ValueError:
+                pass
+            error_text = f"大模型 HTTP {response.status_code}" + (f" {code}" if code else "") + f"：{message}"
+            self._log_call(**common, request_id=request_id, http_status=response.status_code,
+                           outcome="error", latency_ms=latency_ms, usage_json="{}",
+                           raw_response=raw_response, parsed_response_json="{}", error=error_text[:2000])
+            raise VLMError(error_text, request_id)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            error_text = f"大模型返回格式错误：{str(exc)[:300]}"
+            self._log_call(**common, request_id=request_id, http_status=response.status_code,
+                           outcome="error", latency_ms=latency_ms, usage_json="{}",
+                           raw_response=raw_response, parsed_response_json="{}", error=error_text)
+            raise VLMError(error_text, request_id) from exc
+        request_id = payload.get("id") or request_id
+        try:
+            message = payload["choices"][0]["message"]["content"]
+            if isinstance(message, list):
+                message = "".join(str(item.get("text", "")) for item in message if isinstance(item, dict))
+            reviewed = OffDutyVLMResult.model_validate(extract_json(str(message)))
+        except Exception as exc:
+            error_text = f"大模型返回格式错误：{str(exc)[:300]}"
+            self._log_call(**common, request_id=request_id, http_status=response.status_code,
+                           outcome="error", latency_ms=latency_ms,
+                           usage_json=as_json(payload.get("usage", {})), raw_response=raw_response,
+                           parsed_response_json="{}", error=error_text)
+            raise VLMError(error_text, request_id) from exc
+        parsed = as_json(reviewed.model_dump(mode="json"))
+        self._log_call(**common, request_id=request_id, http_status=response.status_code,
+                       outcome="success", latency_ms=latency_ms,
+                       usage_json=as_json(payload.get("usage", {})), raw_response=raw_response,
+                       parsed_response_json=parsed, error=None)
+        return VLMResponse(
+            results={Mode.OFF_DUTY: reviewed.result}, request_id=request_id,
+            usage=payload.get("usage", {}), latency_ms=latency_ms,
+            provider="openai_compatible", model=model,
         )
 
     async def test(self) -> dict[str, Any]:

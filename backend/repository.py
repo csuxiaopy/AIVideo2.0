@@ -280,8 +280,10 @@ class Repository:
             session.refresh(row)
         return row
 
-    def add_alert(self, **values: Any) -> models.Alert:
+    def add_alert(self, evidences: list[dict[str, Any]] | None = None, **values: Any) -> models.Alert:
         row = models.Alert(**values)
+        for evidence in evidences or []:
+            row.evidences.append(models.AlertEvidence(**evidence))
         with session_scope() as session:
             session.add(row)
             session.flush()
@@ -312,6 +314,7 @@ class Repository:
             existing = list(session.scalars(select(models.Alert.id).where(models.Alert.id.in_(alert_ids))))
             if existing:
                 session.execute(delete(models.WebhookDelivery).where(models.WebhookDelivery.alert_id.in_(existing)))
+                session.execute(delete(models.AlertEvidence).where(models.AlertEvidence.alert_id.in_(existing)))
                 session.execute(delete(models.Alert).where(models.Alert.id.in_(existing)))
             existing_set = set(existing)
             return [alert_id for alert_id in alert_ids if alert_id in existing_set]
@@ -499,6 +502,19 @@ class Repository:
             return session.scalar(
                 select(models.Alert.created_at)
                 .where(models.Alert.camera_id == camera_id, models.Alert.mode == mode)
+                .order_by(desc(models.Alert.created_at))
+                .limit(1)
+            )
+
+    def latest_directory_alert_time(self, directory_id: int | None, mode: str) -> datetime | None:
+        with session_scope() as session:
+            directory_filter = (
+                models.Alert.directory_id.is_(None)
+                if directory_id is None else models.Alert.directory_id == directory_id
+            )
+            return session.scalar(
+                select(models.Alert.created_at)
+                .where(directory_filter, models.Alert.mode == mode)
                 .order_by(desc(models.Alert.created_at))
                 .limit(1)
             )
@@ -859,8 +875,14 @@ class Repository:
 
     def delete_alerts_before(self, cutoff: datetime, severity: str | None = None) -> int:
         with session_scope() as session:
-            stmt = delete(models.Alert).where(models.Alert.created_at < cutoff)
+            id_stmt = select(models.Alert.id).where(models.Alert.created_at < cutoff)
             if severity:
-                stmt = stmt.where(models.Alert.severity == severity)
+                id_stmt = id_stmt.where(models.Alert.severity == severity)
+            alert_ids = list(session.scalars(id_stmt))
+            if not alert_ids:
+                return 0
+            session.execute(delete(models.WebhookDelivery).where(models.WebhookDelivery.alert_id.in_(alert_ids)))
+            session.execute(delete(models.AlertEvidence).where(models.AlertEvidence.alert_id.in_(alert_ids)))
+            stmt = delete(models.Alert).where(models.Alert.id.in_(alert_ids))
             result = session.execute(stmt)
             return result.rowcount or 0

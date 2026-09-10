@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from backend.rules import (
     CameraRuleState,
+    active_schedule_shift,
     box_intersects_polygon,
     is_scheduled,
     point_in_polygon,
@@ -34,6 +35,55 @@ def test_cross_midnight_schedule():
     assert is_scheduled(schedule, datetime(2026, 8, 3, 23, 0, tzinfo=timezone.utc))
     assert is_scheduled(schedule, datetime(2026, 8, 4, 2, 0, tzinfo=timezone.utc))
     assert not is_scheduled(schedule, datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc))
+
+
+def test_schedule_rejects_overlaps_but_accepts_adjacent_periods():
+    adjacent = ScheduleSpec.model_validate({
+        "timezone": "UTC",
+        "weekly": {"0": [
+            {"start": "12:00", "end": "13:30", "off_duty_seconds": 900},
+            {"start": "13:30", "end": "17:00", "off_duty_seconds": 300},
+        ]},
+    })
+    assert len(adjacent.weekly["0"]) == 2
+
+    import pytest
+
+    with pytest.raises(ValueError, match="不能重叠"):
+        ScheduleSpec.model_validate({
+            "timezone": "UTC",
+            "weekly": {
+                "0": [{"start": "22:00", "end": "06:00"}],
+                "1": [{"start": "05:00", "end": "07:00"}],
+            },
+        })
+    with pytest.raises(ValueError, match="至少需要一个时段"):
+        ScheduleSpec.model_validate({"timezone": "UTC", "weekly": {"0": []}})
+
+
+def test_off_duty_period_change_resets_absence_timer():
+    schedule = ScheduleSpec.model_validate({
+        "timezone": "Asia/Shanghai",
+        "weekly": {"0": [
+            {"start": "12:00", "end": "13:30", "off_duty_seconds": 900},
+            {"start": "13:30", "end": "17:00", "off_duty_seconds": 300},
+        ]},
+    })
+    before_boundary = datetime.fromisoformat("2026-08-03T13:25:00+08:00")
+    boundary = datetime.fromisoformat("2026-08-03T13:30:00+08:00")
+    first = active_schedule_shift(schedule, before_boundary)
+    second = active_schedule_shift(schedule, boundary)
+    assert first and second and first[0] != second[0]
+    assert first[1] and first[1].off_duty_seconds == 900
+    assert second[1] and second[1].off_duty_seconds == 300
+
+    state = CameraRuleState()
+    state.absence_event_update(False, True, 900, before_boundary, schedule_key=first[0])
+    state.absence_event_update(False, True, 300, boundary, schedule_key=second[0])
+    assert state.absence_since == boundary
+    assert state.absence_event_update(
+        False, True, 300, boundary + timedelta(minutes=5), schedule_key=second[0]
+    )[0] == "threshold"
 
 
 def test_default_intrusion_schedule_crosses_midnight_and_stops_at_five():
@@ -98,6 +148,30 @@ def test_absence_event_emits_threshold_then_resolution_once():
     assert (phase, started) == ("threshold", now)
     assert state.absence_event_update(False, True, 600, now + timedelta(seconds=700))[0] is None
     assert state.absence_event_update(True, True, 600, now + timedelta(seconds=800)) == ("resolved", now)
+
+
+def test_off_duty_final_review_retries_and_resets_with_event():
+    state = CameraRuleState()
+    now = datetime.now(timezone.utc)
+    state.absence_event_update(False, True, 600, now)
+    state.absence_event_update(False, True, 600, now + timedelta(seconds=600))
+
+    first_review = now + timedelta(seconds=600)
+    assert state.off_duty_review_due(first_review, 1800)
+    state.record_off_duty_review(False, first_review)
+    assert not state.off_duty_review_due(first_review + timedelta(seconds=1799), 1800)
+    assert state.off_duty_review_due(first_review + timedelta(seconds=1800), 1800)
+
+    state.record_off_duty_review(True, first_review + timedelta(seconds=1800))
+    assert not state.off_duty_review_due(first_review + timedelta(hours=2), 1800)
+    state.absence_event_update(True, True, 600, first_review + timedelta(hours=3))
+    assert state.absence_last_review_at is None
+    assert not state.absence_vlm_confirmed
+
+    restarted = first_review + timedelta(hours=4)
+    state.absence_event_update(False, True, 600, restarted)
+    state.absence_event_update(False, True, 600, restarted + timedelta(seconds=600))
+    assert state.off_duty_review_due(restarted + timedelta(seconds=600), 1800)
 
 
 def test_same_id_can_reassociate_before_three_missing_cycles():

@@ -80,6 +80,29 @@ async def test_wecom_sends_markdown_then_image_with_required_digest(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_wecom_sends_every_directory_evidence_image(tmp_path):
+    ok, first = cv2.imencode(".jpg", np.zeros((8, 8, 3), dtype=np.uint8))
+    _, second = cv2.imencode(".jpg", np.full((8, 8, 3), 255, dtype=np.uint8))
+    assert ok
+    paths = [tmp_path / "first.jpg", tmp_path / "second.jpg"]
+    paths[0].write_bytes(first.tobytes())
+    paths[1].write_bytes(second.tobytes())
+    message_types = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        message_types.append(json.loads(request.content)["msgtype"])
+        return httpx.Response(200, json={"errcode": 0, "errmsg": "ok"})
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = WebhookClient(http_client)
+    try:
+        await client.send("https://example.com/hook", _payload(), paths, attempts=1)
+    finally:
+        await http_client.aclose()
+    assert message_types == ["markdown", "image", "image"]
+
+
+@pytest.mark.asyncio
 async def test_wecom_retries_nonzero_errcode():
     calls = 0
 
@@ -159,4 +182,3 @@ async def test_alert_delivery_records_image_failure(tmp_path):
     assert repository.delivery.status == "failed"
     assert "图片发送失败" in repository.delivery_error
     assert repository.alert_status == "failed"
-

@@ -36,9 +36,9 @@ class CameraOptions(BaseModel):
     yolo_fps: float = Field(default=0.1, ge=0.1, le=10)
     behavior_interval_seconds: int = Field(default=180, ge=60, le=3600)
     phone_use_seconds: int = Field(default=600, ge=60, le=86400)
-    off_duty_seconds: int = Field(default=600, ge=60, le=86400)
+    off_duty_seconds: int = Field(default=300, ge=60, le=86400)
     person_confidence: float = Field(default=0.30, ge=0, le=1)
-    shift_grace_seconds: int = Field(default=60, ge=0, le=3600)
+    shift_grace_seconds: int = Field(default=0, ge=0, le=3600)
     alert_cooldown_seconds: int = Field(default=300, ge=0, le=86400)
     black_mean_max: float = Field(default=18.0, ge=0, le=255)
     black_std_max: float = Field(default=12.0, ge=0, le=255)
@@ -80,6 +80,13 @@ class GeometrySpec(BaseModel):
 class Shift(BaseModel):
     start: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     end: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    off_duty_seconds: int | None = Field(default=None, ge=60, le=86400)
+
+    @model_validator(mode="after")
+    def different_endpoints(self):
+        if self.start == self.end:
+            raise ValueError("排班时段的开始和结束时间不能相同")
+        return self
 
 
 class ScheduleSpec(BaseModel):
@@ -93,6 +100,28 @@ class ScheduleSpec(BaseModel):
         allowed = {str(day) for day in range(7)}
         if set(value) - allowed:
             raise ValueError("排班星期必须使用0到6，0代表周一")
+        if any(not shifts for shifts in value.values()):
+            raise ValueError("已启用的排班日期至少需要一个时段")
+
+        # Compare intervals on a circular seven-day timeline. Copies shifted by
+        # one week make Sunday-to-Monday overlaps visible as well.
+        intervals: list[tuple[int, int]] = []
+        for day, shifts in value.items():
+            day_start = int(day) * 24 * 60
+            for shift in shifts:
+                start_h, start_m = map(int, shift.start.split(":"))
+                end_h, end_m = map(int, shift.end.split(":"))
+                start = day_start + start_h * 60 + start_m
+                end = day_start + end_h * 60 + end_m
+                if end <= start:
+                    end += 24 * 60
+                intervals.append((start, end))
+        week = 7 * 24 * 60
+        expanded = intervals + [(start + week, end + week) for start, end in intervals]
+        expanded.sort()
+        for (_, previous_end), (current_start, _) in zip(expanded, expanded[1:]):
+            if current_start < previous_end:
+                raise ValueError("排班时段不能重叠")
         return value
 
 
@@ -374,6 +403,16 @@ class BehaviorVLMResult(BaseModel):
             raise ValueError("联合行为检测只能返回玩手机或吸烟模式")
         if len(set(modes)) != len(modes):
             raise ValueError("联合行为检测不能返回重复模式")
+        return self
+
+
+class OffDutyVLMResult(BaseModel):
+    result: VLMResult
+
+    @model_validator(mode="after")
+    def valid_off_duty_mode(self):
+        if self.result.mode != Mode.OFF_DUTY:
+            raise ValueError("离岗终审只能返回离岗模式")
         return self
 
 
