@@ -147,7 +147,6 @@ class CameraRuleState:
     absence_alerted: bool = False
     phone_since: datetime | None = None
     phone_alerted: bool = False
-    pending_resolutions: dict[str, tuple[datetime, datetime]] = field(default_factory=dict)
     positive_windows: dict[str, deque[datetime]] = field(default_factory=lambda: defaultdict(deque))
     flow_tracks: dict[int, FlowTrackState] = field(default_factory=dict)
     flow_day: str | None = None

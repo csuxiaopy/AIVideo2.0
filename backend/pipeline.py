@@ -353,9 +353,7 @@ class MonitoringRuntime:
         if not frame:
             ended_at = utc_now()
             if Mode.PHONE_USE.value in modes:
-                phase, began_at = state.phone_event_update(False, options.phone_use_seconds, ended_at)
-                if phase == "resolved" and began_at:
-                    state.pending_resolutions[Mode.PHONE_USE.value] = (began_at, ended_at)
+                state.phone_event_update(False, options.phone_use_seconds, ended_at)
             if Mode.OFF_DUTY.value in modes:
                 state.absence_event_update(
                     False, False, options.off_duty_seconds, ended_at, options.shift_grace_seconds
@@ -372,25 +370,6 @@ class MonitoringRuntime:
         results: list[dict[str, Any]] = []
         now = utc_now()
         intrusion_active = is_scheduled(intrusion_schedule, now)
-
-        for pending_mode, (began_at, ended_at) in list(state.pending_resolutions.items()):
-            if pending_mode != Mode.PHONE_USE.value:
-                state.pending_resolutions.pop(pending_mode, None)
-                continue
-            reason = "玩手机事件因画面中断结束"
-            analysis = self.repository.add_analysis(
-                camera_id=camera.id, mode=pending_mode, status="uncertain", confidence=0,
-                severity="normal", reason=reason, latency_ms=0,
-            )
-            evidence = annotate_detections(
-                frame.jpeg, [],
-                event_started_at=event_time(began_at, schedule), event_ended_at=event_time(ended_at, schedule),
-            )
-            await self.alerts.create(
-                camera, analysis, evidence, bypass_cooldown=True, event_phase="resolved",
-                event_started_at=began_at, event_ended_at=ended_at,
-            )
-            state.pending_resolutions.pop(pending_mode, None)
 
         if Mode.BLACK_SCREEN.value in modes and self._mode_due(camera.id, Mode.BLACK_SCREEN.value, options.health_interval_seconds, force):
             black, metrics = is_black_screen(
@@ -510,20 +489,7 @@ class MonitoringRuntime:
 
         phone_active = Mode.PHONE_USE.value in modes and mode_is_active(Mode.PHONE_USE.value, schedule, now)
         if Mode.PHONE_USE.value in modes and not phone_active:
-            phase, began_at = state.phone_event_update(False, options.phone_use_seconds, now)
-            if phase == "resolved" and began_at:
-                analysis = self.repository.add_analysis(
-                    camera_id=camera.id, mode=Mode.PHONE_USE.value, status="none", confidence=0.99,
-                    severity="normal", reason="玩手机事件因排班结束", latency_ms=0,
-                )
-                evidence = annotate_detections(
-                    frame.jpeg, [], event_started_at=event_time(began_at, schedule),
-                    event_ended_at=event_time(now, schedule),
-                )
-                await self.alerts.create(
-                    camera, analysis, evidence, bypass_cooldown=True, event_phase="resolved",
-                    event_started_at=began_at, event_ended_at=now,
-                )
+            state.phone_event_update(False, options.phone_use_seconds, now)
 
         behavior_modes = {
             mode for mode in (Mode.PHONE_USE, Mode.SMOKING)
@@ -718,24 +684,14 @@ class MonitoringRuntime:
         state = self.rules.for_camera(camera.id)
         if not self.vlm:
             output = []
-            phone_phase, phone_start = (state.phone_event_update(False, options.phone_use_seconds, now)
-                                        if Mode.PHONE_USE in modes else (None, None))
+            if Mode.PHONE_USE in modes:
+                state.phone_event_update(False, options.phone_use_seconds, now)
             for mode in sorted(modes, key=lambda item: item.value):
                 analysis = self.repository.add_analysis(
                     camera_id=camera.id, mode=mode.value, status="uncertain", confidence=0,
                     severity="normal", reason="视觉大模型尚未配置",
                     error="model_not_configured", latency_ms=0,
                 )
-                if mode == Mode.PHONE_USE and phone_phase == "resolved" and phone_start:
-                    analysis.reason = "玩手机事件因模型未配置结束"
-                    evidence = annotate_detections(
-                        frame_jpeg, [], event_started_at=event_time(phone_start, schedule),
-                        event_ended_at=event_time(now, schedule),
-                    )
-                    await self.alerts.create(
-                        camera, analysis, evidence, bypass_cooldown=True, event_phase="resolved",
-                        event_started_at=phone_start, event_ended_at=now,
-                    )
                 output.append({"mode": mode.value, "status": "uncertain", "reason": analysis.reason})
             return output
         try:
@@ -759,9 +715,8 @@ class MonitoringRuntime:
                 confirmed = result.status == "confirmed"
                 if mode == Mode.PHONE_USE:
                     phase, started_at = state.phone_event_update(confirmed, options.phone_use_seconds, now)
-                    if phase and started_at:
-                        reason = "持续玩手机已达到判定时间" if phase == "threshold" else "玩手机事件已结束"
-                        analysis.reason = reason
+                    if phase == "threshold" and started_at:
+                        analysis.reason = "持续玩手机已达到判定时间"
                         evidence = annotate_detections(
                             frame_jpeg, [], event_started_at=event_time(started_at, schedule),
                             event_ended_at=event_time(now, schedule),
@@ -780,8 +735,8 @@ class MonitoringRuntime:
         except VLMError as exc:
             VLM_CALLS.labels(mode="behavior_combined", status="error").inc()
             output = []
-            phone_phase, phone_start = (state.phone_event_update(False, options.phone_use_seconds, now)
-                                        if Mode.PHONE_USE in modes else (None, None))
+            if Mode.PHONE_USE in modes:
+                state.phone_event_update(False, options.phone_use_seconds, now)
             for mode in sorted(modes, key=lambda item: item.value):
                 VLM_CALLS.labels(mode=mode.value, status="error").inc()
                 analysis = self.repository.add_analysis(
@@ -789,16 +744,6 @@ class MonitoringRuntime:
                     severity="normal", reason="视觉大模型分析失败", request_id=exc.request_id,
                     error=f"{type(exc).__name__}: {str(exc)[:500]}", latency_ms=0,
                 )
-                if mode == Mode.PHONE_USE and phone_phase == "resolved" and phone_start:
-                    analysis.reason = "玩手机事件因模型失败结束"
-                    evidence = annotate_detections(
-                        frame_jpeg, [], event_started_at=event_time(phone_start, schedule),
-                        event_ended_at=event_time(now, schedule),
-                    )
-                    await self.alerts.create(
-                        camera, analysis, evidence, bypass_cooldown=True, event_phase="resolved",
-                        event_started_at=phone_start, event_ended_at=now,
-                    )
                 output.append({"mode": mode.value, "status": "uncertain", "error": str(exc)})
             return output
 

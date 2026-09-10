@@ -19,7 +19,10 @@ SYSTEM_PROMPT = """你是监控视频行为检测器，只判断请求中指定�
 status 只能是 confirmed、suspected、uncertain、none。只输出 JSON 对象，格式为：
 {"results":[{"mode":"请求的模式","status":"...","confidence":0到1,"evidence_frames":[0],"reason":"...","need_review":false}]}。
 results 必须且只能包含请求中列出的每个模式一次，不能缺少、重复或增加模式。
-phone_use 只有明确看到人员正在操作或注视手机才可 confirmed；仅看到手机不能确认。
+phone_use 只判断图片中工作人员是否正在进行非工作性的玩手机行为。工作人员应根据其位于柜台、工位或岗位区域中的空间位置判断，不得根据服装或身份特征猜测。
+phone_use 只有清晰看到工作人员正在持续注视、滑动、点击手机，或进行其他明显的非工作性手机操作，并且不存在下述排除场景时，才可返回 confirmed；仅看到或拿着手机不能确认。
+phone_use 出现以下任一场景必须返回 none：工作人员前方有客户且正在接待或服务客户；工作人员一只手正在操作鼠标、另一只手拿手机；有明确工作场景证据表明手机用于扫码、登记、拍照、核对信息、联系客户或处理业务。
+phone_use 无法确认人物是否为工作人员、物体是否为手机，或无法区分工作用途和娱乐用途时，必须返回 uncertain，不得返回 confirmed。
 smoking 只有明确看到持烟、吸食动作或可关联的烟雾证据才可 confirmed。
 不要把喝水、吃东西、摸脸、打电话或普通手部动作误判为抽烟。"""
 logger = logging.getLogger(__name__)
