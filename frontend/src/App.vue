@@ -501,7 +501,7 @@ const chartTicks=computed(()=>[chartMax.value,Math.round(chartMax.value/2),0])
 const trendTime=(value?:string)=>value?new Date(value).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false}):'--:--'
 const podiumRows=(rows:TrafficCameraSummary[])=>([rows[1]||null,rows[0]||null,rows[2]||null])
 const flowRankingMax=computed(()=>Math.max(1,...trafficSummary.value.flow_ranking.map(row=>row.entered_today)))
-const flowRankWidth=(value:number)=>180+Math.round(value/flowRankingMax.value*240)
+const flowRankPercent=(value:number)=>Math.max(value>0?4:0,Math.round(value/flowRankingMax.value*100))
 const snapshotUrl=(camera:Camera)=>`/api/cameras/${encodeURIComponent(camera.id)}/snapshot?v=${encodeURIComponent(camera.last_frame_at||'none')}`
 
 const clearPreviewHeartbeat=()=>{
@@ -922,14 +922,15 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         </div>
 
         <section class="panel flow-ranking-panel">
-          <div class="section-head"><div><h2>今日人流排名</h2><span class="head-en">DAILY FLOW RANKING · ALL DIRECTORIES</span><p>全部目录按今日人流从高到低排列，矩形长度代表人流大小</p></div><small class="flow-ranking-count">共 {{trafficSummary.flow_ranking.length}} 个目录</small></div>
-          <div v-if="trafficSummary.flow_ranking.length" class="flow-ranking-scroll">
-            <article v-for="(row,index) in trafficSummary.flow_ranking" :key="row.directory_id??'unassigned'" class="flow-rank-card" :style="{width:`${flowRankWidth(row.entered_today)}px`}">
-              <span class="flow-rank-number">NO.{{index+1}}</span>
-              <div><b>{{row.directory_name}}</b><small>{{row.camera_count}} 个统计摄像头 · 当前 {{row.current_count}} 人</small></div>
+          <div class="section-head"><div><h2>今日人流排名</h2><span class="head-en">DAILY FLOW RANKING · ALL DIRECTORIES</span><p>按今日人流实时降序排列，统计条长度代表人流大小</p></div><small class="flow-ranking-count">共 {{trafficSummary.flow_ranking.length}} 个目录 · 自动更新</small></div>
+          <TransitionGroup v-if="trafficSummary.flow_ranking.length" name="flow-rank" tag="div" class="flow-ranking-list">
+            <article v-for="(row,index) in trafficSummary.flow_ranking" :key="row.directory_id??'unassigned'" class="flow-rank-row">
+              <span class="flow-rank-number">{{index+1}}</span>
+              <div class="flow-rank-name"><b>{{row.directory_name}}</b><small>{{row.camera_count}} 个统计摄像头 · 当前 {{row.current_count}} 人</small></div>
+              <div class="flow-rank-track"><span :style="{width:`${flowRankPercent(row.entered_today)}%`}"></span></div>
               <strong>{{row.entered_today}}<small>人次</small></strong>
             </article>
-          </div>
+          </TransitionGroup>
           <div v-else class="empty flow-ranking-empty"><b>NO DIRECTORY FLOW</b><p>今日暂无目录人流数据</p></div>
         </section>
 

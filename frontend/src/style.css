@@ -1044,11 +1044,16 @@ tr.severity-critical .event-type{color:var(--danger);background:rgba(255,77,90,.
 .place-2 .podium-step{height:82px}.place-3 .podium-step{height:58px;color:#ca8d66;border-color:rgba(202,141,102,.45)}
 .flow-ranking-panel{min-width:0;overflow:hidden}
 .flow-ranking-count{color:var(--text-muted);font:10px var(--font-mono);white-space:nowrap}
-.flow-ranking-scroll{display:flex;align-items:stretch;gap:12px;padding:4px 2px 12px;overflow-x:auto;overflow-y:hidden;scrollbar-color:var(--primary) rgba(0,140,255,.08);scrollbar-width:thin}
-.flow-rank-card{box-sizing:border-box;flex:0 0 auto;min-width:180px;max-width:420px;min-height:104px;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:13px;padding:16px;border:1px solid var(--border-primary);border-radius:8px;background:linear-gradient(100deg,rgba(0,140,255,.19),rgba(0,229,255,.045));box-shadow:inset 0 0 24px rgba(0,140,255,.035)}
-.flow-rank-number{align-self:start;color:var(--primary-light);font:700 10px var(--font-hud);letter-spacing:.8px}
-.flow-rank-card>div{min-width:0;display:grid;gap:6px}.flow-rank-card b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}.flow-rank-card div small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted);font-size:9px}
-.flow-rank-card>strong{color:var(--cyan);font:700 27px var(--font-hud);white-space:nowrap}.flow-rank-card>strong small{margin-left:4px;color:var(--text-muted);font:9px var(--font-sans)}
+.flow-ranking-list{display:grid;gap:9px;max-height:520px;padding:3px 6px 4px 2px;overflow-y:auto;scrollbar-color:var(--primary) rgba(0,140,255,.08);scrollbar-width:thin}
+.flow-rank-row{position:relative;display:grid;grid-template-columns:34px minmax(150px,220px) minmax(160px,1fr) 82px;align-items:center;gap:13px;min-height:60px;padding:8px 12px;border:1px solid var(--border-dim);border-radius:7px;background:rgba(0,140,255,.035);transition:border-color .2s,background .2s}
+.flow-rank-row:hover{border-color:var(--border-primary);background:rgba(0,140,255,.075)}
+.flow-rank-number{width:27px;height:27px;display:grid;place-items:center;color:var(--primary-light);font:700 12px var(--font-hud);border:1px solid var(--border-primary);border-radius:50%;background:rgba(0,140,255,.1)}
+.flow-rank-row:first-child .flow-rank-number{color:var(--warning);border-color:rgba(255,176,32,.6);background:rgba(255,176,32,.13)}
+.flow-rank-name{min-width:0;display:grid;gap:5px}.flow-rank-name b,.flow-rank-name small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.flow-rank-name b{font-size:12px}.flow-rank-name small{color:var(--text-muted);font-size:9px}
+.flow-rank-track{height:24px;overflow:hidden;border:1px solid rgba(0,140,255,.18);border-radius:4px;background:repeating-linear-gradient(90deg,rgba(91,137,175,.08) 0,rgba(91,137,175,.08) 1px,transparent 1px,transparent 10%)}
+.flow-rank-track>span{display:block;height:100%;min-width:0;border-radius:3px;background:linear-gradient(90deg,rgba(0,140,255,.58),var(--cyan));box-shadow:0 0 13px rgba(0,229,255,.24);transition:width .55s ease}
+.flow-rank-row>strong{color:var(--cyan);font:700 23px var(--font-hud);text-align:right;white-space:nowrap}.flow-rank-row>strong small{margin-left:4px;color:var(--text-muted);font:9px var(--font-sans)}
+.flow-rank-move{transition:transform .55s ease}.flow-rank-enter-active,.flow-rank-leave-active{transition:opacity .3s,transform .3s}.flow-rank-enter-from,.flow-rank-leave-to{opacity:0;transform:translateY(12px)}.flow-rank-leave-active{position:absolute;width:calc(100% - 8px)}
 .flow-ranking-empty{min-height:112px;display:grid;place-content:center;text-align:center}
 .traffic-camera-section>.section-head{margin:4px 2px 12px}.traffic-camera-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:14px}
 .traffic-camera-card{padding:16px}.traffic-camera-card header{display:flex;justify-content:space-between;align-items:start;gap:10px}.traffic-camera-card h3{margin:0 0 4px;font-size:14px}.traffic-camera-card code{color:var(--text-muted);font-size:9px}
