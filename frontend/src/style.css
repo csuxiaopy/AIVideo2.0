@@ -997,6 +997,27 @@ tr.severity-critical .event-type{color:var(--danger);background:rgba(255,77,90,.
 /* ---------- 人流经营看板 ---------- */
 .traffic-dashboard{display:grid;gap:18px}
 .traffic-dashboard>.metrics{margin-bottom:0}
+.traffic-monthly-panel{min-width:0;overflow:hidden}
+.traffic-monthly-head{align-items:end}
+.traffic-monthly-actions{display:flex;align-items:end;gap:9px;flex-wrap:wrap;justify-content:flex-end}
+.traffic-monthly-actions label{display:grid;gap:5px;color:var(--text-muted);font-size:9px;letter-spacing:.6px}
+.traffic-monthly-actions input{min-width:154px}
+.traffic-monthly-wrap{overflow:auto;border:1px solid var(--border-dim);border-radius:7px;transition:opacity .15s}
+.traffic-monthly-wrap.loading{opacity:.58}
+.traffic-monthly-table{width:max-content;min-width:100%;border-collapse:separate;border-spacing:0;font-variant-numeric:tabular-nums}
+.traffic-monthly-table th,.traffic-monthly-table td{min-width:58px;height:42px;padding:8px 10px;text-align:center;white-space:nowrap;border-right:1px solid rgba(28,62,102,.42);border-bottom:1px solid rgba(28,62,102,.42);font-size:11px}
+.traffic-monthly-table thead th{position:sticky;top:0;z-index:2;color:var(--cyan);background:#06213d;font:700 10px var(--font-hud);letter-spacing:.5px}
+.traffic-monthly-table th:first-child{position:sticky;left:0;z-index:3;min-width:170px;text-align:left;background:#071d34}
+.traffic-monthly-table thead th:first-child{z-index:4;background:#06213d}
+.traffic-monthly-table th:last-child,.traffic-monthly-table td:last-child{position:sticky;right:0;z-index:2;min-width:82px;font-weight:700;color:var(--cyan);background:#071f39;border-left:1px solid var(--border-primary)}
+.traffic-monthly-table thead th:last-child{z-index:4;background:#06213d}
+.traffic-monthly-table tbody tr:hover th,.traffic-monthly-table tbody tr:hover td{background-color:rgba(0,140,255,.08)}
+.traffic-monthly-table tfoot th,.traffic-monthly-table tfoot td{position:sticky;bottom:0;z-index:3;font-weight:700;color:var(--text-primary);background:#10314d;border-bottom:0;border-top:1px solid var(--border-highlight)}
+.traffic-monthly-table tfoot th:first-child{z-index:5;background:#10314d}
+.traffic-monthly-table tfoot td:last-child{z-index:5;color:var(--warning);background:#173950}
+.traffic-monthly-table tr>*:last-child{border-right:0}
+.traffic-monthly-empty{min-height:150px;display:grid;place-content:center;text-align:center}
+.traffic-monthly-empty button{justify-self:center}
 .traffic-trend-panel{padding-bottom:14px;overflow:hidden}
 .trend-current{display:grid;text-align:right}.trend-current small{color:var(--text-muted);font-size:9px;letter-spacing:.8px}.trend-current strong{font:700 30px var(--font-hud);color:var(--cyan)}
 .traffic-chart{position:relative;height:290px}.traffic-chart svg{width:100%;height:260px;overflow:visible}
@@ -1058,6 +1079,7 @@ tr.severity-critical .event-type{color:var(--danger);background:rgba(255,77,90,.
   .camera-searchbar{flex-wrap:wrap}.camera-searchbar label{flex-basis:100%}.camera-searchbar>span{margin-left:0}
 }
 @media(max-width:640px){
+  .traffic-monthly-head{align-items:stretch;flex-direction:column}.traffic-monthly-actions{justify-content:stretch}.traffic-monthly-actions label{flex:1}.traffic-monthly-actions input{width:100%}
   .traffic-chart{height:230px}.traffic-chart svg{height:200px}.chart-time-axis{left:30px;right:20px}
   .podium{height:235px;padding-left:0;padding-right:0}.podium-person b{font-size:10px}.podium-person strong{font-size:21px}
   .traffic-camera-grid{grid-template-columns:1fr}

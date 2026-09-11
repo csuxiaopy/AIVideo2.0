@@ -79,3 +79,19 @@ export interface TrafficSummary {
   current_ranking: TrafficCameraSummary[]
   flow_ranking: TrafficCameraSummary[]
 }
+
+export interface TrafficMonthlyRow {
+  directory_id: number | null
+  hall_name: string
+  values: Array<number | null>
+  monthly_total: number
+}
+
+export interface TrafficMonthlyReport {
+  month: string
+  timezone: 'Asia/Shanghai'
+  days: string[]
+  rows: TrafficMonthlyRow[]
+  daily_totals: Array<number | null>
+  grand_total: number
+}

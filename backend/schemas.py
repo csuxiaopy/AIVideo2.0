@@ -356,6 +356,10 @@ class DisplaySettingsUpdate(BaseModel):
     show_current_store_count: bool | None = None
 
 
+class TrafficMonthlyRequest(BaseModel):
+    month: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=128)

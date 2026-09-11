@@ -5,7 +5,7 @@ import TechIcon from './components/TechIcon.vue'
 import EvidencePreview from './components/EvidencePreview.vue'
 import CameraBasicFields from './components/CameraBasicFields.vue'
 import BatchCameraModal from './components/BatchCameraModal.vue'
-import type { Camera, CameraDirectory, DrawLayer, Mode, Point, SceneType, SceneTemplate, TrafficCameraSummary, TrafficSummary } from './types'
+import type { Camera, CameraDirectory, DrawLayer, Mode, Point, SceneType, SceneTemplate, TrafficCameraSummary, TrafficMonthlyReport, TrafficSummary } from './types'
 
 const modeInfo:Record<Mode,{name:string;icon:string;note:string}> = {
   off_duty:{name:'离岗检测',icon:'offDuty',note:'持续无人后由大模型终审'},
@@ -71,6 +71,14 @@ const expandedLogId=ref<number|null>(null)
 const logDetails=reactive<Record<string,any>>({})
 const emptyTrafficSummary = ():TrafficSummary => ({date:'',timezone:'Asia/Shanghai',total_flow_today:0,current_people:0,entered_today:0,exited_today:0,flow_camera_count:0,store_trend:[],cameras:[],current_ranking:[],flow_ranking:[]})
 const trafficSummary = ref<TrafficSummary>(emptyTrafficSummary())
+const shanghaiMonth=()=>new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Shanghai'}).slice(0,7)
+const currentTrafficMonth=shanghaiMonth()
+const trafficMonth=ref(currentTrafficMonth)
+const emptyTrafficMonthlyReport=(month=currentTrafficMonth):TrafficMonthlyReport=>({month,timezone:'Asia/Shanghai',days:[],rows:[],daily_totals:[],grand_total:0})
+const trafficMonthlyReport=ref<TrafficMonthlyReport>(emptyTrafficMonthlyReport())
+const trafficMonthlyLoading=ref(false)
+const trafficMonthlyError=ref('')
+let trafficMonthlySeq=0
 const templates = ref<SceneTemplate[]>([])
 const capabilities = ref<any[]>([])
 const toast = reactive({show:false,message:'',kind:'ok'})
@@ -143,6 +151,25 @@ const notify = (message:string, kind='ok') => {
   toast.message=message; toast.kind=kind; toast.show=true
   window.clearTimeout(toastTimer); toastTimer=window.setTimeout(()=>toast.show=false,4200)
 }
+const loadTrafficMonthly=async(silent=false)=>{
+  const month=trafficMonth.value
+  const seq=++trafficMonthlySeq
+  if(!silent)trafficMonthlyLoading.value=true
+  trafficMonthlyError.value=''
+  try{
+    const report=await api<TrafficMonthlyReport>(`/api/traffic/monthly?month=${encodeURIComponent(month)}`)
+    if(seq===trafficMonthlySeq)trafficMonthlyReport.value=report
+  }catch(error:any){
+    if(seq===trafficMonthlySeq){trafficMonthlyError.value=error.message;if(!silent)notify(`月度人流加载失败：${error.message}`,'error')}
+  }finally{if(seq===trafficMonthlySeq)trafficMonthlyLoading.value=false}
+}
+const exportTrafficMonthly=async()=>{
+  try{
+    await download('/api/traffic/monthly/export',{month:trafficMonth.value},`人流月报-${trafficMonth.value}.xlsx`)
+    notify(`${trafficMonth.value} 人流月报已导出`)
+  }catch(error:any){notify(error.message,'error')}
+}
+watch(trafficMonth,()=>{trafficMonthlyReport.value=emptyTrafficMonthlyReport(trafficMonth.value);void loadTrafficMonthly()})
 /* ---------- 告警筛选（服务端 mode/severity 参数，AND 组合） ---------- */
 const severityLevels = [
   {value:'normal',label:'NORMAL'},{value:'high',label:'HIGH'},{value:'critical',label:'CRITICAL'},
@@ -188,6 +215,7 @@ const loadAll = async (silent=false) => {
     Object.assign(displaySettings,ds)
     if(isAdmin.value){const [st,cp]=await Promise.all([api('/api/scene-templates'),api('/api/capabilities')]);templates.value=st;capabilities.value=cp}
     if(active.value==='traffic'&&!displaySettings.show_traffic_report) setTab('dashboard')
+    if(active.value==='traffic'&&trafficMonth.value===currentTrafficMonth) void loadTrafficMonthly(true)
     if(hasAlertFilter.value) void applyAlertFilter()
   } catch (error:any) { if(!silent) notify(error.message,'error') }
   finally { loading.value=false }
@@ -428,7 +456,7 @@ const toggleLogDetail=async(row:any)=>{if(expandedLogId.value===row.id){expanded
 const exportLogs=async()=>{try{await download(`/api/logs/${logCategory.value}/export`,activeLogFilters(),`${logCategory.value}-logs.csv`);notify('日志已导出')}catch(error:any){notify(error.message,'error')}}
 const logResultText=(row:any)=>row.outcome==='success'?'成功':row.outcome==='failure'||row.outcome==='error'?'失败':row.status||row.outcome
 const prettyLog=(value:any)=>JSON.stringify(value,null,2)
-const setTab=(name:string)=>{if(!visibleTabs.value.some(tab=>tab.key===name))name='dashboard';if(name==='traffic'&&!displaySettings.show_traffic_report){notify('人流报表已在系统配置中关闭','error');name='dashboard'}active.value=name;location.hash=name;if(name==='settings')loadSettings();if(name==='webhooks')loadWebhooks();if(name==='users')loadUsers();if(name==='logs')loadLogs(logData.page)}
+const setTab=(name:string)=>{if(!visibleTabs.value.some(tab=>tab.key===name))name='dashboard';if(name==='traffic'&&!displaySettings.show_traffic_report){notify('人流报表已在系统配置中关闭','error');name='dashboard'}active.value=name;location.hash=name;if(name==='traffic')void loadTrafficMonthly();if(name==='settings')loadSettings();if(name==='webhooks')loadWebhooks();if(name==='users')loadUsers();if(name==='logs')loadLogs(logData.page)}
 const focusDashboardCamera=async(row:TrafficCameraSummary|null)=>{
   if(!row)return
   const camera=cameras.value.find(item=>item.id===row.camera_id)
@@ -851,6 +879,29 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
           <article><span>识别方式</span><span class="metric-en">COUNTING MODE</span><strong>TRACK</strong><em>稳定人员轨迹自动计数</em></article>
           <article><span>统计摄像头</span><span class="metric-en">FLOW CAMERAS</span><strong>{{trafficSummary.flow_camera_count}}</strong><em>启用人员计数</em></article>
         </div>
+        <section class="panel traffic-monthly-panel">
+          <div class="section-head traffic-monthly-head">
+            <div><h2>月度人流统计</h2><span class="head-en">MONTHLY PEOPLE FLOW · {{trafficMonth}}</span><p>按营业厅汇总每日进入画面人次，空白表示当天没有统计记录</p></div>
+            <div class="traffic-monthly-actions">
+              <label>选择月份<input v-model="trafficMonth" type="month" :max="currentTrafficMonth"></label>
+              <button class="ghost" :disabled="trafficMonthlyLoading" @click="exportTrafficMonthly"><TechIcon name="database" :size="13"/>导出 Excel</button>
+            </div>
+          </div>
+          <div v-if="trafficMonthlyLoading&&!trafficMonthlyReport.days.length" class="empty traffic-monthly-empty"><b>LOADING MONTHLY REPORT</b><p>正在加载月度人流数据</p></div>
+          <div v-else-if="trafficMonthlyError" class="empty traffic-monthly-empty"><b>MONTHLY REPORT ERROR</b><p>{{trafficMonthlyError}}</p><button class="ghost" @click="loadTrafficMonthly()">重新加载</button></div>
+          <div v-else-if="!trafficMonthlyReport.rows.length" class="empty traffic-monthly-empty"><b>NO FLOW CAMERA</b><p>当前没有启用人员计数的营业厅</p></div>
+          <div v-else class="traffic-monthly-wrap" :class="{loading:trafficMonthlyLoading}">
+            <table class="traffic-monthly-table">
+              <thead><tr><th>营业厅</th><th v-for="day in trafficMonthlyReport.days" :key="day">{{Number(day.slice(-2))}}日</th><th>月合计</th></tr></thead>
+              <tbody>
+                <tr v-for="row in trafficMonthlyReport.rows" :key="row.directory_id??'unassigned'">
+                  <th>{{row.hall_name}}</th><td v-for="(value,index) in row.values" :key="trafficMonthlyReport.days[index]">{{value??''}}</td><td>{{row.monthly_total}}</td>
+                </tr>
+              </tbody>
+              <tfoot><tr><th>当月人流总计</th><td v-for="(value,index) in trafficMonthlyReport.daily_totals" :key="trafficMonthlyReport.days[index]">{{value??''}}</td><td>{{trafficMonthlyReport.grand_total}}</td></tr></tfoot>
+            </table>
+          </div>
+        </section>
         <section class="panel traffic-trend-panel">
           <div class="section-head"><div><h2>今日画面人数趋势</h2><span class="head-en">ON-SCREEN TREND · {{trafficSummary.date}}</span></div><div class="trend-current"><small>当前人数</small><strong>{{trafficSummary.current_people}}</strong></div></div>
           <div v-if="chartPoints.length" class="traffic-chart">

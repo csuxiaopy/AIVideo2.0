@@ -27,6 +27,7 @@ def _operation(method: str, path: str) -> tuple[str, str, str]:
         "/api/cameras/batch-move": "批量移动摄像头",
         "/api/cameras/batch-off-duty-schedule": "批量配置离岗排班",
         "/api/alerts/export": "导出告警",
+        "/api/traffic/monthly/export": "导出人流月报",
         "/api/alerts/webhook-send": "发送告警 Webhook",
     }
     if path in special:

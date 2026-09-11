@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date as date_type
+from datetime import date as date_type, datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -11,12 +11,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSock
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as ExcelImage
-from openpyxl.styles import Alignment, Font
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from backend.api.context import context
 from backend.api.presenters import alert_public, analysis_public
-from backend.schemas import AlertBatchDelete, AlertExportRequest, WebhookManualSend
+from backend.schemas import (
+    AlertBatchDelete,
+    AlertExportRequest,
+    TrafficMonthlyRequest,
+    WebhookManualSend,
+)
 from backend.capabilities import CORE_CAPABILITIES
 from backend.auth import admin_user, current_user, websocket_user
 
@@ -181,6 +186,100 @@ async def traffic(
 @router.get("/api/traffic/summary", dependencies=[Depends(current_user)])
 async def traffic_summary() -> dict[str, Any]:
     return context.repository.traffic_summary()
+
+
+def _month_start(month: str) -> date_type:
+    try:
+        parsed = date_type.fromisoformat(f"{month}-01")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="月份格式必须为 YYYY-MM") from exc
+    if len(month) != 7 or parsed.strftime("%Y-%m") != month:
+        raise HTTPException(status_code=422, detail="月份格式必须为 YYYY-MM")
+    current = (
+        datetime.now(timezone.utc)
+        .astimezone(ZoneInfo("Asia/Shanghai"))
+        .date()
+        .replace(day=1)
+    )
+    if parsed > current:
+        raise HTTPException(status_code=422, detail="不能查询未来月份")
+    return parsed
+
+
+@router.get("/api/traffic/monthly", dependencies=[Depends(current_user)])
+async def traffic_monthly(
+    month: str = Query(pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+) -> dict[str, Any]:
+    return context.repository.traffic_monthly(_month_start(month))
+
+
+def _traffic_monthly_workbook(report: dict[str, Any]) -> BytesIO:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "人流月报"
+    headers = [
+        "营业厅",
+        *[f"{index}日" for index in range(1, len(report["days"]) + 1)],
+        "月合计",
+    ]
+    sheet.append(headers)
+    for row in report["rows"]:
+        sheet.append([row["hall_name"], *row["values"], row["monthly_total"]])
+    sheet.append(["当月人流总计", *report["daily_totals"], report["grand_total"]])
+
+    header_fill = PatternFill("solid", fgColor="0B5FA5")
+    total_fill = PatternFill("solid", fgColor="D9EAF7")
+    border = Border(
+        left=Side(style="thin", color="A8C4D8"),
+        right=Side(style="thin", color="A8C4D8"),
+        top=Side(style="thin", color="A8C4D8"),
+        bottom=Side(style="thin", color="A8C4D8"),
+    )
+    for cell in sheet[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    total_row = sheet.max_row
+    total_column = sheet.max_column
+    for row in sheet.iter_rows():
+        for cell in row:
+            cell.border = border
+            if cell.row > 1:
+                cell.alignment = Alignment(
+                    horizontal="left" if cell.column == 1 else "center",
+                    vertical="center",
+                )
+    for cell in sheet[total_row]:
+        cell.font = Font(bold=True)
+        cell.fill = total_fill
+    for cell in sheet.iter_cols(min_col=total_column, max_col=total_column):
+        for item in cell:
+            item.font = Font(bold=True, color="FFFFFF" if item.row == 1 else "000000")
+            if item.row > 1:
+                item.fill = total_fill
+    sheet.freeze_panes = "B2"
+    sheet.auto_filter.ref = sheet.dimensions
+    sheet.column_dimensions["A"].width = 24
+    for index in range(2, total_column):
+        sheet.column_dimensions[get_column_letter(index)].width = 7
+    sheet.column_dimensions[get_column_letter(total_column)].width = 12
+    sheet.row_dimensions[1].height = 24
+    output = BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return output
+
+
+@router.post("/api/traffic/monthly/export", dependencies=[Depends(current_user)])
+async def export_traffic_monthly(payload: TrafficMonthlyRequest) -> StreamingResponse:
+    month = _month_start(payload.month)
+    report = context.repository.traffic_monthly(month)
+    workbook = await asyncio.to_thread(_traffic_monthly_workbook, report)
+    return StreamingResponse(
+        workbook,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="traffic-{payload.month}.xlsx"'},
+    )
 
 
 @router.get("/api/runtime/workers", dependencies=[Depends(admin_user)])

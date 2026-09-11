@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import calendar
 import json
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import case, delete, desc, func, select, update
+from sqlalchemy import Date, case, cast, delete, desc, func, select, update
 from backend import models
 from backend.database import session_scope, utc_now
 
@@ -596,6 +597,111 @@ class Repository:
             if camera_id:
                 stmt = stmt.where(models.TrafficAggregate.camera_id == camera_id)
             return list(session.scalars(stmt))
+
+    def traffic_monthly(self, month: date, now: datetime | None = None) -> dict[str, Any]:
+        """Aggregate entered traffic by current camera directory and Shanghai calendar day."""
+        zone = ZoneInfo("Asia/Shanghai")
+        current_time = (now or utc_now()).astimezone(zone)
+        local_start = datetime(month.year, month.month, 1, tzinfo=zone)
+        if month.month == 12:
+            local_end = datetime(month.year + 1, 1, 1, tzinfo=zone)
+        else:
+            local_end = datetime(month.year, month.month + 1, 1, tzinfo=zone)
+        start = local_start.astimezone(timezone.utc)
+        end = local_end.astimezone(timezone.utc)
+        day_count = calendar.monthrange(month.year, month.month)[1]
+        days = [date(month.year, month.month, day).isoformat() for day in range(1, day_count + 1)]
+
+        with session_scope() as session:
+            flow_cameras = [
+                camera
+                for camera in session.scalars(select(models.Camera).order_by(models.Camera.id))
+                if "people_flow" in from_json(camera.modes_json, [])
+            ]
+            camera_ids = [camera.id for camera in flow_cameras]
+            directory_ids = {
+                camera.directory_id for camera in flow_cameras if camera.directory_id is not None
+            }
+            directory_names = {
+                directory.id: directory.name
+                for directory in session.scalars(
+                    select(models.CameraDirectory).where(
+                        models.CameraDirectory.id.in_(directory_ids)
+                    )
+                )
+            } if directory_ids else {}
+
+            aggregates: list[Any] = []
+            if camera_ids:
+                local_day = cast(
+                    func.timezone("Asia/Shanghai", models.TrafficAggregate.bucket_start), Date
+                )
+                aggregates = list(session.execute(
+                    select(
+                        models.Camera.directory_id,
+                        local_day.label("local_day"),
+                        func.sum(models.TrafficAggregate.entered).label("entered"),
+                    )
+                    .join(
+                        models.TrafficAggregate,
+                        models.TrafficAggregate.camera_id == models.Camera.id,
+                    )
+                    .where(
+                        models.TrafficAggregate.camera_id.in_(camera_ids),
+                        models.TrafficAggregate.bucket_start >= start,
+                        models.TrafficAggregate.bucket_start < end,
+                    )
+                    .group_by(models.Camera.directory_id, local_day)
+                ).all())
+
+        hall_keys = set(camera.directory_id for camera in flow_cameras)
+        hall_names = {
+            directory_id: (
+                f"{directory_names[directory_id]}营业厅"
+                if directory_id is not None else "未分组营业厅"
+            )
+            for directory_id in hall_keys
+        }
+        values_by_hall = {
+            directory_id: [None] * day_count for directory_id in hall_keys
+        }
+        for directory_id, local_day, entered in aggregates:
+            values_by_hall[directory_id][local_day.day - 1] = int(entered or 0)
+
+        is_current_month = (
+            month.year == current_time.year and month.month == current_time.month
+        )
+        if is_current_month:
+            for values in values_by_hall.values():
+                for index in range(current_time.day, day_count):
+                    values[index] = None
+
+        ordered_halls = sorted(
+            hall_keys,
+            key=lambda directory_id: (directory_id is None, hall_names[directory_id]),
+        )
+        rows = [
+            {
+                "directory_id": directory_id,
+                "hall_name": hall_names[directory_id],
+                "values": values_by_hall[directory_id],
+                "monthly_total": int(sum(value or 0 for value in values_by_hall[directory_id])),
+            }
+            for directory_id in ordered_halls
+        ]
+        daily_totals: list[int | None] = []
+        for index in range(day_count):
+            present = [row["values"][index] for row in rows if row["values"][index] is not None]
+            daily_totals.append(int(sum(present)) if present else None)
+        grand_total = int(sum(row["monthly_total"] for row in rows))
+        return {
+            "month": month.strftime("%Y-%m"),
+            "timezone": str(zone),
+            "days": days,
+            "rows": rows,
+            "daily_totals": daily_totals,
+            "grand_total": grand_total,
+        }
 
     def traffic_summary(self, now: datetime | None = None) -> dict[str, Any]:
         """Build the business-day people-flow dashboard in Asia/Shanghai."""
