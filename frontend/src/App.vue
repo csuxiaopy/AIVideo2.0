@@ -81,6 +81,7 @@ const previewLoading = ref(false)
 const previewError = ref('')
 const editor = ref<Camera|null>(null)
 const batchModal = ref(false)
+const cameraScheduleModal = ref(false)
 const offDutyScheduleModal = ref(false)
 const offDutyScheduleSaving = ref(false)
 const defaultOffDutyShifts = () => ([
@@ -88,6 +89,10 @@ const defaultOffDutyShifts = () => ([
   {start:'12:00',end:'13:30',off_duty_seconds:900},
   {start:'13:30',end:'17:00',off_duty_seconds:300},
 ])
+const cameraScheduleDraft = reactive({
+  days:[] as string[],
+  shifts:defaultOffDutyShifts(),
+})
 const offDutyScheduleForm = reactive({
   days:['0','1','2','3','4','5','6'] as string[],
   shifts:defaultOffDutyShifts(),
@@ -230,7 +235,7 @@ const analyze = async (camera:Camera) => {
   try{notify(`${camera.name} 已提交即时分析`);await api(`/api/cameras/${camera.id}/analyze`,{method:'POST'});await loadAll(true)}catch(error:any){notify(error.message,'error')}
 }
 const batchCreated=async(count:number)=>{batchModal.value=false;notify(`成功添加 ${count} 个视频源`);await loadAll(true)}
-const configureOffDutySchedules=async()=>{
+const configureOffDutySchedules=()=>{
   const count=cameras.value.filter(camera=>camera.modes.includes('off_duty')).length
   if(!count){notify('当前没有启用离岗检测的摄像头','error');return}
   offDutyScheduleModal.value=true
@@ -251,18 +256,15 @@ const saveOffDutySchedules=async()=>{
 }
 
 const editForm = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'custom',modes:[],geometry:defaultGeometry('custom'),schedule:emptySchedule(),intrusion_schedule:defaultIntrusionSchedule(),directory_id:null,options:defaultOptions(),zone_name:'禁区',frame_interval_seconds:60})
-const scheduleShifts = ref<any[]>(defaultOffDutyShifts())
 const openEditor = (camera:Camera) => {
   editor.value=camera
   Object.assign(editForm,{id:camera.id,name:camera.name,rtsp_url:'',enabled:camera.enabled,scene_type:camera.scene_type,modes:[...camera.modes],geometry:deepCopy(camera.geometry||defaultGeometry('custom')),schedule:deepCopy(camera.schedule||emptySchedule()),intrusion_schedule:deepCopy(camera.intrusion_schedule||defaultIntrusionSchedule()),directory_id:camera.directory_id??null,options:{...defaultOptions(),...(camera.options||{})},zone_name:camera.geometry?.intrusion_zone?.name||'禁区',frame_interval_seconds:camera.frame_interval_seconds||60})
-  const firstDay=Object.keys(editForm.schedule.weekly||{})[0]
-  scheduleShifts.value=deepCopy(firstDay?editForm.schedule.weekly[firstDay]:defaultOffDutyShifts()).map((shift:any)=>({...shift,off_duty_seconds:shift.off_duty_seconds??editForm.options.off_duty_seconds}))
   drawLayer.value = camera.scene_type==='security_area'?'intrusion_zone':'post_roi'
 }
 const editorTemplate = (scene:SceneType) => {
   editForm.scene_type=scene
   const item=templates.value.find(t=>t.scene_type===scene)
-  if(item){editForm.modes=[...item.modes];editForm.schedule=deepCopy(item.schedule);editForm.intrusion_schedule=deepCopy(item.intrusion_schedule||defaultIntrusionSchedule());editForm.options={...defaultOptions(),...item.options};editForm.geometry=defaultGeometry(scene);const firstDay=Object.keys(editForm.schedule.weekly||{})[0];scheduleShifts.value=deepCopy(firstDay?editForm.schedule.weekly[firstDay]:defaultOffDutyShifts()).map((shift:any)=>({...shift,off_duty_seconds:shift.off_duty_seconds??editForm.options.off_duty_seconds}))}
+  if(item){editForm.modes=[...item.modes];editForm.schedule=deepCopy(item.schedule);editForm.intrusion_schedule=deepCopy(item.intrusion_schedule||defaultIntrusionSchedule());editForm.options={...defaultOptions(),...item.options};editForm.geometry=defaultGeometry(scene)}
 }
 const pointsFor = (layer:DrawLayer):Point[] => layer==='intrusion_zone' ? (editForm.geometry.intrusion_zone?.points||[]) : (editForm.geometry[layer]||[])
 const setPoints = (layer:DrawLayer, points:Point[]) => {
@@ -291,12 +293,12 @@ const saveEditor = async () => {
     if(editForm.rtsp_url&&!/^(rtsp|rtsps|file):\/\//.test(editForm.rtsp_url)) throw new Error('视频源必须以 rtsp://、rtsps:// 或 file:// 开头')
     if(editForm.modes.includes('off_duty')||editForm.modes.includes('phone_use')||editForm.modes.includes('on_duty')) if(pointsFor('post_roi').length<3) throw new Error('岗位区域至少需要 3 个点')
     if(editForm.modes.includes('off_duty')&&!Object.keys(editForm.schedule.weekly||{}).length) throw new Error('离岗检测请至少选择一个生效星期')
-    if(editForm.modes.includes('off_duty')&&scheduleShifts.value.some(shift=>!shift.off_duty_seconds||shift.off_duty_seconds<60||shift.off_duty_seconds>86400)) throw new Error('每个离岗时段的判定时间必须为 1 到 1440 分钟')
+    const configuredShifts=Object.values(editForm.schedule.weekly||{}).flat() as any[]
+    if(editForm.modes.includes('off_duty')&&configuredShifts.some(shift=>!shift.off_duty_seconds||shift.off_duty_seconds<60||shift.off_duty_seconds>86400)) throw new Error('每个离岗时段的判定时间必须为 1 到 1440 分钟')
     if(editForm.modes.includes('intrusion')&&pointsFor('intrusion_zone').length<3) throw new Error('区域入侵需要至少 3 个点的禁区')
     if(editForm.modes.includes('people_flow')&&pointsFor('flow_roi').length<3) throw new Error('人流检测需要至少 3 个点的 ROI')
     if(editForm.modes.includes('phone_use')&&editForm.options.behavior_interval_seconds>editForm.options.phone_use_seconds) throw new Error('大模型检测间隔不能大于玩手机判定时间')
     if(editForm.geometry.intrusion_zone) editForm.geometry.intrusion_zone.name=editForm.zone_name||'禁区'
-    syncShifts()
     const id=editor.value.id
     const body=deepCopy(editForm);delete body.zone_name;if(!body.rtsp_url)delete body.rtsp_url
     const updated=await api<Camera>(`/api/cameras/${encodeURIComponent(id)}`,{method:'PATCH',body:JSON.stringify(body)})
@@ -305,15 +307,52 @@ const saveEditor = async () => {
   } catch(error:any){notify(error.message,'error')}
 }
 const weekdays=[['0','一'],['1','二'],['2','三'],['3','四'],['4','五'],['5','六'],['6','日']]
-const dayEnabled=(d:string)=>Boolean(editForm.schedule.weekly?.[d]?.length)
-const toggleDay=(d:string)=>{if(dayEnabled(d)) delete editForm.schedule.weekly[d];else editForm.schedule.weekly[d]=deepCopy(scheduleShifts.value)}
-const syncShifts=()=>{for(const d of Object.keys(editForm.schedule.weekly||{})) editForm.schedule.weekly[d]=deepCopy(scheduleShifts.value)}
-const addScheduleShift=()=>{scheduleShifts.value.push({start:'17:00',end:'18:00',off_duty_seconds:300});syncShifts()}
-const removeScheduleShift=(index:number)=>{if(scheduleShifts.value.length<=1){notify('请至少保留一个排班时段','error');return};scheduleShifts.value.splice(index,1);syncShifts()}
-const setShiftMinutes=(shift:any,event:Event)=>{shift.off_duty_seconds=Number((event.target as HTMLInputElement).value)*60;syncShifts()}
+const scheduleSummary=computed(()=>{
+  const weekly=editForm.schedule.weekly||{}
+  const days=Object.keys(weekly).sort().map(day=>weekdays.find(item=>item[0]===day)?.[1]).filter(Boolean)
+  const firstDay=Object.keys(weekly)[0]
+  const count=firstDay?(weekly[firstDay]?.length||0):0
+  return days.length?`周${days.join('、')} · ${count} 个时段`:'未配置普通模式排班'
+})
+const openCameraSchedule=()=>{
+  const weekly=editForm.schedule.weekly||{}
+  const days=Object.keys(weekly).sort()
+  const firstDay=days[0]
+  cameraScheduleDraft.days=[...days]
+  cameraScheduleDraft.shifts=deepCopy(firstDay?weekly[firstDay]:defaultOffDutyShifts()).map((shift:any)=>({
+    ...shift,off_duty_seconds:shift.off_duty_seconds??editForm.options.off_duty_seconds,
+  }))
+  cameraScheduleModal.value=true
+}
+const toggleScheduleDay=(day:string)=>{
+  cameraScheduleDraft.days=cameraScheduleDraft.days.includes(day)
+    ?cameraScheduleDraft.days.filter(item=>item!==day)
+    :[...cameraScheduleDraft.days,day].sort()
+}
+const addScheduleShift=()=>cameraScheduleDraft.shifts.push({start:'17:00',end:'18:00',off_duty_seconds:300})
+const removeScheduleShift=(index:number)=>{
+  if(cameraScheduleDraft.shifts.length<=1){notify('请至少保留一个排班时段','error');return}
+  cameraScheduleDraft.shifts.splice(index,1)
+}
+const setShiftMinutes=(shift:any,event:Event)=>{shift.off_duty_seconds=Number((event.target as HTMLInputElement).value)*60}
 const addBatchOffDutyShift=()=>offDutyScheduleForm.shifts.push({start:'17:00',end:'18:00',off_duty_seconds:300})
-const removeBatchOffDutyShift=(index:number)=>{if(offDutyScheduleForm.shifts.length<=1){notify('请至少保留一个离岗时段','error');return};offDutyScheduleForm.shifts.splice(index,1)}
+const removeBatchOffDutyShift=(index:number)=>{
+  if(offDutyScheduleForm.shifts.length<=1){notify('请至少保留一个离岗时段','error');return}
+  offDutyScheduleForm.shifts.splice(index,1)
+}
 const setBatchShiftMinutes=(shift:any,event:Event)=>{shift.off_duty_seconds=Number((event.target as HTMLInputElement).value)*60}
+const applyCameraSchedule=()=>{
+  if(editForm.modes.includes('off_duty')&&!cameraScheduleDraft.days.length){notify('离岗检测请至少选择一天','error');return}
+  const shifts=deepCopy(cameraScheduleDraft.shifts)
+  if(cameraScheduleDraft.days.length&&!shifts.length){notify('请至少配置一个排班时段','error');return}
+  if(shifts.some((shift:any)=>!shift.start||!shift.end||shift.start===shift.end)){notify('请填写有效的开始和结束时间','error');return}
+  if(editForm.modes.includes('off_duty')&&shifts.some((shift:any)=>!shift.off_duty_seconds||shift.off_duty_seconds<60||shift.off_duty_seconds>86400)){notify('离岗判定时间必须为 1 到 1440 分钟','error');return}
+  editForm.schedule={
+    ...(editForm.schedule||emptySchedule()),
+    weekly:Object.fromEntries(cameraScheduleDraft.days.map(day=>[day,deepCopy(shifts)])),
+  }
+  cameraScheduleModal.value=false
+}
 const intrusionShift=computed(()=>editForm.intrusion_schedule?.weekly?.['0']?.[0]||{start:'20:00',end:'05:00'})
 const syncIntrusionShift=()=>{const shift=deepCopy(intrusionShift.value);editForm.intrusion_schedule=defaultIntrusionSchedule();for(const d of Object.keys(editForm.intrusion_schedule.weekly))editForm.intrusion_schedule.weekly[d]=[deepCopy(shift)]}
 
@@ -1014,15 +1053,11 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <label v-if="editForm.modes.includes('intrusion')">禁区名称<input v-model="editForm.zone_name"></label>
             <template v-if="editForm.modes.includes('intrusion')"><div class="field-title">区域入侵时段 <small>每天，支持跨午夜</small></div><div class="form-row"><label>开始时间<input v-model="intrusionShift.start" type="time" @change="syncIntrusionShift"></label><label>结束时间<input v-model="intrusionShift.end" type="time" @change="syncIntrusionShift"></label></div></template>
             <div class="field-title">普通模式排班</div>
-            <div class="weekday"><button v-for="d in weekdays" :key="d[0]" :class="{selected:dayEnabled(d[0])}" @click="toggleDay(d[0])">{{d[1]}}</button></div>
-            <div v-for="(shift,index) in scheduleShifts" :key="index" class="form-row schedule-row">
-              <label>开始时间<input v-model="shift.start" type="time" @change="syncShifts"></label>
-              <label>结束时间<input v-model="shift.end" type="time" @change="syncShifts"></label>
-              <label v-if="editForm.modes.includes('off_duty')">离岗判定（分钟）<input :value="Math.round(Number(shift.off_duty_seconds||editForm.options.off_duty_seconds)/60)" type="number" min="1" max="1440" @input="setShiftMinutes(shift,$event)"></label>
-              <button type="button" class="ghost" @click="removeScheduleShift(index)">删除</button>
+            <div class="schedule-summary">
+              <span><b>{{scheduleSummary}}</b><small>时区：{{editForm.schedule?.timezone||'Asia/Shanghai'}}</small></span>
+              <button type="button" class="ghost" @click="openCameraSchedule"><TechIcon name="clock" :size="12"/>配置排班</button>
             </div>
-            <button type="button" class="ghost wide" @click="addScheduleShift">添加排班时段</button>
-            <div v-if="editForm.modes.includes('off_duty')" class="config-note"><b>离岗大模型终审</b><p>本地持续无人达到阈值后，只有大模型明确确认才告警；未确认或失败时不告警，持续无人每 30 分钟复核一次。</p></div>
+            <div v-if="editForm.modes.includes('off_duty')" class="config-note"><b>离岗大模型终审</b><p>同时启用玩手机且其检测间隔小于离岗判定时间时，将在行为检测中复核离岗；其他情况使用独立大模型终审。两种路径都必须先达到本地持续无人阈值。</p></div>
             <label v-if="usesPersonDetection">人员检测置信度<input v-model.number="editForm.options.person_confidence" type="number" min="0" max="1" step="0.05"><small class="field-hint">低于此置信度的人员不参与在岗、离岗、人流和入侵判定，默认 0.30。</small></label>
             <div v-if="editForm.modes.includes('people_flow')" class="config-note"><b>人流 ROI 有向穿越</b><p>同一 Track ID 从区域外稳定进入 ROI 后累计一次；首次出现在 ROI 内不会计入人流。</p></div>
             <label v-if="editForm.modes.includes('people_flow')">稳定确认帧数<input v-model.number="editForm.options.flow_min_stable_frames" type="number" min="2" max="30"></label>
@@ -1038,7 +1073,27 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
       </section>
     </div>
 
-    <!-- ============ 手动发送 Webhook ============ -->
+    <!-- ============ 单路摄像头排班 CAMERA SCHEDULE ============ -->
+    <div v-if="cameraScheduleModal" class="modal schedule-modal-layer" role="dialog" aria-modal="true" @click.self="cameraScheduleModal=false">
+      <section class="confirm-modal off-duty-modal">
+        <header class="modal-head"><div><h2>{{editForm.name}} · 普通模式排班</h2><span class="head-en">CAMERA SCHEDULE</span><p>配置该摄像头的生效星期、时段和离岗判定时间</p></div><button type="button" aria-label="关闭" @click="cameraScheduleModal=false"><TechIcon name="close" :size="16"/></button></header>
+        <div class="confirm-body">
+          <label>生效星期</label>
+          <div class="weekday"><button v-for="d in weekdays" :key="d[0]" type="button" :class="{selected:cameraScheduleDraft.days.includes(d[0])}" @click="toggleScheduleDay(d[0])">{{d[1]}}</button></div>
+          <div v-for="(shift,index) in cameraScheduleDraft.shifts" :key="index" class="form-row schedule-row">
+            <label>开始时间<input v-model="shift.start" type="time"></label>
+            <label>结束时间<input v-model="shift.end" type="time"></label>
+            <label v-if="editForm.modes.includes('off_duty')">离岗判定（分钟）<input :value="Math.round(Number(shift.off_duty_seconds||editForm.options.off_duty_seconds)/60)" type="number" min="1" max="1440" @input="setShiftMinutes(shift,$event)"></label>
+            <button type="button" class="ghost" @click="removeScheduleShift(index)">删除</button>
+          </div>
+          <button type="button" class="ghost wide" @click="addScheduleShift">添加排班时段</button>
+          <p>此排班由当前摄像头的离岗、在岗、玩手机和吸烟等普通模式共用；确认后仍需在摄像头编辑页保存策略。</p>
+        </div>
+        <footer class="confirm-foot"><button class="ghost" @click="cameraScheduleModal=false">取消</button><button class="primary" @click="applyCameraSchedule">应用到当前摄像头</button></footer>
+      </section>
+    </div>
+
+    <!-- ============ 批量离岗排班 BATCH OFF-DUTY SCHEDULE ============ -->
     <div v-if="offDutyScheduleModal" class="modal" role="dialog" aria-modal="true" @click.self="offDutyScheduleModal=false">
       <section class="confirm-modal off-duty-modal">
         <header class="modal-head"><div><h2>统一设置离岗时间</h2><span class="head-en">BATCH OFF-DUTY SCHEDULE</span><p>将覆盖 {{cameras.filter(camera=>camera.modes.includes('off_duty')).length}} 个离岗检测摄像头的普通模式排班</p></div><button type="button" aria-label="关闭" @click="offDutyScheduleModal=false"><TechIcon name="close" :size="16"/></button></header>
@@ -1057,6 +1112,8 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         <footer class="confirm-foot"><button class="ghost" :disabled="offDutyScheduleSaving" @click="offDutyScheduleModal=false">取消</button><button class="primary" :disabled="offDutyScheduleSaving" @click="saveOffDutySchedules">{{offDutyScheduleSaving?'保存中…':'统一应用'}}</button></footer>
       </section>
     </div>
+
+    <!-- ============ 手动发送 Webhook ============ -->
 
     <div v-if="sendModal" class="modal" role="dialog" aria-modal="true" @click.self="sendModal=false">
       <section class="confirm-modal">

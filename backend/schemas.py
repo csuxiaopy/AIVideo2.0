@@ -393,14 +393,14 @@ class VLMResult(BaseModel):
 
 
 class BehaviorVLMResult(BaseModel):
-    results: list[VLMResult] = Field(min_length=1, max_length=2)
+    results: list[VLMResult] = Field(min_length=1, max_length=3)
 
     @model_validator(mode="after")
     def valid_behavior_modes(self):
         modes = [item.mode for item in self.results]
-        allowed = {Mode.PHONE_USE, Mode.SMOKING}
+        allowed = {Mode.PHONE_USE, Mode.SMOKING, Mode.OFF_DUTY}
         if not set(modes) <= allowed:
-            raise ValueError("联合行为检测只能返回玩手机或吸烟模式")
+            raise ValueError("联合行为检测只能返回玩手机、吸烟或离岗模式")
         if len(set(modes)) != len(modes):
             raise ValueError("联合行为检测不能返回重复模式")
         return self

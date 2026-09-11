@@ -72,6 +72,17 @@ def yolo_required_modes(modes: set[str]) -> set[str]:
     return modes - {Mode.BLACK_SCREEN.value, Mode.PHONE_USE.value, Mode.SMOKING.value}
 
 
+def reuse_behavior_for_off_duty(
+    modes: set[str], scheduled: bool, behavior_interval_seconds: int, threshold_seconds: int,
+) -> bool:
+    """Return whether off-duty review should share the phone-use VLM request."""
+    return (
+        scheduled
+        and {Mode.PHONE_USE.value, Mode.OFF_DUTY.value} <= modes
+        and behavior_interval_seconds < threshold_seconds
+    )
+
+
 def staggered_capture_times(cameras: list[models.Camera], now: float) -> dict[str, float]:
     """Spread cameras with the same interval evenly across that complete interval."""
     groups: dict[int, list[models.Camera]] = defaultdict(list)
@@ -472,6 +483,9 @@ class MonitoringRuntime:
             )
             results.append({"mode": Mode.ON_DUTY.value, "status": analysis.status, "reason": analysis.reason})
 
+        off_duty_reuses_behavior = False
+        off_duty_event_start: datetime | None = None
+        off_duty_local_confirmed = False
         if Mode.OFF_DUTY.value in modes:
             scheduled, schedule_key, threshold_seconds = off_duty_schedule_context(
                 schedule, options.off_duty_seconds, now
@@ -480,7 +494,12 @@ class MonitoringRuntime:
                 occupied, scheduled, threshold_seconds, now, options.shift_grace_seconds,
                 schedule_key=schedule_key,
             )
-            review_due = event_start is not None and state.off_duty_review_due(
+            off_duty_event_start = event_start
+            off_duty_local_confirmed = bool(scheduled and not occupied and state.absence_alerted)
+            off_duty_reuses_behavior = reuse_behavior_for_off_duty(
+                modes, scheduled, options.behavior_interval_seconds, threshold_seconds
+            )
+            review_due = not off_duty_reuses_behavior and event_start is not None and state.off_duty_review_due(
                 now, OFF_DUTY_REVIEW_INTERVAL_SECONDS
             )
             if review_due:
@@ -496,6 +515,7 @@ class MonitoringRuntime:
                 reason = (
                     "离岗事件已结束" if event_phase == "resolved"
                     else "离岗事件持续中，已通过大模型终审" if state.absence_vlm_confirmed
+                    else "岗位区域持续无人，等待联合行为检测复核" if state.absence_alerted and off_duty_reuses_behavior
                     else "岗位区域持续无人，等待大模型再次终审" if state.absence_alerted
                     else "岗位有人或尚未达到离岗阈值" if scheduled
                     else "当前不在排班时段"
@@ -540,10 +560,32 @@ class MonitoringRuntime:
             mode for mode in (Mode.PHONE_USE, Mode.SMOKING)
             if mode.value in modes and mode_is_active(mode.value, schedule, now)
         }
+        if off_duty_reuses_behavior:
+            behavior_modes.add(Mode.OFF_DUTY)
         if behavior_modes and self._mode_due(
             camera.id, "behavior", options.behavior_interval_seconds, force
         ):
-            results.extend(await self._behaviors(camera, behavior_modes, frame.jpeg, options, schedule, now))
+            behavior_frame = frame.jpeg
+            if Mode.OFF_DUTY in behavior_modes:
+                behavior_frame = annotate_detections(
+                    frame.jpeg,
+                    qualified_people,
+                    zone=geometry.post_roi,
+                    event_started_at=(
+                        event_time(off_duty_event_start, schedule) if off_duty_event_start else None
+                    ),
+                    event_ended_at=(event_time(now, schedule) if off_duty_event_start else None),
+                )
+            results.extend(await self._behaviors(
+                camera,
+                behavior_modes,
+                behavior_frame,
+                options,
+                schedule,
+                now,
+                off_duty_local_confirmed=off_duty_local_confirmed,
+                off_duty_event_started_at=off_duty_event_start,
+            ))
 
         if Mode.INTRUSION.value in modes and geometry.intrusion_zone and intrusion_active:
             intrusion_people = [
@@ -901,6 +943,8 @@ class MonitoringRuntime:
         options: CameraOptions | None = None,
         schedule: ScheduleSpec | None = None,
         now: datetime | None = None,
+        off_duty_local_confirmed: bool = False,
+        off_duty_event_started_at: datetime | None = None,
     ) -> list[dict[str, Any]]:
         options = options or CameraOptions()
         schedule = schedule or ScheduleSpec()
@@ -912,6 +956,8 @@ class MonitoringRuntime:
             output = []
             if Mode.PHONE_USE in modes:
                 state.phone_event_update(False, options.phone_use_seconds, now)
+            if Mode.OFF_DUTY in modes:
+                state.reset_off_duty_confirmation()
             for mode in sorted(modes, key=lambda item: item.value):
                 analysis = self.repository.add_analysis(
                     camera_id=camera.id, mode=mode.value, status="uncertain", confidence=0,
@@ -935,11 +981,24 @@ class MonitoringRuntime:
                 analysis = self.repository.add_analysis(
                     camera_id=camera.id, mode=mode.value, status=result.status,
                     confidence=result.confidence, reason=result.reason, severity="normal",
+                    local_model=self.yolo.model_name if mode == Mode.OFF_DUTY else None,
+                    model_version=self.yolo.model_name if mode == Mode.OFF_DUTY else None,
                     request_id=response.request_id, provider=response.provider, model=response.model,
                     usage_json=as_json(response.usage), latency_ms=response.latency_ms,
                 )
                 confirmed = result.status == "confirmed"
-                if mode == Mode.PHONE_USE:
+                if mode == Mode.OFF_DUTY:
+                    if confirmed and off_duty_local_confirmed and off_duty_event_started_at:
+                        state.record_off_duty_review(
+                            True, now, frame_jpeg, result.confidence
+                        )
+                        await self._maybe_create_off_duty_alert(camera, analysis, now)
+                    else:
+                        # Piggyback reviews retry at the behavior cadence. Do not
+                        # update absence_last_review_at, so switching back to the
+                        # dedicated fallback review is immediate.
+                        state.reset_off_duty_confirmation()
+                elif mode == Mode.PHONE_USE:
                     phase, started_at = state.phone_event_update(confirmed, options.phone_use_seconds, now)
                     if phase == "threshold" and started_at:
                         analysis.reason = "持续玩手机已达到判定时间"
@@ -962,6 +1021,8 @@ class MonitoringRuntime:
             output = []
             if Mode.PHONE_USE in modes:
                 state.phone_event_update(False, options.phone_use_seconds, now)
+            if Mode.OFF_DUTY in modes:
+                state.reset_off_duty_confirmation()
             for mode in sorted(modes, key=lambda item: item.value):
                 VLM_CALLS.labels(mode=mode.value, status="error").inc()
                 analysis = self.repository.add_analysis(

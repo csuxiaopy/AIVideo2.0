@@ -103,6 +103,81 @@ def test_pipeline_only_reviews_after_local_absence_threshold():
     assert len(alerts) == 1
 
 
+@pytest.mark.parametrize(("behavior_interval", "piggyback_expected"), [(60, True), (120, False), (180, False)])
+def test_pipeline_routes_off_duty_review_by_active_threshold(behavior_interval, piggyback_expected):
+    behavior_calls, dedicated_calls, alerts = [], [], []
+
+    class VLM:
+        async def analyze_behaviors(self, modes, jpeg):
+            behavior_calls.append(set(modes))
+            return VLMResponse(
+                results={mode: VLMResult(
+                    mode=mode, status="confirmed", confidence=0.97, reason="confirmed"
+                ) for mode in modes},
+                request_id="behavior", usage={}, latency_ms=1, provider="test", model="test",
+            )
+
+        async def analyze_off_duty(self, jpeg):
+            dedicated_calls.append(jpeg)
+            return _response("confirmed")
+
+    class Repository:
+        def add_analysis(self, **kwargs):
+            return SimpleNamespace(**kwargs)
+
+    class Alerts:
+        async def create(self, camera, analysis, evidence, **kwargs):
+            alerts.append((analysis.mode, evidence))
+
+    runtime = object.__new__(MonitoringRuntime)
+    runtime.vlm, runtime.repository, runtime.alerts = VLM(), Repository(), Alerts()
+    runtime.rules = RuleStateRegistry()
+    runtime.last_mode_run = defaultdict(float)
+    runtime.settings = SimpleNamespace(yolo_inference_timeout_seconds=5)
+    ok, encoded = cv2.imencode(".jpg", np.zeros((80, 120, 3), dtype=np.uint8))
+    assert ok
+
+    class Media:
+        def latest(self, _camera_id):
+            return SimpleNamespace(jpeg=encoded.tobytes())
+
+        def set_person_detections(self, *_args):
+            pass
+
+        def set_object_detections(self, *_args):
+            pass
+
+        def set_intrusion(self, *_args):
+            pass
+
+    runtime.media = Media()
+    runtime.yolo = SimpleNamespace(
+        detect=lambda _camera_id, _jpeg: [], people=lambda _detections: [], model_name="local-yolo"
+    )
+    camera = SimpleNamespace(
+        id="camera-1", name="一号工位", modes_json='["off_duty","phone_use"]',
+        options_json=(
+            f'{{"off_duty_seconds":120,"behavior_interval_seconds":{behavior_interval},'
+            '"phone_use_seconds":600}'
+        ),
+        geometry_json='{"post_roi":[[0.1,0.1],[0.9,0.1],[0.9,0.9],[0.1,0.9]]}',
+        schedule_json="{}", intrusion_schedule_json="{}",
+    )
+    started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    with patch("backend.pipeline.utc_now", return_value=started):
+        asyncio.run(runtime._process(camera, force=True))
+    with patch("backend.pipeline.utc_now", return_value=started + timedelta(seconds=120)):
+        asyncio.run(runtime._process(camera, force=True))
+
+    if piggyback_expected:
+        assert all(Mode.OFF_DUTY in modes for modes in behavior_calls)
+        assert dedicated_calls == []
+    else:
+        assert all(Mode.OFF_DUTY not in modes for modes in behavior_calls)
+        assert len(dedicated_calls) == 1
+    assert [mode for mode, _ in alerts].count(Mode.OFF_DUTY.value) == 1
+
+
 def test_off_duty_confirmed_review_creates_one_alert_with_same_evidence():
     received = []
 

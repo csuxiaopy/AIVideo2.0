@@ -822,6 +822,7 @@ tr.severity-critical .event-type{color:var(--danger);background:rgba(255,77,90,.
   position:fixed;inset:0;z-index:20;background:rgba(1,6,14,.78);
   display:grid;place-items:center;padding:20px;backdrop-filter:blur(6px);
 }
+.schedule-modal-layer{z-index:30}
 .preview-modal,.editor-modal,.confirm-modal,.batch-modal{
   background:linear-gradient(170deg,#062036 0%,#04162A 60%,#031326 100%);
   border:1px solid var(--border-primary);border-radius:12px;overflow:hidden;
@@ -869,6 +870,15 @@ tr.severity-critical .event-type{color:var(--danger);background:rgba(255,77,90,.
 .editor-body{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:20px;padding:20px}
 .editor-left{min-width:0}
 .editor-right{padding:4px 0 0 18px;border-left:1px solid var(--border-dim)}
+.schedule-summary{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:11px 12px;background:rgba(4,18,32,.55);border:1px solid var(--border-dim);
+  border-radius:var(--radius-sm);
+}
+.schedule-summary span,.schedule-summary b,.schedule-summary small{display:block}
+.schedule-summary b{font-size:11px;color:var(--text-primary)}
+.schedule-summary small{margin-top:4px;font-size:9.5px;color:var(--text-muted)}
+.schedule-summary button{flex:none}
 .draw-actions{display:flex;gap:7px;flex-wrap:wrap}
 .hint{color:var(--text-muted);font-size:10px;margin:8px 0 0}
 .weekday{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-bottom:14px}

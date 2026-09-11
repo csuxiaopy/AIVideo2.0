@@ -24,7 +24,10 @@ phone_use 只有清晰看到工作人员正在持续注视、滑动、点击手�
 phone_use 出现以下任一场景必须返回 none：工作人员前方有客户且正在接待或服务客户；工作人员一只手正在操作鼠标、另一只手拿手机；有明确工作场景证据表明手机用于扫码、登记、拍照、核对信息、联系客户或处理业务。
 phone_use 无法确认人物是否为工作人员、物体是否为手机，或无法区分工作用途和娱乐用途时，必须返回 uncertain，不得返回 confirmed。
 smoking 只有明确看到持烟、吸食动作或可关联的烟雾证据才可 confirmed。
-不要把喝水、吃东西、摸脸、打电话或普通手部动作误判为抽烟。"""
+不要把喝水、吃东西、摸脸、打电话或普通手部动作误判为抽烟。
+off_duty 只判断红色半透明多边形标出的岗位区域在当前图片中是否无人，不判断持续时间。
+off_duty 在岗位区域清晰可见且没有任何人员占用时返回 confirmed；区域内有人（包括局部身体、坐着、弯腰或部分遮挡）时返回 none。
+off_duty 在画面模糊、黑屏、岗位区域严重遮挡、红色区域不可辨认或证据不足时返回 uncertain；不要把区域外人员当作在岗人员。"""
 OFF_DUTY_SYSTEM_PROMPT = """你是监控离岗告警的最终复核器。系统已经通过排班、岗位区域和持续计时规则产生了一个候选事件；你只负责检查当前图片中红色半透明多边形标出的岗位区域是否确实无人，不要从单张图片推断持续时间。
 如果岗位区域清晰可见且没有任何人员占用，返回 confirmed。
 如果岗位区域内存在人员，包括只露出部分身体、坐着、弯腰或被物体部分遮挡，返回 none。
@@ -88,9 +91,9 @@ class VisionModelClient:
         self, modes: set[Mode], frame: bytes,
         camera_id: str | None = None, camera_name: str = "",
     ) -> VLMResponse:
-        allowed = {Mode.PHONE_USE, Mode.SMOKING}
+        allowed = {Mode.PHONE_USE, Mode.SMOKING, Mode.OFF_DUTY}
         if not modes or not modes <= allowed:
-            raise ValueError("联合行为检测模式必须是玩手机或吸烟")
+            raise ValueError("联合行为检测模式必须是玩手机、吸烟或离岗")
         model = self.economy_model
         if not self.base_url or not self.api_key:
             raise VLMError("视觉大模型尚未配置")

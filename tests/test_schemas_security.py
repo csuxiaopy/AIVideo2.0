@@ -70,6 +70,19 @@ def test_combined_vlm_result_rejects_duplicate_and_non_behavior_modes():
         })
 
 
+def test_combined_vlm_result_accepts_phone_smoking_and_off_duty():
+    result = BehaviorVLMResult.model_validate({
+        "results": [
+            {"mode": "phone_use", "status": "none", "confidence": 0.9},
+            {"mode": "smoking", "status": "none", "confidence": 0.9},
+            {"mode": "off_duty", "status": "confirmed", "confidence": 0.98},
+        ]
+    })
+    assert {item.mode for item in result.results} == {
+        Mode.PHONE_USE, Mode.SMOKING, Mode.OFF_DUTY
+    }
+
+
 def test_off_duty_vlm_result_only_accepts_off_duty_mode():
     result = OffDutyVLMResult.model_validate({
         "result": {"mode": "off_duty", "status": "confirmed", "confidence": 0.98}

@@ -7,7 +7,12 @@ from unittest.mock import patch
 
 import pytest
 
-from backend.pipeline import BEHAVIOR_INTERVAL_SECONDS, MonitoringRuntime, yolo_required_modes
+from backend.pipeline import (
+    BEHAVIOR_INTERVAL_SECONDS,
+    MonitoringRuntime,
+    reuse_behavior_for_off_duty,
+    yolo_required_modes,
+)
 from backend.rules import RuleStateRegistry
 from backend.schemas import CameraOptions, Mode, ScheduleSpec, VLMResult
 from backend.vlm import VLMError, VLMResponse, VisionModelClient
@@ -39,6 +44,75 @@ def test_behavior_interval_is_three_minutes_and_shared():
         assert runtime._mode_due("camera-1", "behavior", BEHAVIOR_INTERVAL_SECONDS, False)
         assert not runtime._mode_due("camera-1", "behavior", BEHAVIOR_INTERVAL_SECONDS, False)
         assert runtime._mode_due("camera-1", "behavior", BEHAVIOR_INTERVAL_SECONDS, False)
+
+
+@pytest.mark.parametrize(("modes", "scheduled", "interval", "threshold", "expected"), [
+    ({"phone_use", "off_duty"}, True, 60, 300, True),
+    ({"phone_use", "off_duty"}, True, 300, 300, False),
+    ({"phone_use", "off_duty"}, True, 301, 300, False),
+    ({"off_duty"}, True, 60, 300, False),
+    ({"phone_use", "off_duty"}, False, 60, 300, False),
+])
+def test_off_duty_behavior_reuse_routing(modes, scheduled, interval, threshold, expected):
+    assert reuse_behavior_for_off_duty(modes, scheduled, interval, threshold) is expected
+
+
+def test_piggyback_off_duty_requires_local_threshold_and_same_frame_confirmation():
+    current = {"off_duty": "confirmed"}
+    analyses, alerts, requests = [], [], []
+
+    class VLM:
+        async def analyze_behaviors(self, modes, jpeg):
+            requests.append((modes, jpeg))
+            return VLMResponse(
+                results={mode: make_result(mode, current.get(mode.value, "none")) for mode in modes},
+                request_id="combined", usage={}, latency_ms=1, provider="test", model="test",
+            )
+
+    class Repository:
+        def add_analysis(self, **kwargs):
+            analyses.append(kwargs)
+            return SimpleNamespace(**kwargs)
+
+    class Alerts:
+        async def create(self, camera, analysis, evidence, **kwargs):
+            alerts.append((analysis.mode, evidence, kwargs))
+
+    runtime = object.__new__(MonitoringRuntime)
+    runtime.vlm, runtime.repository, runtime.alerts = VLM(), Repository(), Alerts()
+    runtime.rules = RuleStateRegistry()
+    runtime.yolo = SimpleNamespace(model_name="local-yolo")
+    camera = SimpleNamespace(id="camera-1")
+    started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    modes = {Mode.PHONE_USE, Mode.SMOKING, Mode.OFF_DUTY}
+
+    asyncio.run(runtime._behaviors(
+        camera, modes, b"before-threshold", CameraOptions(), ScheduleSpec(timezone="UTC"),
+        started, off_duty_local_confirmed=False, off_duty_event_started_at=started,
+    ))
+    assert alerts == []
+    assert not runtime.rules.for_camera(camera.id).absence_vlm_confirmed
+
+    current["off_duty"] = "uncertain"
+    asyncio.run(runtime._behaviors(
+        camera, modes, b"uncertain-frame", CameraOptions(), ScheduleSpec(timezone="UTC"),
+        started + timedelta(minutes=5), off_duty_local_confirmed=True,
+        off_duty_event_started_at=started,
+    ))
+    assert alerts == []
+
+    current["off_duty"] = "confirmed"
+    asyncio.run(runtime._behaviors(
+        camera, modes, b"confirmed-frame", CameraOptions(), ScheduleSpec(timezone="UTC"),
+        started + timedelta(minutes=6), off_duty_local_confirmed=True,
+        off_duty_event_started_at=started,
+    ))
+    assert len(requests) == 3
+    assert {item["mode"] for item in analyses} == {"phone_use", "smoking", "off_duty"}
+    assert [(mode, evidence) for mode, evidence, _ in alerts] == [
+        ("off_duty", b"confirmed-frame")
+    ]
+    assert runtime.rules.for_camera(camera.id).absence_vlm_confirmed
 
 
 def test_combined_behaviors_split_records_and_alerts_using_same_frame():
@@ -301,13 +375,16 @@ def test_behavior_analysis_uses_single_configured_model(monkeypatch):
         calls.append(json)
         payload = {"choices": [{"message": {"content": (
             '{"results":[{"mode":"phone_use","status":"suspected","confidence":0.8},'
-            '{"mode":"smoking","status":"none","confidence":0.9}]}'
+            '{"mode":"smoking","status":"none","confidence":0.9},'
+            '{"mode":"off_duty","status":"confirmed","confidence":0.95}]}'
         )}}]}
         return SimpleNamespace(status_code=200, headers={}, text=str(payload), is_error=False,
                                json=lambda: payload)
 
     client.client.post = post
-    returned = asyncio.run(client.analyze_behaviors({Mode.PHONE_USE, Mode.SMOKING}, b"frame"))
+    returned = asyncio.run(client.analyze_behaviors(
+        {Mode.PHONE_USE, Mode.SMOKING, Mode.OFF_DUTY}, b"frame"
+    ))
     assert returned.model == "economy"
     assert len(calls) == 1
     assert calls[0]["model"] == "economy"
@@ -317,6 +394,8 @@ def test_behavior_analysis_uses_single_configured_model(monkeypatch):
     assert "操作鼠标" in system_prompt
     assert "工作场景证据" in system_prompt
     assert "无法区分工作用途和娱乐用途" in system_prompt
+    assert "红色半透明多边形" in system_prompt
     requested_modes = calls[0]["messages"][1]["content"][0]["text"]
     assert "phone_use" in requested_modes
     assert "smoking" in requested_modes
+    assert "off_duty" in requested_modes
