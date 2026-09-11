@@ -791,6 +791,8 @@ class Repository:
             camera_items.append({
                 "camera_id": camera.id,
                 "camera_name": f"{directory_name}营业厅",
+                "directory_id": camera.directory_id,
+                "directory_name": f"{directory_name}营业厅",
                 "online": camera.online,
                 "current_count": int(last.current_count or 0) if last else 0,
                 "entered_today": int(entered[camera.id]), "exited_today": int(exited[camera.id]),
@@ -798,7 +800,23 @@ class Repository:
             })
         camera_items.sort(key=lambda item: (-item["entered_today"], item["camera_id"]))
         current_ranking = sorted(camera_items, key=lambda item: (-item["current_count"], item["camera_id"]))[:3]
-        flow_ranking = camera_items[:3]
+        directory_totals: dict[int | None, dict[str, Any]] = {}
+        for item in camera_items:
+            directory_id = item["directory_id"]
+            summary = directory_totals.setdefault(directory_id, {
+                "directory_id": directory_id,
+                "directory_name": item["directory_name"],
+                "entered_today": 0,
+                "current_count": 0,
+                "camera_count": 0,
+            })
+            summary["entered_today"] += item["entered_today"]
+            summary["current_count"] += item["current_count"]
+            summary["camera_count"] += 1
+        flow_ranking = sorted(
+            directory_totals.values(),
+            key=lambda item: (-item["entered_today"], item["directory_name"]),
+        )
         entered_total = sum(entered.values())
         return {
             "date": local_start.date().isoformat(), "timezone": str(zone),

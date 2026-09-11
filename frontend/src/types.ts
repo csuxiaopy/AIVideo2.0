@@ -59,11 +59,21 @@ export interface TrafficTrendPoint {
 export interface TrafficCameraSummary {
   camera_id: string
   camera_name: string
+  directory_id?: number | null
+  directory_name?: string
   online: boolean
   current_count: number
   entered_today: number
   exited_today: number
   last_stat_at?: string
+}
+
+export interface TrafficDirectorySummary {
+  directory_id: number | null
+  directory_name: string
+  entered_today: number
+  current_count: number
+  camera_count: number
 }
 
 export interface TrafficSummary {
@@ -77,7 +87,7 @@ export interface TrafficSummary {
   store_trend: TrafficTrendPoint[]
   cameras: TrafficCameraSummary[]
   current_ranking: TrafficCameraSummary[]
-  flow_ranking: TrafficCameraSummary[]
+  flow_ranking: TrafficDirectorySummary[]
 }
 
 export interface TrafficMonthlyRow {

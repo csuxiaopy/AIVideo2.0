@@ -1002,7 +1002,10 @@ tr.severity-critical .event-type{color:var(--danger);background:rgba(255,77,90,.
 .traffic-monthly-actions{display:flex;align-items:end;gap:9px;flex-wrap:wrap;justify-content:flex-end}
 .traffic-monthly-actions label{display:grid;gap:5px;color:var(--text-muted);font-size:9px;letter-spacing:.6px}
 .traffic-monthly-actions input{min-width:154px}
-.traffic-monthly-wrap{overflow:auto;border:1px solid var(--border-dim);border-radius:7px;transition:opacity .15s}
+.traffic-monthly-scroll-top{height:15px;margin-bottom:5px;overflow-x:auto;overflow-y:hidden;scrollbar-color:var(--primary) rgba(0,140,255,.08);scrollbar-width:thin}
+.traffic-monthly-scroll-top>div{height:1px}
+.traffic-monthly-wrap{overflow-x:auto;overflow-y:hidden;border:1px solid var(--border-dim);border-radius:7px;transition:opacity .15s;scrollbar-width:none}
+.traffic-monthly-wrap::-webkit-scrollbar{display:none}
 .traffic-monthly-wrap.loading{opacity:.58}
 .traffic-monthly-table{width:max-content;min-width:100%;border-collapse:separate;border-spacing:0;font-variant-numeric:tabular-nums}
 .traffic-monthly-table th,.traffic-monthly-table td{min-width:58px;height:42px;padding:8px 10px;text-align:center;white-space:nowrap;border-right:1px solid rgba(28,62,102,.42);border-bottom:1px solid rgba(28,62,102,.42);font-size:11px}
@@ -1027,7 +1030,7 @@ tr.severity-critical .event-type{color:var(--danger);background:rgba(255,77,90,.
 .chart-current-dot{fill:var(--bg-base);stroke:var(--cyan);stroke-width:3;vector-effect:non-scaling-stroke;filter:drop-shadow(0 0 5px var(--cyan))}
 .chart-time-axis{position:absolute;left:44px;right:44px;bottom:0;display:flex;justify-content:space-between;color:var(--text-muted);font:10px var(--font-mono)}
 .trend-empty{min-height:240px;display:grid;place-content:center;text-align:center}
-.ranking-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.ranking-grid{display:grid;grid-template-columns:1fr;gap:18px}
 .podium-panel{overflow:hidden}.podium{height:260px;display:flex;align-items:end;justify-content:center;gap:8px;padding:12px 4% 0}
 .podium article{width:31%;min-width:0;text-align:center}.podium-person{display:grid;justify-items:center;gap:3px;margin-bottom:9px}
 .podium article.clickable,.traffic-camera-card.clickable{cursor:pointer;transition:transform .16s,border-color .16s,box-shadow .16s}
@@ -1039,6 +1042,14 @@ tr.severity-critical .event-type{color:var(--danger);background:rgba(255,77,90,.
 .place-1 .podium-step{height:112px;border-color:rgba(255,176,32,.55);color:var(--warning);background:linear-gradient(180deg,rgba(255,176,32,.22),rgba(255,176,32,.04));box-shadow:0 -10px 30px rgba(255,176,32,.08)}
 .place-1 .podium-person>span{color:var(--warning);border-color:rgba(255,176,32,.6);background:rgba(255,176,32,.13)}
 .place-2 .podium-step{height:82px}.place-3 .podium-step{height:58px;color:#ca8d66;border-color:rgba(202,141,102,.45)}
+.flow-ranking-panel{min-width:0;overflow:hidden}
+.flow-ranking-count{color:var(--text-muted);font:10px var(--font-mono);white-space:nowrap}
+.flow-ranking-scroll{display:flex;align-items:stretch;gap:12px;padding:4px 2px 12px;overflow-x:auto;overflow-y:hidden;scrollbar-color:var(--primary) rgba(0,140,255,.08);scrollbar-width:thin}
+.flow-rank-card{box-sizing:border-box;flex:0 0 auto;min-width:180px;max-width:420px;min-height:104px;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:13px;padding:16px;border:1px solid var(--border-primary);border-radius:8px;background:linear-gradient(100deg,rgba(0,140,255,.19),rgba(0,229,255,.045));box-shadow:inset 0 0 24px rgba(0,140,255,.035)}
+.flow-rank-number{align-self:start;color:var(--primary-light);font:700 10px var(--font-hud);letter-spacing:.8px}
+.flow-rank-card>div{min-width:0;display:grid;gap:6px}.flow-rank-card b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}.flow-rank-card div small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted);font-size:9px}
+.flow-rank-card>strong{color:var(--cyan);font:700 27px var(--font-hud);white-space:nowrap}.flow-rank-card>strong small{margin-left:4px;color:var(--text-muted);font:9px var(--font-sans)}
+.flow-ranking-empty{min-height:112px;display:grid;place-content:center;text-align:center}
 .traffic-camera-section>.section-head{margin:4px 2px 12px}.traffic-camera-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:14px}
 .traffic-camera-card{padding:16px}.traffic-camera-card header{display:flex;justify-content:space-between;align-items:start;gap:10px}.traffic-camera-card h3{margin:0 0 4px;font-size:14px}.traffic-camera-card code{color:var(--text-muted);font-size:9px}
 .camera-flow-main{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:17px 0 12px}.camera-flow-main>div{padding:12px;background:rgba(0,140,255,.07);border:1px solid rgba(0,140,255,.18);border-radius:7px}

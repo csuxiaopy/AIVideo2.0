@@ -68,8 +68,10 @@ def test_traffic_summary_uses_shanghai_day_and_carries_camera_state(monkeypatch)
     assert result["exited_today"] == 1
     assert result["current_people"] == 9
     assert [point["current_people"] for point in result["store_trend"]] == [3, 7, 9]
-    # Equal daily flow is resolved by camera ID for stable podium ordering.
-    assert [item["camera_id"] for item in result["flow_ranking"]] == ["cam-a", "cam-b"]
+    # Daily flow ranking contains every participating directory, aggregated across cameras.
+    assert [item["directory_name"] for item in result["flow_ranking"]] == ["未分组营业厅", "滨湖营业厅"]
+    assert [item["entered_today"] for item in result["flow_ranking"]] == [3, 3]
+    assert [item["camera_count"] for item in result["flow_ranking"]] == [1, 1]
     assert [item["camera_id"] for item in result["current_ranking"]] == ["cam-a", "cam-b"]
     assert [item["camera_name"] for item in result["cameras"]] == ["滨湖营业厅", "未分组营业厅"]
 

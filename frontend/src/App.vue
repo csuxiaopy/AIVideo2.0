@@ -78,6 +78,9 @@ const emptyTrafficMonthlyReport=(month=currentTrafficMonth):TrafficMonthlyReport
 const trafficMonthlyReport=ref<TrafficMonthlyReport>(emptyTrafficMonthlyReport())
 const trafficMonthlyLoading=ref(false)
 const trafficMonthlyError=ref('')
+const trafficMonthlyScrollTop=ref<HTMLElement|null>(null)
+const trafficMonthlyScrollBody=ref<HTMLElement|null>(null)
+const trafficMonthlyScrollWidth=ref(0)
 let trafficMonthlySeq=0
 const templates = ref<SceneTemplate[]>([])
 const capabilities = ref<any[]>([])
@@ -170,6 +173,15 @@ const exportTrafficMonthly=async()=>{
   }catch(error:any){notify(error.message,'error')}
 }
 watch(trafficMonth,()=>{trafficMonthlyReport.value=emptyTrafficMonthlyReport(trafficMonth.value);void loadTrafficMonthly()})
+const updateTrafficMonthlyScroll=async()=>{
+  await nextTick()
+  trafficMonthlyScrollWidth.value=trafficMonthlyScrollBody.value?.scrollWidth||0
+}
+const syncTrafficMonthlyScroll=(source:HTMLElement|null,target:HTMLElement|null)=>{
+  if(source&&target&&Math.abs(target.scrollLeft-source.scrollLeft)>1)target.scrollLeft=source.scrollLeft
+}
+watch(()=>[active.value,trafficMonthlyReport.value],()=>{void updateTrafficMonthlyScroll()})
+const handleTrafficMonthlyResize=()=>{void updateTrafficMonthlyScroll()}
 /* ---------- 告警筛选（服务端 mode/severity 参数，AND 组合） ---------- */
 const severityLevels = [
   {value:'normal',label:'NORMAL'},{value:'high',label:'HIGH'},{value:'critical',label:'CRITICAL'},
@@ -488,6 +500,8 @@ const chartArea=computed(()=>chartPoints.value.length?`44,220 ${chartPolyline.va
 const chartTicks=computed(()=>[chartMax.value,Math.round(chartMax.value/2),0])
 const trendTime=(value?:string)=>value?new Date(value).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false}):'--:--'
 const podiumRows=(rows:TrafficCameraSummary[])=>([rows[1]||null,rows[0]||null,rows[2]||null])
+const flowRankingMax=computed(()=>Math.max(1,...trafficSummary.value.flow_ranking.map(row=>row.entered_today)))
+const flowRankWidth=(value:number)=>180+Math.round(value/flowRankingMax.value*240)
 const snapshotUrl=(camera:Camera)=>`/api/cameras/${encodeURIComponent(camera.id)}/snapshot?v=${encodeURIComponent(camera.last_frame_at||'none')}`
 
 const clearPreviewHeartbeat=()=>{
@@ -583,8 +597,8 @@ const connectWs=()=>{
   socket.onmessage=(event)=>{try{const data=JSON.parse(event.data);if(data.type==='alert'){notify(`${data.severity==='critical'?'紧急：':''}${data.camera_name||data.camera_id} ${modeName(data.mode)}：${data.reason}`,'alert');loadAll(true)}}catch{}}
   socket.onclose=()=>{wsOnline.value=false;if(currentUser.value)window.setTimeout(connectWs,3000)}
 }
-onMounted(async()=>{setUnauthorizedHandler(clearAuthenticatedState);try{const result=await api<{user:AuthUser;csrf_token:string}>('/api/auth/me');currentUser.value=result.user;setCsrfToken(result.csrf_token);await startAuthenticated()}catch{await loadCaptcha()}finally{authReady.value=true}clockTimer=window.setInterval(()=>now.value=new Date(),1000);window.addEventListener('beforeunload',abandonPreview);window.addEventListener('hashchange',()=>{if(currentUser.value)setTab(location.hash.slice(1)||'dashboard')})})
-onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTimer);window.clearTimeout(focusCameraTimer);socket?.close();window.removeEventListener('beforeunload',abandonPreview);abandonPreview()})
+onMounted(async()=>{setUnauthorizedHandler(clearAuthenticatedState);try{const result=await api<{user:AuthUser;csrf_token:string}>('/api/auth/me');currentUser.value=result.user;setCsrfToken(result.csrf_token);await startAuthenticated()}catch{await loadCaptcha()}finally{authReady.value=true}clockTimer=window.setInterval(()=>now.value=new Date(),1000);window.addEventListener('beforeunload',abandonPreview);window.addEventListener('resize',handleTrafficMonthlyResize);window.addEventListener('hashchange',()=>{if(currentUser.value)setTab(location.hash.slice(1)||'dashboard')})})
+onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTimer);window.clearTimeout(focusCameraTimer);socket?.close();window.removeEventListener('beforeunload',abandonPreview);window.removeEventListener('resize',handleTrafficMonthlyResize);abandonPreview()})
 </script>
 
 <template>
@@ -879,29 +893,6 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
           <article><span>识别方式</span><span class="metric-en">COUNTING MODE</span><strong>TRACK</strong><em>稳定人员轨迹自动计数</em></article>
           <article><span>统计摄像头</span><span class="metric-en">FLOW CAMERAS</span><strong>{{trafficSummary.flow_camera_count}}</strong><em>启用人员计数</em></article>
         </div>
-        <section class="panel traffic-monthly-panel">
-          <div class="section-head traffic-monthly-head">
-            <div><h2>月度人流统计</h2><span class="head-en">MONTHLY PEOPLE FLOW · {{trafficMonth}}</span><p>按营业厅汇总每日进入画面人次，空白表示当天没有统计记录</p></div>
-            <div class="traffic-monthly-actions">
-              <label>选择月份<input v-model="trafficMonth" type="month" :max="currentTrafficMonth"></label>
-              <button class="ghost" :disabled="trafficMonthlyLoading" @click="exportTrafficMonthly"><TechIcon name="database" :size="13"/>导出 Excel</button>
-            </div>
-          </div>
-          <div v-if="trafficMonthlyLoading&&!trafficMonthlyReport.days.length" class="empty traffic-monthly-empty"><b>LOADING MONTHLY REPORT</b><p>正在加载月度人流数据</p></div>
-          <div v-else-if="trafficMonthlyError" class="empty traffic-monthly-empty"><b>MONTHLY REPORT ERROR</b><p>{{trafficMonthlyError}}</p><button class="ghost" @click="loadTrafficMonthly()">重新加载</button></div>
-          <div v-else-if="!trafficMonthlyReport.rows.length" class="empty traffic-monthly-empty"><b>NO FLOW CAMERA</b><p>当前没有启用人员计数的营业厅</p></div>
-          <div v-else class="traffic-monthly-wrap" :class="{loading:trafficMonthlyLoading}">
-            <table class="traffic-monthly-table">
-              <thead><tr><th>营业厅</th><th v-for="day in trafficMonthlyReport.days" :key="day">{{Number(day.slice(-2))}}日</th><th>月合计</th></tr></thead>
-              <tbody>
-                <tr v-for="row in trafficMonthlyReport.rows" :key="row.directory_id??'unassigned'">
-                  <th>{{row.hall_name}}</th><td v-for="(value,index) in row.values" :key="trafficMonthlyReport.days[index]">{{value??''}}</td><td>{{row.monthly_total}}</td>
-                </tr>
-              </tbody>
-              <tfoot><tr><th>当月人流总计</th><td v-for="(value,index) in trafficMonthlyReport.daily_totals" :key="trafficMonthlyReport.days[index]">{{value??''}}</td><td>{{trafficMonthlyReport.grand_total}}</td></tr></tfoot>
-            </table>
-          </div>
-        </section>
         <section class="panel traffic-trend-panel">
           <div class="section-head"><div><h2>今日画面人数趋势</h2><span class="head-en">ON-SCREEN TREND · {{trafficSummary.date}}</span></div><div class="trend-current"><small>当前人数</small><strong>{{trafficSummary.current_people}}</strong></div></div>
           <div v-if="chartPoints.length" class="traffic-chart">
@@ -919,16 +910,55 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         </section>
 
         <div class="ranking-grid">
-          <section v-for="ranking in [{title:'当前画面人数排名',en:'ON-SCREEN RANKING',rows:trafficSummary.current_ranking,key:'current_count'},{title:'今日人流排名',en:'DAILY FLOW RANKING',rows:trafficSummary.flow_ranking,key:'entered_today'}]" :key="ranking.en" class="panel podium-panel">
-            <div class="section-head"><div><h2>{{ranking.title}}</h2><span class="head-en">{{ranking.en}}</span></div></div>
+          <section class="panel podium-panel">
+            <div class="section-head"><div><h2>当前画面人数排名</h2><span class="head-en">ON-SCREEN RANKING</span></div></div>
             <div class="podium">
-              <article v-for="(row,index) in podiumRows(ranking.rows)" :key="row?.camera_id||index" :class="[`place-${[2,1,3][index]}`,{clickable:!!row}]" :role="row?'button':undefined" :tabindex="row?0:undefined" @click="focusDashboardCamera(row)" @keydown.enter.prevent="focusDashboardCamera(row)" @keydown.space.prevent="focusDashboardCamera(row)">
-                <div class="podium-person"><span>{{[2,1,3][index]}}</span><b>{{row?.camera_name||'暂无'}}</b><small>{{row?.camera_id||'—'}}</small><strong>{{row ? row[ranking.key as keyof TrafficCameraSummary] : 0}}</strong></div>
+              <article v-for="(row,index) in podiumRows(trafficSummary.current_ranking)" :key="row?.camera_id||index" :class="[`place-${[2,1,3][index]}`,{clickable:!!row}]" :role="row?'button':undefined" :tabindex="row?0:undefined" @click="focusDashboardCamera(row)" @keydown.enter.prevent="focusDashboardCamera(row)" @keydown.space.prevent="focusDashboardCamera(row)">
+                <div class="podium-person"><span>{{[2,1,3][index]}}</span><b>{{row?.camera_name||'暂无'}}</b><small>{{row?.camera_id||'—'}}</small><strong>{{row?.current_count||0}}</strong></div>
                 <div class="podium-step">NO.{{[2,1,3][index]}}</div>
               </article>
             </div>
           </section>
         </div>
+
+        <section class="panel flow-ranking-panel">
+          <div class="section-head"><div><h2>今日人流排名</h2><span class="head-en">DAILY FLOW RANKING · ALL DIRECTORIES</span><p>全部目录按今日人流从高到低排列，矩形长度代表人流大小</p></div><small class="flow-ranking-count">共 {{trafficSummary.flow_ranking.length}} 个目录</small></div>
+          <div v-if="trafficSummary.flow_ranking.length" class="flow-ranking-scroll">
+            <article v-for="(row,index) in trafficSummary.flow_ranking" :key="row.directory_id??'unassigned'" class="flow-rank-card" :style="{width:`${flowRankWidth(row.entered_today)}px`}">
+              <span class="flow-rank-number">NO.{{index+1}}</span>
+              <div><b>{{row.directory_name}}</b><small>{{row.camera_count}} 个统计摄像头 · 当前 {{row.current_count}} 人</small></div>
+              <strong>{{row.entered_today}}<small>人次</small></strong>
+            </article>
+          </div>
+          <div v-else class="empty flow-ranking-empty"><b>NO DIRECTORY FLOW</b><p>今日暂无目录人流数据</p></div>
+        </section>
+
+        <section class="panel traffic-monthly-panel">
+          <div class="section-head traffic-monthly-head">
+            <div><h2>月度人流统计</h2><span class="head-en">MONTHLY PEOPLE FLOW · {{trafficMonth}}</span><p>按营业厅汇总每日进入画面人次，空白表示当天没有统计记录</p></div>
+            <div class="traffic-monthly-actions">
+              <label>选择月份<input v-model="trafficMonth" type="month" :max="currentTrafficMonth"></label>
+              <button class="ghost" :disabled="trafficMonthlyLoading" @click="exportTrafficMonthly"><TechIcon name="database" :size="13"/>导出 Excel</button>
+            </div>
+          </div>
+          <div v-if="trafficMonthlyLoading&&!trafficMonthlyReport.days.length" class="empty traffic-monthly-empty"><b>LOADING MONTHLY REPORT</b><p>正在加载月度人流数据</p></div>
+          <div v-else-if="trafficMonthlyError" class="empty traffic-monthly-empty"><b>MONTHLY REPORT ERROR</b><p>{{trafficMonthlyError}}</p><button class="ghost" @click="loadTrafficMonthly()">重新加载</button></div>
+          <div v-else-if="!trafficMonthlyReport.rows.length" class="empty traffic-monthly-empty"><b>NO FLOW CAMERA</b><p>当前没有启用人员计数的营业厅</p></div>
+          <template v-else>
+            <div ref="trafficMonthlyScrollTop" class="traffic-monthly-scroll-top" aria-label="月度人流统计横向滚动条" @scroll="syncTrafficMonthlyScroll(trafficMonthlyScrollTop,trafficMonthlyScrollBody)"><div :style="{width:`${trafficMonthlyScrollWidth}px`}"></div></div>
+            <div ref="trafficMonthlyScrollBody" class="traffic-monthly-wrap" :class="{loading:trafficMonthlyLoading}" @scroll="syncTrafficMonthlyScroll(trafficMonthlyScrollBody,trafficMonthlyScrollTop)">
+              <table class="traffic-monthly-table">
+                <thead><tr><th>营业厅</th><th v-for="day in trafficMonthlyReport.days" :key="day">{{Number(day.slice(-2))}}日</th><th>月合计</th></tr></thead>
+                <tbody>
+                  <tr v-for="row in trafficMonthlyReport.rows" :key="row.directory_id??'unassigned'">
+                    <th>{{row.hall_name}}</th><td v-for="(value,index) in row.values" :key="trafficMonthlyReport.days[index]">{{value??''}}</td><td>{{row.monthly_total}}</td>
+                  </tr>
+                </tbody>
+                <tfoot><tr><th>当月人流总计</th><td v-for="(value,index) in trafficMonthlyReport.daily_totals" :key="trafficMonthlyReport.days[index]">{{value??''}}</td><td>{{trafficMonthlyReport.grand_total}}</td></tr></tfoot>
+              </table>
+            </div>
+          </template>
+        </section>
 
         <section class="traffic-camera-section">
           <div class="section-head"><div><h2>摄像头统计</h2><span class="head-en">CAMERA FLOW OVERVIEW</span><p>按今日总人流从高到低排列</p></div></div>
