@@ -151,8 +151,8 @@ JSON 字段示例：
     "black_mean_max": 18.0,
     "black_std_max": 12.0,
     "black_ratio_min": 0.92,
-    "fire_confidence": 0.30,
-    "smoke_confidence": 0.30,
+    "fire_confidence": 0.90,
+    "smoke_confidence": 0.90,
     "intrusion_confidence": 0.50,
     "intrusion_cooldown_seconds": 60
   }

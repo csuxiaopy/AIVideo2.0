@@ -245,7 +245,7 @@ const loadAll = async (silent=false) => {
   finally { loading.value=false }
 }
 
-const defaultOptions = () => ({health_interval_seconds:5,yolo_fps:.1,behavior_interval_seconds:180,phone_use_seconds:600,off_duty_seconds:300,person_confidence:.3,shift_grace_seconds:0,alert_cooldown_seconds:300,black_mean_max:18,black_std_max:12,black_ratio_min:.92,fire_smoke_fps:1,fire_confidence:.3,smoke_confidence:.3,intrusion_confidence:.5,intrusion_cooldown_seconds:60,flow_min_stable_frames:3,stream_recovery_grace_seconds:15,flow_debug:false})
+const defaultOptions = () => ({health_interval_seconds:5,yolo_fps:.1,behavior_interval_seconds:180,phone_use_seconds:600,off_duty_seconds:300,person_confidence:.3,shift_grace_seconds:0,alert_cooldown_seconds:300,black_mean_max:18,black_std_max:12,black_ratio_min:.92,fire_smoke_fps:1,fire_confidence:.9,smoke_confidence:.9,intrusion_confidence:.5,intrusion_cooldown_seconds:60,flow_min_stable_frames:3,stream_recovery_grace_seconds:15,flow_debug:false})
 const emptySchedule = () => ({timezone:'Asia/Shanghai',weekly:{},holidays:[]})
 const defaultIntrusionSchedule = () => ({timezone:'Asia/Shanghai',weekly:Object.fromEntries(Array.from({length:7},(_,day)=>[String(day),[{start:'20:00',end:'05:00'}]])),holidays:[]})
 const deepCopy = <T,>(value:T):T => JSON.parse(JSON.stringify(value))

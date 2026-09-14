@@ -17,8 +17,8 @@ def test_scene_templates_have_expected_modes_and_geometry():
     ]
     assert templates["workstation"]["options"]["shift_grace_seconds"] == 0
     assert set(templates["workstation"]["schedule"]["weekly"]) == {str(day) for day in range(7)}
-    assert templates["workstation"]["options"]["fire_confidence"] == 0.3
-    assert templates["workstation"]["options"]["smoke_confidence"] == 0.3
+    assert templates["workstation"]["options"]["fire_confidence"] == 0.9
+    assert templates["workstation"]["options"]["smoke_confidence"] == 0.9
     assert templates["customer_area"]["required_geometry"] == ["flow_roi"]
     assert templates["customer_area"]["geometry"]["flow_roi"] == [[0, 0], [1, 0], [1, 1], [0, 1]]
     assert templates["security_area"]["required_geometry"] == ["intrusion_zone"]
