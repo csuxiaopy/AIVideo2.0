@@ -28,6 +28,7 @@ const tabs = [
   {key:'traffic',name:'人流报表',icon:'traffic',en:'PEOPLE FLOW'},
   {key:'alerts',name:'告警中心',icon:'alert',en:'AI ALERT CENTER'},
   {key:'cameras',name:'摄像头配置',icon:'video',en:'CAMERA MANAGEMENT'},
+  {key:'system-monitor',name:'系统监控',icon:'activity',en:'SYSTEM OBSERVABILITY'},
   {key:'webhooks',name:'企业微信机器人',icon:'webhook',en:'WECOM DELIVERY'},
   {key:'settings',name:'系统配置',icon:'settings',en:'SYSTEM SETTINGS'},
   {key:'users',name:'账号管理',icon:'users',en:'ACCOUNT MANAGEMENT'},
@@ -48,6 +49,17 @@ const userForm=reactive({username:'',display_name:'',password:''})
 const active = ref('dashboard')
 const loading = ref(false)
 const dashboard = ref<any>({runtime:{}})
+type SystemMonitor = {
+  timestamp:string;uptime_seconds:number
+  host:{cpu_percent:number;cpu_count:number;memory_used:number;memory_total:number;memory_percent:number;disk_used:number;disk_total:number;disk_percent:number}
+  application:{task_rate:number;vlm_calls_total:number;analysis_average_ms:number;processed:number;failures:number;online_cameras:number;camera_count:number}
+  runtime:any
+}
+type MonitorPoint = {time:string;cpu:number;memory:number;disk:number;taskRate:number;queue:number}
+const systemMonitor=ref<SystemMonitor|null>(null)
+const monitorHistory=ref<MonitorPoint[]>([])
+const systemMonitorLoading=ref(false)
+let systemMonitorTimer:number|undefined
 const cameras = ref<Camera[]>([])
 const cameraDirectories = ref<CameraDirectory[]>([])
 const activeDirectory = ref('all')
@@ -468,7 +480,32 @@ const toggleLogDetail=async(row:any)=>{if(expandedLogId.value===row.id){expanded
 const exportLogs=async()=>{try{await download(`/api/logs/${logCategory.value}/export`,activeLogFilters(),`${logCategory.value}-logs.csv`);notify('日志已导出')}catch(error:any){notify(error.message,'error')}}
 const logResultText=(row:any)=>row.outcome==='success'?'成功':row.outcome==='failure'||row.outcome==='error'?'失败':row.status||row.outcome
 const prettyLog=(value:any)=>JSON.stringify(value,null,2)
-const setTab=(name:string)=>{if(!visibleTabs.value.some(tab=>tab.key===name))name='dashboard';if(name==='traffic'&&!displaySettings.show_traffic_report){notify('人流报表已在系统配置中关闭','error');name='dashboard'}active.value=name;location.hash=name;if(name==='traffic')void loadTrafficMonthly();if(name==='settings')loadSettings();if(name==='webhooks')loadWebhooks();if(name==='users')loadUsers();if(name==='logs')loadLogs(logData.page)}
+const loadSystemMonitor=async(silent=false)=>{
+  if(!silent)systemMonitorLoading.value=true
+  try{
+    const snapshot=await api<SystemMonitor>('/api/system-monitor')
+    systemMonitor.value=snapshot
+    const queue=(snapshot.runtime?.queues?.general||0)+(snapshot.runtime?.queues?.fire||0)
+    monitorHistory.value=[...monitorHistory.value,{time:snapshot.timestamp,cpu:snapshot.host.cpu_percent,memory:snapshot.host.memory_percent,disk:snapshot.host.disk_percent,taskRate:snapshot.application.task_rate,queue}].slice(-60)
+  }catch(error:any){if(!silent)notify(`系统监控加载失败：${error.message}`,'error')}
+  finally{systemMonitorLoading.value=false}
+}
+const stopSystemMonitor=()=>{window.clearInterval(systemMonitorTimer);systemMonitorTimer=undefined}
+const startSystemMonitor=()=>{stopSystemMonitor();void loadSystemMonitor();systemMonitorTimer=window.setInterval(()=>loadSystemMonitor(true),5000)}
+const formatBytes=(value?:number)=>{if(!value)return '0 B';const units=['B','KB','MB','GB','TB'];const index=Math.min(units.length-1,Math.floor(Math.log(value)/Math.log(1024)));return `${(value/1024**index).toFixed(index>2?1:0)} ${units[index]}`}
+const formatUptime=(seconds?:number)=>{seconds=seconds||0;const days=Math.floor(seconds/86400),hours=Math.floor(seconds%86400/3600),minutes=Math.floor(seconds%3600/60);return days?`${days}天 ${hours}小时`:`${hours}小时 ${minutes}分钟`}
+const monitorPath=(key:keyof Omit<MonitorPoint,'time'>,fixedMax?:number)=>{
+  const rows=monitorHistory.value
+  if(!rows.length)return ''
+  const ceiling=fixedMax||Math.max(1,...rows.map(row=>Number(row[key])||0))*1.12
+  return rows.map((row,index)=>`${rows.length===1?0:index*100/(rows.length-1)},${100-Math.min(100,(Number(row[key])||0)/ceiling*100)}`).join(' ')
+}
+const monitorArea=(key:keyof Omit<MonitorPoint,'time'>,fixedMax?:number)=>{const path=monitorPath(key,fixedMax);return path?`0,100 ${path} 100,100`:''}
+const monitorStartTime=computed(()=>monitorHistory.value.length?shortTime(monitorHistory.value[0].time):'--:--:--')
+const monitorEndTime=computed(()=>monitorHistory.value.length?shortTime(monitorHistory.value.at(-1)?.time):'--:--:--')
+const monitorHealthy=computed(()=>!!systemMonitor.value&&systemMonitor.value.runtime?.scheduler?.status==='running'&&systemMonitor.value.runtime?.detectors?.general?.status==='ready'&&systemMonitor.value.runtime?.detectors?.fire_smoke?.status==='ready')
+const refreshCurrent=()=>active.value==='system-monitor'?loadSystemMonitor():loadAll()
+const setTab=(name:string)=>{if(!visibleTabs.value.some(tab=>tab.key===name))name='dashboard';if(name==='traffic'&&!displaySettings.show_traffic_report){notify('人流报表已在系统配置中关闭','error');name='dashboard'}active.value=name;location.hash=name;if(name==='system-monitor')startSystemMonitor();else stopSystemMonitor();if(name==='traffic')void loadTrafficMonthly();if(name==='settings')loadSettings();if(name==='webhooks')loadWebhooks();if(name==='users')loadUsers();if(name==='logs')loadLogs(logData.page)}
 const focusDashboardCamera=async(row:TrafficCameraSummary|null)=>{
   if(!row)return
   const camera=cameras.value.find(item=>item.id===row.camera_id)
@@ -550,6 +587,7 @@ const abandonPreview=()=>{void releasePreviewLease(true)}
 const clearAuthenticatedState=()=>{
   currentUser.value=null;setCsrfToken('');socket?.close();socket=undefined;wsOnline.value=false
   window.clearInterval(refreshTimer);refreshTimer=undefined
+  stopSystemMonitor()
   window.clearTimeout(focusCameraTimer);focusCameraTimer=undefined
   active.value='dashboard';dashboardCameraSearch.value='';cameraSettingsSearch.value='';focusedCameraId.value='';selectedCameraIds.value=[]
   void loadCaptcha()
@@ -599,7 +637,7 @@ const connectWs=()=>{
   socket.onclose=()=>{wsOnline.value=false;if(currentUser.value)window.setTimeout(connectWs,3000)}
 }
 onMounted(async()=>{setUnauthorizedHandler(clearAuthenticatedState);try{const result=await api<{user:AuthUser;csrf_token:string}>('/api/auth/me');currentUser.value=result.user;setCsrfToken(result.csrf_token);await startAuthenticated()}catch{await loadCaptcha()}finally{authReady.value=true}clockTimer=window.setInterval(()=>now.value=new Date(),1000);window.addEventListener('beforeunload',abandonPreview);window.addEventListener('resize',handleTrafficMonthlyResize);window.addEventListener('hashchange',()=>{if(currentUser.value)setTab(location.hash.slice(1)||'dashboard')})})
-onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTimer);window.clearTimeout(focusCameraTimer);socket?.close();window.removeEventListener('beforeunload',abandonPreview);window.removeEventListener('resize',handleTrafficMonthlyResize);abandonPreview()})
+onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTimer);window.clearTimeout(focusCameraTimer);stopSystemMonitor();socket?.close();window.removeEventListener('beforeunload',abandonPreview);window.removeEventListener('resize',handleTrafficMonthlyResize);abandonPreview()})
 </script>
 
 <template>
@@ -640,7 +678,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         <div class="top-actions">
           <div class="clock-stack"><b>{{dateStr}} {{timeStr}}</b><small>LOCAL TIME</small></div>
           <span class="sys-badge" :class="{offline:sysStatusBad}">{{sysStatusText}}</span>
-          <button class="icon-btn refresh" :class="{spin:loading}" aria-label="刷新数据" title="刷新数据" @click="loadAll()"><TechIcon name="refresh" :size="17"/></button>
+          <button class="icon-btn refresh" aria-label="刷新数据" title="刷新数据" @click="refreshCurrent"><TechIcon name="refresh" :size="17" :class="{spin:loading||systemMonitorLoading}"/></button>
           <button class="icon-btn" aria-label="全屏" title="全屏切换" @click="toggleFullscreen"><TechIcon name="maximize" :size="16"/></button>
         </div>
       </header>
@@ -735,6 +773,70 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
               <div><dt>烟火模型</dt><dd :class="{'amber':dashboard.runtime?.detectors?.fire_smoke?.status!=='ready'}">{{dashboard.runtime?.detectors?.fire_smoke?.status||'unknown'}}</dd></div>
               <div><dt>普通队列</dt><dd>{{dashboard.runtime?.queues?.general||dashboard.runtime?.queue_depth||0}}</dd></div>
               <div><dt>安全队列</dt><dd>{{dashboard.runtime?.queues?.fire||0}}</dd></div>
+            </dl>
+          </section>
+        </div>
+      </section>
+
+      <!-- ============ 系统监控 SYSTEM OBSERVABILITY ============ -->
+      <section v-else-if="active==='system-monitor'" class="page system-monitor-page">
+        <div class="monitor-toolbar">
+          <div><span class="monitor-live"><i></i> LIVE</span><b>5 秒自动刷新</b><small>最近 {{monitorHistory.length}} 个采样点</small></div>
+          <span v-if="systemMonitor">最后更新 {{formatTime(systemMonitor.timestamp)}}</span>
+          <button class="ghost" @click="loadSystemMonitor()"><TechIcon name="refresh" :size="14" :class="{spin:systemMonitorLoading}"/>刷新</button>
+        </div>
+
+        <div class="monitor-stat-grid">
+          <article class="monitor-stat" :class="{warning:(systemMonitor?.host.cpu_percent||0)>80}"><header><span>CPU 使用率</span><TechIcon name="cpu" :size="17"/></header><strong>{{systemMonitor?.host.cpu_percent?.toFixed(1)||'0.0'}}<small>%</small></strong><footer>{{systemMonitor?.host.cpu_count||0}} LOGICAL CORES</footer></article>
+          <article class="monitor-stat" :class="{warning:(systemMonitor?.host.memory_percent||0)>85}"><header><span>内存使用率</span><TechIcon name="activity" :size="17"/></header><strong>{{systemMonitor?.host.memory_percent?.toFixed(1)||'0.0'}}<small>%</small></strong><footer>{{formatBytes(systemMonitor?.host.memory_used)}} / {{formatBytes(systemMonitor?.host.memory_total)}}</footer></article>
+          <article class="monitor-stat" :class="{warning:(systemMonitor?.host.disk_percent||0)>85}"><header><span>磁盘使用率</span><TechIcon name="database" :size="17"/></header><strong>{{systemMonitor?.host.disk_percent?.toFixed(1)||'0.0'}}<small>%</small></strong><footer>{{formatBytes(systemMonitor?.host.disk_used)}} / {{formatBytes(systemMonitor?.host.disk_total)}}</footer></article>
+          <article class="monitor-stat" :class="{warning:!monitorHealthy}"><header><span>服务运行状态</span><TechIcon name="signal" :size="17"/></header><strong class="state-value">{{monitorHealthy?'健康':'降级'}}</strong><footer>UPTIME {{formatUptime(systemMonitor?.uptime_seconds)}}</footer></article>
+        </div>
+
+        <div class="monitor-chart-grid">
+          <section class="panel grafana-panel">
+            <div class="section-head"><div><h2>主机资源趋势</h2><span class="head-en">HOST RESOURCE UTILIZATION</span><p>CPU、内存与磁盘实时使用率</p></div><div class="chart-legend"><span class="cpu">CPU</span><span class="memory">内存</span><span class="disk">磁盘</span></div></div>
+            <div class="monitor-chart">
+              <div class="monitor-y-axis"><span>100%</span><span>50%</span><span>0%</span></div>
+              <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="主机资源时间序列">
+                <g class="monitor-grid"><line x1="0" y1="0" x2="100" y2="0"/><line x1="0" y1="50" x2="100" y2="50"/><line x1="0" y1="100" x2="100" y2="100"/></g>
+                <polyline class="monitor-line disk" :points="monitorPath('disk',100)"/><polyline class="monitor-line memory" :points="monitorPath('memory',100)"/><polyline class="monitor-line cpu" :points="monitorPath('cpu',100)"/>
+              </svg>
+              <div class="monitor-x-axis"><span>{{monitorStartTime}}</span><span>NOW</span><span>{{monitorEndTime}}</span></div>
+            </div>
+          </section>
+
+          <section class="panel grafana-panel">
+            <div class="section-head"><div><h2>任务吞吐</h2><span class="head-en">TASK THROUGHPUT</span><p>每秒完成任务数与分析队列深度</p></div><div class="chart-legend"><span class="rate">任务 / 秒</span><span class="queue">队列</span></div></div>
+            <div class="monitor-chart">
+              <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="任务吞吐时间序列">
+                <defs><linearGradient id="rate-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#73bf69" stop-opacity=".32"/><stop offset="1" stop-color="#73bf69" stop-opacity="0"/></linearGradient></defs>
+                <g class="monitor-grid"><line x1="0" y1="0" x2="100" y2="0"/><line x1="0" y1="50" x2="100" y2="50"/><line x1="0" y1="100" x2="100" y2="100"/></g>
+                <polygon class="monitor-area rate" :points="monitorArea('taskRate')"/><polyline class="monitor-line rate" :points="monitorPath('taskRate')"/><polyline class="monitor-line queue" :points="monitorPath('queue')"/>
+              </svg>
+              <div class="monitor-x-axis"><span>{{monitorStartTime}}</span><span>NOW</span><span>{{monitorEndTime}}</span></div>
+            </div>
+            <div class="chart-current"><span><i class="rate"></i>当前吞吐 <b>{{systemMonitor?.application.task_rate?.toFixed(2)||'0.00'}} /s</b></span><span><i class="queue"></i>等待队列 <b>{{(systemMonitor?.runtime?.queues?.general||0)+(systemMonitor?.runtime?.queues?.fire||0)}}</b></span></div>
+          </section>
+        </div>
+
+        <div class="monitor-bottom-grid">
+          <section class="panel service-panel">
+            <div class="section-head"><div><h2>服务与检测器</h2><span class="head-en">SERVICE HEALTH</span><p>核心组件实时运行状态</p></div></div>
+            <div class="service-list">
+              <article><i :class="systemMonitor?.runtime?.scheduler?.status==='running'?'good':'bad'"></i><div><b>任务调度器</b><small>SCHEDULER</small></div><span>{{systemMonitor?.runtime?.scheduler?.status||'unknown'}}</span></article>
+              <article><i :class="systemMonitor?.runtime?.detectors?.general?.status==='ready'?'good':'bad'"></i><div><b>通用 YOLO</b><small>GENERAL DETECTOR</small></div><span>{{systemMonitor?.runtime?.detectors?.general?.status||'unknown'}}</span></article>
+              <article><i :class="systemMonitor?.runtime?.detectors?.fire_smoke?.status==='ready'?'good':'bad'"></i><div><b>烟火检测器</b><small>FIRE / SMOKE</small></div><span>{{systemMonitor?.runtime?.detectors?.fire_smoke?.status||'unknown'}}</span></article>
+              <article><i :class="systemMonitor?.runtime?.queue?.status==='redis'?'good':'warn'"></i><div><b>任务队列</b><small>QUEUE BACKEND</small></div><span>{{systemMonitor?.runtime?.queue?.status||'unknown'}}</span></article>
+            </div>
+          </section>
+          <section class="panel workload-panel">
+            <div class="section-head"><div><h2>应用工作负载</h2><span class="head-en">APPLICATION WORKLOAD</span><p>与 Prometheus / Grafana 同源指标</p></div></div>
+            <dl>
+              <div><dt>已处理任务</dt><dd>{{systemMonitor?.application.processed||0}}</dd></div><div><dt>失败任务</dt><dd :class="{danger:(systemMonitor?.application.failures||0)>0}">{{systemMonitor?.application.failures||0}}</dd></div>
+              <div><dt>平均分析耗时</dt><dd>{{systemMonitor?.application.analysis_average_ms||0}} ms</dd></div><div><dt>VLM 调用总数</dt><dd>{{systemMonitor?.application.vlm_calls_total||0}}</dd></div>
+              <div><dt>普通队列</dt><dd>{{systemMonitor?.runtime?.queues?.general||0}}</dd></div><div><dt>安全队列</dt><dd>{{systemMonitor?.runtime?.queues?.fire||0}}</dd></div>
+              <div><dt>工作进程</dt><dd>{{systemMonitor?.runtime?.workers?.count||0}}</dd></div><div><dt>在线摄像头</dt><dd>{{systemMonitor?.application.online_cameras||0}} / {{systemMonitor?.application.camera_count||0}}</dd></div>
             </dl>
           </section>
         </div>

@@ -1,6 +1,6 @@
 # 监衡：YOLO + 视觉大模型视频监控平台
 
-监衡是一套面向营业厅、工位、出入口和库房的视频智能分析平台。系统通过 FFmpeg 周期抽帧，结合本地 YOLO、像素统计、目标跟踪和外部视觉大模型，实现黑屏、离岗、在岗、人流、玩手机、吸烟、烟火和区域入侵检测，并提供告警留证、企业微信推送、账号权限和运行状态监控。
+监衡是一套面向营业厅、工位、出入口和库房的视频智能分析平台。系统通过 FFmpeg 周期抽帧，结合本地 YOLO、像素统计、目标跟踪和外部视觉大模型，实现黑屏、离岗、在岗、人流、玩手机、吸烟、烟火和区域入侵检测，并提供告警留证、企业微信推送、人流月报、账号权限、审计日志和运行状态监控。
 
 项目品牌图标统一存放在 `frontend/public/brand-icon.png`，同时用于浏览器页签图标、登录页和系统侧栏。替换品牌图标时保持 PNG 方形画布，并沿用该文件名即可。
 
@@ -16,8 +16,9 @@
 - 烟火任务使用独立队列和 worker，避免被普通任务阻塞。
 - 保存带标注的告警证据，支持筛选、清理和手动补发。
 - 支持多个企业微信机器人、分级推送和失败重试。
-- 提供人流趋势、当前人数、摄像头排名和实时事件更新。
-- 提供管理员/普通用户权限、健康检查和 Prometheus 指标。
+- 支持摄像头目录管理、批量移动和按目录聚合业务数据。
+- 提供人流趋势、当前人数 Top 5、营业厅人流排名、月度统计和 Excel 导出。
+- 提供管理员/普通用户权限、图形验证码、审计日志、健康检查和 Prometheus 指标。
 
 ## 功能模块
 
@@ -30,6 +31,8 @@
 - `ADMIN_PASSWORD`：初始密码，要求 8–128 位。
 
 管理员可以创建普通用户、修改显示名称、启停账号、重置密码和删除账号。普通用户可以访问监控总览、人流报表和告警中心，但不能管理摄像头、模型、Webhook、保留策略或账号。
+
+登录时必须填写服务端生成的图形验证码。验证码为一次性凭据，校验失败或过期后需要刷新再试。
 
 会话连续闲置 8 小时后默认失效。修改或重置密码、停用或删除账号时，该账号已有会话会失效。HTTPS 部署应设置 `SECURE_COOKIES=true`，并使用 `ALLOWED_ORIGINS` 限制 WebSocket 来源。
 
@@ -44,7 +47,8 @@
 管理员可以单个或批量添加视频源，并配置：
 
 - 业务 ID、显示名称、视频地址和启用状态。
-- 摄像头列表支持勾选、全选和批量删除；批量操作会统一释放对应运行状态。
+- 所属目录；目录支持新建、重命名和删除，删除目录后其中摄像头自动移入“未分组”。
+- 摄像头列表支持勾选、全选、批量移动目录、批量设置离岗排班和批量删除；批量删除会统一释放对应运行状态。
 - 场景类型与检测模式组合。
 - 1、5、10、20、30、60、120 秒抽帧周期。
 - 岗位区域和入侵禁区；人流统计无需绘制区域。
@@ -94,7 +98,7 @@
 
 ### 7. 人流报表
 
-人流模块基于人员跟踪 ID 统计进入 ROI 的人次，展示今日总人流、当前画面人数、当日趋势、当前人数排名、今日人流排名以及逐摄像头统计。
+人流模块基于人员跟踪 ID 统计进入 ROI 的人次，展示今日总人流、当前画面人数、当日趋势、当前画面人数 Top 5、按目录汇总的今日人流排名以及逐摄像头统计。趋势图与两类排名在宽屏下并排展示，并随实时事件自动更新。
 
 人流统计直接复用通用 YOLO 的 Person 检测和 ByteTrack 跟踪结果，不会额外运行一套模型。人员框中心点首次出现在人流 ROI 内时立即累计一次，无需先在 ROI 外出现，也不等待稳定帧确认。
 
@@ -104,16 +108,24 @@
 
 系统配置可以隐藏人流报表菜单或总览中的当前人数。隐藏只影响界面展示，不会停止后台统计或删除历史数据。
 
+月度人流统计按 `Asia/Shanghai` 自然日和当前摄像头目录汇总，可选择当前或历史月份查看每个营业厅的每日人流、月合计、每日总计和全月总计。未来日期显示为空，未来月份不允许查询；报表可导出为带冻结表头和筛选器的 `.xlsx` 文件。
+
 ### 8. 企业微信机器人
 
 管理员可维护多个企业微信群机器人，每个目标可独立启停，并选择自动接收的 `normal`、`high`、`critical` 级别。
 
 投递时先发送 Markdown 摘要，再发送 Base64 + MD5 格式的证据图片。图片超过 2 MB 时在内存中压缩，不改写原证据文件。HTTP 错误或企业微信返回非零 `errcode` 时指数退避，最多尝试 5 次；两条消息都成功才计为投递成功。
 
-### 9. 系统配置
+### 9. 日志管理
+
+管理员可以分页查看用户操作、摄像头分析和外部大模型调用三类日志，按时间及各类别字段筛选、查看详情并将当前筛选结果导出为 UTF-8 CSV。日志中记录操作结果、分析状态、模型延迟、Token 用量和错误信息等排障信息；敏感配置不会作为明文日志输出。
+
+三类日志使用统一保留天数，默认保留 30 天，由系统配置中的 `log_retention_days` 控制并随自动清理任务删除。
+
+### 10. 系统配置
 
 - 界面展示：控制人流报表和当前人数是否显示。
-- 数据保留：设置告警保留天数和自动清理开关。
+- 数据保留：分别设置告警与日志保留天数，并控制到期自动清理。
 - 外部视觉模型：配置 OpenAI 兼容 Base URL、API Key 和检测模型，并测试连接。
 - 本地检测器：配置通用 YOLO、烟火模型和运行设备，查看加载状态。
 - 能力注册表：区分已就绪、实验性和规划能力；规划能力仅展示，不进入检测任务。
@@ -157,6 +169,7 @@ RTSP / 视频文件
 | 队列 | Redis 8，异常时回退内存队列 |
 | 视频 | FFmpeg、OpenCV |
 | AI | Ultralytics YOLO、ByteTrack/轻量跟踪、OpenAI 兼容 VLM |
+| 报表 | OpenPyXL、Excel/CSV 导出 |
 | 监控 | Prometheus、Grafana（可选 profile） |
 | 部署 | Docker Compose、CPU 基线镜像 |
 
@@ -248,11 +261,14 @@ docker compose -f compose.cpu.yml --profile monitoring up -d
 
 | 模块 | 接口 |
 | --- | --- |
-| 登录与账号 | `/api/auth/login`、`/api/auth/me`、`/api/auth/logout`、`/api/auth/password`、`/api/users` |
-| 摄像头 | `/api/cameras`、`/api/cameras/batch`、`/api/cameras/batch-delete`、`/api/scene-templates`、`/api/capabilities` |
+| 登录与账号 | `/api/auth/captcha`、`/api/auth/login`、`/api/auth/me`、`/api/auth/logout`、`/api/auth/password`、`/api/users` |
+| 摄像头 | `/api/cameras`、`/api/cameras/batch`、`/api/cameras/batch-move`、`/api/cameras/batch-off-duty-schedule`、`/api/cameras/batch-delete` |
+| 摄像头目录 | `/api/camera-directories`、`/api/camera-directories/{id}` |
+| 场景与能力 | `/api/scene-templates`、`/api/capabilities` |
 | 摄像头配置 | `/api/cameras/{id}/modes`、`geometry`、`schedule`、`analyze` |
 | 图像 | `/api/cameras/{id}/snapshot`、`preview/start`、`preview/heartbeat`、`preview/stop`、`preview` |
-| 业务数据 | `/api/dashboard`、`/api/alerts`、`/api/analyses`、`/api/traffic`、`/api/traffic/summary` |
+| 业务数据 | `/api/dashboard`、`/api/alerts`、`/api/analyses`、`/api/traffic`、`/api/traffic/summary`、`/api/traffic/monthly`、`/api/traffic/monthly/export` |
+| 管理日志 | `/api/logs/audit`、`/api/logs/analyses`、`/api/logs/model-calls`、`/api/logs/{category}/{id}`、`/api/logs/{category}/export` |
 | 系统设置 | `/api/settings/models`、`detectors`、`webhooks`、`retention`、`display` |
 | 运行状态 | `/health`、`/api/runtime/workers`、`/metrics`、`/ws/events` |
 
@@ -299,7 +315,7 @@ Docker Compose 使用独立命名卷：
 
 ```text
 backend/                 FastAPI、调度、队列、检测、告警和数据访问
-backend/api/             登录、摄像头、监控和设置接口
+backend/api/             登录、摄像头、监控、日志和设置接口
 backend/detectors/       黑屏、通用 YOLO、烟火检测器
 frontend/src/            Vue 管理界面
 alembic/                 PostgreSQL 数据库迁移

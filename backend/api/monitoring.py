@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
+import time
 from datetime import date as date_type, datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -27,6 +30,80 @@ from backend.auth import admin_user, current_user, websocket_user
 
 
 router = APIRouter()
+
+_process_started_at = time.time()
+_cpu_sample: tuple[int, int] | None = None
+_task_sample: tuple[float, int] | None = None
+
+
+def _host_snapshot() -> dict[str, Any]:
+    """Read lightweight host/container telemetry without an extra dependency."""
+    global _cpu_sample
+    cpu_percent = 0.0
+    memory_total = memory_used = 0
+    try:
+        values = [int(value) for value in Path("/proc/stat").read_text().splitlines()[0].split()[1:]]
+        idle, total = values[3] + (values[4] if len(values) > 4 else 0), sum(values)
+        if _cpu_sample:
+            idle_delta, total_delta = idle - _cpu_sample[0], total - _cpu_sample[1]
+            if total_delta > 0:
+                cpu_percent = max(0.0, min(100.0, (1 - idle_delta / total_delta) * 100))
+        _cpu_sample = (idle, total)
+    except (OSError, ValueError, IndexError):
+        try:
+            cpu_percent = min(100.0, os.getloadavg()[0] / max(1, os.cpu_count() or 1) * 100)
+        except (AttributeError, OSError):
+            pass
+    try:
+        memory = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, value = line.split(":", 1)
+            memory[key] = int(value.strip().split()[0]) * 1024
+        memory_total = memory.get("MemTotal", 0)
+        memory_used = max(0, memory_total - memory.get("MemAvailable", memory.get("MemFree", 0)))
+    except (OSError, ValueError, IndexError):
+        pass
+    disk = shutil.disk_usage("/")
+    return {
+        "cpu_percent": round(cpu_percent, 1),
+        "cpu_count": os.cpu_count() or 1,
+        "memory_used": memory_used,
+        "memory_total": memory_total,
+        "memory_percent": round(memory_used / memory_total * 100, 1) if memory_total else 0,
+        "disk_used": disk.used,
+        "disk_total": disk.total,
+        "disk_percent": round(disk.used / disk.total * 100, 1) if disk.total else 0,
+    }
+
+
+def _prometheus_snapshot(processed: int) -> dict[str, Any]:
+    """Expose the same application signals used by the provisioned Grafana dashboard."""
+    global _task_sample
+    from prometheus_client import REGISTRY
+
+    now = time.monotonic()
+    task_rate = 0.0
+    if _task_sample:
+        elapsed = now - _task_sample[0]
+        if elapsed > 0:
+            task_rate = max(0.0, (processed - _task_sample[1]) / elapsed)
+    _task_sample = (now, processed)
+
+    vlm_calls = 0.0
+    latency_sum = latency_count = 0.0
+    for family in REGISTRY.collect():
+        for sample in family.samples:
+            if sample.name == "monitor_vlm_calls_total":
+                vlm_calls += sample.value
+            elif sample.name == "monitor_analysis_seconds_sum":
+                latency_sum += sample.value
+            elif sample.name == "monitor_analysis_seconds_count":
+                latency_count += sample.value
+    return {
+        "task_rate": round(task_rate, 3),
+        "vlm_calls_total": int(vlm_calls),
+        "analysis_average_ms": round(latency_sum / latency_count * 1000, 1) if latency_count else 0,
+    }
 
 
 @router.get("/health")
@@ -151,6 +228,26 @@ async def delete_alerts(
         "deleted": result["deleted"],
         "evidence_removed": result["evidence_removed"],
         "cutoff": result["cutoff"],
+    }
+
+
+@router.get("/api/system-monitor", dependencies=[Depends(current_user)])
+async def system_monitor() -> dict[str, Any]:
+    runtime = await context.require_runtime().status()
+    processed = int(runtime.get("workers", {}).get("processed", 0))
+    dashboard_snapshot = context.repository.dashboard()
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "uptime_seconds": max(0, int(time.time() - _process_started_at)),
+        "host": _host_snapshot(),
+        "application": {
+            **_prometheus_snapshot(processed),
+            "processed": processed,
+            "failures": int(runtime.get("workers", {}).get("failures", 0)),
+            "online_cameras": int(dashboard_snapshot.get("online", 0)),
+            "camera_count": int(dashboard_snapshot.get("cameras", 0)),
+        },
+        "runtime": runtime,
     }
 
 
