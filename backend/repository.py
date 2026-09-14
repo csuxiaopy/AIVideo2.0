@@ -799,7 +799,7 @@ class Repository:
                 "last_stat_at": self._aware_utc(last.bucket_start) if last else None,
             })
         camera_items.sort(key=lambda item: (-item["entered_today"], item["camera_id"]))
-        current_ranking = sorted(camera_items, key=lambda item: (-item["current_count"], item["camera_id"]))[:3]
+        current_ranking = sorted(camera_items, key=lambda item: (-item["current_count"], item["camera_id"]))[:5]
         directory_totals: dict[int | None, dict[str, Any]] = {}
         for item in camera_items:
             directory_id = item["directory_id"]

@@ -91,3 +91,27 @@ def test_traffic_summary_returns_empty_dashboard_without_flow_cameras(monkeypatc
     assert result["store_trend"] == []
     assert result["cameras"] == []
     assert result["current_ranking"] == []
+
+
+def test_traffic_summary_returns_top_five_current_counts(monkeypatch):
+    cameras = [_camera(f"cam-{index}", f"{index}号门") for index in range(6)]
+    timestamp = datetime(2026, 9, 1, 16, 1, tzinfo=timezone.utc)
+    today = [_row(camera.id, timestamp, index) for index, camera in enumerate(cameras)]
+
+    class FakeSession:
+        scalars_index = 0
+
+        def scalars(self, _statement):
+            result = [cameras, today, [], []][self.scalars_index]
+            self.scalars_index += 1
+            return result
+
+    @contextmanager
+    def fake_scope():
+        yield FakeSession()
+
+    monkeypatch.setattr("backend.repository.session_scope", fake_scope)
+    result = Repository().traffic_summary(datetime(2026, 9, 2, 4, 0, tzinfo=timezone.utc))
+
+    assert len(result["current_ranking"]) == 5
+    assert [item["current_count"] for item in result["current_ranking"]] == [5, 4, 3, 2, 1]

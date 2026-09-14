@@ -499,7 +499,8 @@ const chartPolyline=computed(()=>chartPoints.value.map(point=>`${point.x},${poin
 const chartArea=computed(()=>chartPoints.value.length?`44,220 ${chartPolyline.value} ${chartPoints.value.at(-1)?.x||44},220`:'')
 const chartTicks=computed(()=>[chartMax.value,Math.round(chartMax.value/2),0])
 const trendTime=(value?:string)=>value?new Date(value).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false}):'--:--'
-const podiumRows=(rows:TrafficCameraSummary[])=>([rows[1]||null,rows[0]||null,rows[2]||null])
+const currentRankingMax=computed(()=>Math.max(1,...trafficSummary.value.current_ranking.slice(0,5).map(row=>row.current_count)))
+const currentRankPercent=(value:number)=>Math.max(value>0?4:0,Math.round(value/currentRankingMax.value*100))
 const flowRankingMax=computed(()=>Math.max(1,...trafficSummary.value.flow_ranking.map(row=>row.entered_today)))
 const flowRankPercent=(value:number)=>Math.max(value>0?4:0,Math.round(value/flowRankingMax.value*100))
 const snapshotUrl=(camera:Camera)=>`/api/cameras/${encodeURIComponent(camera.id)}/snapshot?v=${encodeURIComponent(camera.last_frame_at||'none')}`
@@ -910,29 +911,32 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         </section>
 
         <div class="ranking-grid">
-          <section class="panel podium-panel">
-            <div class="section-head"><div><h2>当前画面人数排名</h2><span class="head-en">ON-SCREEN RANKING</span></div></div>
-            <div class="podium">
-              <article v-for="(row,index) in podiumRows(trafficSummary.current_ranking)" :key="row?.camera_id||index" :class="[`place-${[2,1,3][index]}`,{clickable:!!row}]" :role="row?'button':undefined" :tabindex="row?0:undefined" @click="focusDashboardCamera(row)" @keydown.enter.prevent="focusDashboardCamera(row)" @keydown.space.prevent="focusDashboardCamera(row)">
-                <div class="podium-person"><span>{{[2,1,3][index]}}</span><b>{{row?.camera_name||'暂无'}}</b><small>{{row?.camera_id||'—'}}</small><strong>{{row?.current_count||0}}</strong></div>
-                <div class="podium-step">NO.{{[2,1,3][index]}}</div>
+          <section class="panel current-ranking-panel">
+            <div class="section-head"><div><h2>当前画面人数排名</h2><span class="head-en">ON-SCREEN RANKING · TOP 5</span><p>按当前画面人数实时降序排列，点击可查看对应摄像头</p></div><small class="flow-ranking-count">前 5 个摄像头 · 自动更新</small></div>
+            <TransitionGroup v-if="trafficSummary.current_ranking.length" name="flow-rank" tag="div" class="current-ranking-list">
+              <article v-for="(row,index) in trafficSummary.current_ranking.slice(0,5)" :key="row.camera_id" class="current-rank-row clickable" role="button" tabindex="0" @click="focusDashboardCamera(row)" @keydown.enter.prevent="focusDashboardCamera(row)" @keydown.space.prevent="focusDashboardCamera(row)">
+                <span class="flow-rank-number">{{index+1}}</span>
+                <div class="flow-rank-name"><b>{{row.camera_name}}</b><small>{{row.camera_id}} · 今日 {{row.entered_today}} 人次</small></div>
+                <div class="flow-rank-track"><span :style="{width:`${currentRankPercent(row.current_count)}%`}"></span></div>
+                <strong>{{row.current_count}}<small>人</small></strong>
               </article>
-            </div>
+            </TransitionGroup>
+            <div v-else class="empty flow-ranking-empty"><b>NO ON-SCREEN VISITORS</b><p>当前暂无摄像头人数数据</p></div>
+          </section>
+
+          <section class="panel flow-ranking-panel">
+            <div class="section-head"><div><h2>今日人流排名</h2><span class="head-en">DAILY FLOW RANKING · ALL DIRECTORIES</span><p>按今日人流实时降序排列，统计条长度代表人流大小</p></div><small class="flow-ranking-count">共 {{trafficSummary.flow_ranking.length}} 个目录 · 自动更新</small></div>
+            <TransitionGroup v-if="trafficSummary.flow_ranking.length" name="flow-rank" tag="div" class="flow-ranking-list">
+              <article v-for="(row,index) in trafficSummary.flow_ranking" :key="row.directory_id??'unassigned'" class="flow-rank-row">
+                <span class="flow-rank-number">{{index+1}}</span>
+                <div class="flow-rank-name"><b>{{row.directory_name}}</b><small>{{row.camera_count}} 个统计摄像头 · 当前 {{row.current_count}} 人</small></div>
+                <div class="flow-rank-track"><span :style="{width:`${flowRankPercent(row.entered_today)}%`}"></span></div>
+                <strong>{{row.entered_today}}<small>人次</small></strong>
+              </article>
+            </TransitionGroup>
+            <div v-else class="empty flow-ranking-empty"><b>NO DIRECTORY FLOW</b><p>今日暂无目录人流数据</p></div>
           </section>
         </div>
-
-        <section class="panel flow-ranking-panel">
-          <div class="section-head"><div><h2>今日人流排名</h2><span class="head-en">DAILY FLOW RANKING · ALL DIRECTORIES</span><p>按今日人流实时降序排列，统计条长度代表人流大小</p></div><small class="flow-ranking-count">共 {{trafficSummary.flow_ranking.length}} 个目录 · 自动更新</small></div>
-          <TransitionGroup v-if="trafficSummary.flow_ranking.length" name="flow-rank" tag="div" class="flow-ranking-list">
-            <article v-for="(row,index) in trafficSummary.flow_ranking" :key="row.directory_id??'unassigned'" class="flow-rank-row">
-              <span class="flow-rank-number">{{index+1}}</span>
-              <div class="flow-rank-name"><b>{{row.directory_name}}</b><small>{{row.camera_count}} 个统计摄像头 · 当前 {{row.current_count}} 人</small></div>
-              <div class="flow-rank-track"><span :style="{width:`${flowRankPercent(row.entered_today)}%`}"></span></div>
-              <strong>{{row.entered_today}}<small>人次</small></strong>
-            </article>
-          </TransitionGroup>
-          <div v-else class="empty flow-ranking-empty"><b>NO DIRECTORY FLOW</b><p>今日暂无目录人流数据</p></div>
-        </section>
 
         <section class="panel traffic-monthly-panel">
           <div class="section-head traffic-monthly-head">
