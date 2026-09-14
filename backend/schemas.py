@@ -137,6 +137,7 @@ class CameraCreate(BaseModel):
     id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     name: str = Field(min_length=1, max_length=200)
     rtsp_url: str = Field(min_length=1, max_length=2000)
+    substream_url: str | None = Field(default=None, min_length=1, max_length=2000)
     enabled: bool = True
     scene_type: SceneType = SceneType.WORKSTATION
     modes: list[Mode] = Field(min_length=1, max_length=len(Mode))
@@ -154,7 +155,7 @@ class CameraCreate(BaseModel):
             raise ValueError("抽帧频率必须是 1、5、10、20、30、60 或 120 秒")
         return value
 
-    @field_validator("rtsp_url")
+    @field_validator("rtsp_url", "substream_url")
     @classmethod
     def valid_source(cls, value: str) -> str:
         if not value.startswith(("rtsp://", "rtsps://", "rtmp://", "http://", "https://", "file://")):
@@ -184,6 +185,7 @@ class CameraPatch(BaseModel):
     id: str | None = Field(default=None, min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     name: str | None = Field(default=None, min_length=1, max_length=200)
     rtsp_url: str | None = Field(default=None, min_length=1, max_length=2000)
+    substream_url: str | None = Field(default=None, min_length=1, max_length=2000)
     enabled: bool | None = None
     scene_type: SceneType | None = None
     modes: list[Mode] | None = Field(default=None, min_length=1, max_length=len(Mode))
@@ -201,7 +203,7 @@ class CameraPatch(BaseModel):
             raise ValueError("抽帧频率必须是 1、5、10、20、30、60 或 120 秒")
         return value
 
-    @field_validator("rtsp_url")
+    @field_validator("rtsp_url", "substream_url")
     @classmethod
     def valid_source(cls, value: str | None) -> str | None:
         if value and not value.startswith(("rtsp://", "rtsps://", "rtmp://", "http://", "https://", "file://")):
@@ -224,9 +226,16 @@ class ModesUpdate(BaseModel):
 
 
 class CameraBatchItem(BaseModel):
-    id: str
+    camera_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     name: str
-    rtsp_url: str
+    substream_url: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("substream_url")
+    @classmethod
+    def valid_substream(cls, value: str) -> str:
+        if not value.startswith(("rtsp://", "rtsps://")):
+            raise ValueError("子码流必须是 rtsp:// 或 rtsps://")
+        return value
 
 
 class CameraBatchCreate(BaseModel):

@@ -136,6 +136,9 @@ def test_camera_public_discards_historical_flow_geometry():
     camera = SimpleNamespace(
         id="legacy-flow", name="旧入口", enabled=True, scene_type="customer_area",
         rtsp_url_encrypted=SecretCipher("test-secret").encrypt("rtsp://host/live"),
+        substream_url_encrypted=SecretCipher("test-secret").encrypt(
+            "rtsp://viewer:secret@host/substream"
+        ),
         online=True, last_seen_at=None, last_frame_at=None, last_analysis_at=None,
         frame_interval_seconds=1, last_error=None, modes_json='["people_flow"]',
         geometry_json='{"flow_line":[[0.1,0.5],[0.9,0.5]]}',
@@ -145,6 +148,8 @@ def test_camera_public_discards_historical_flow_geometry():
     assert "flow_line" not in result["geometry"]
     assert "flow_zone" not in result["geometry"]
     assert result["geometry"]["flow_roi"] == [(0, 0), (1, 0), (1, 1), (0, 1)]
+    assert result["using_substream"] is True
+    assert "secret" not in result["substream_source"]
 
 
 def test_phone_interval_cannot_exceed_judgment_duration():
@@ -183,13 +188,19 @@ def test_display_settings_accept_partial_updates():
 
 
 def test_camera_batch_limit_and_source_schemes():
-    item = {"id": "batch-1", "name": "批量摄像头", "rtsp_url": "rtmp://user:p@host/live"}
+    item = {
+        "camera_id": "batch-1",
+        "name": "批量摄像头",
+        "substream_url": "rtsp://user:p@host/substream",
+    }
     assert len(CameraBatchCreate(items=[item]).items) == 1
     with pytest.raises(ValueError):
         CameraBatchCreate(items=[item] * 501)
     assert CameraBatchDelete(ids=["cam-1", "cam-1", "cam-2"]).ids == ["cam-1", "cam-2"]
     with pytest.raises(ValueError):
         CameraBatchDelete(ids=[])
+    with pytest.raises(ValueError):
+        CameraBatchCreate(items=[{**item, "substream_url": "rtmp://user:p@host/live"}])
 
     camera = CameraCreate(
         id="http-stream",

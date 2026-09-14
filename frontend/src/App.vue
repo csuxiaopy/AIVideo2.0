@@ -74,6 +74,9 @@ const directoryCameras=computed(()=>cameras.value.filter(camera=>activeDirectory
 const filteredSettingsCameras=computed(()=>directoryCameras.value.filter(camera=>matchesCameraName(camera,cameraSettingsSearch.value)))
 const unassignedCameraCount=computed(()=>cameras.value.filter(camera=>!camera.directory_id).length)
 const alerts = ref<any[]>([])
+const recentAlerts = ref<any[]>([])
+const alertData=reactive<{total:number;page:number;page_size:number}>({total:0,page:1,page_size:100})
+const alertLoading=ref(false)
 type LogCategory = 'audit'|'analyses'|'model-calls'
 const logCategory=ref<LogCategory>('audit')
 const logData=reactive<{items:any[];total:number;page:number;page_size:number}>({items:[],total:0,page:1,page_size:50})
@@ -199,10 +202,10 @@ const severityLevels = [
   {value:'normal',label:'NORMAL'},{value:'high',label:'HIGH'},{value:'critical',label:'CRITICAL'},
 ] as const
 const alertFilter = reactive({date:'',mode:'',severity:''})
-const filteredAlerts = ref<any[]|null>(null)
 let alertFilterSeq = 0
 const hasAlertFilter = computed(()=>!!alertFilter.date||!!alertFilter.mode||!!alertFilter.severity)
-const alertRows = computed(()=>filteredAlerts.value??alerts.value)
+const alertRows = computed(()=>alerts.value)
+const alertPages=computed(()=>Math.max(1,Math.ceil(alertData.total/alertData.page_size)))
 const selectedAlertIds=ref<number[]>([])
 const expandedDeliveryIds=ref<number[]>([])
 const webhookTargets=ref<any[]>([])
@@ -213,30 +216,40 @@ const enabledWebhookTargets=computed(()=>webhookTargets.value.filter(target=>tar
 const allAlertsSelected=computed(()=>alertRows.value.length>0&&alertRows.value.every(row=>selectedAlertIds.value.includes(row.id)))
 const toggleAllAlerts=()=>{selectedAlertIds.value=allAlertsSelected.value?[]:alertRows.value.map(row=>row.id)}
 const toggleDeliveryDetails=(id:number)=>{expandedDeliveryIds.value=expandedDeliveryIds.value.includes(id)?expandedDeliveryIds.value.filter(x=>x!==id):[...expandedDeliveryIds.value,id]}
-const applyAlertFilter = async () => {
-  if(!hasAlertFilter.value){filteredAlerts.value=null;return}
+const loadAlerts = async (page=alertData.page) => {
   const seq=++alertFilterSeq
+  alertLoading.value=true
   try{
-    const params=new URLSearchParams({limit:'100'})
+    const params=new URLSearchParams({page:String(page),page_size:String(alertData.page_size)})
     if(alertFilter.date)params.set('date',alertFilter.date)
     if(alertFilter.mode)params.set('mode',alertFilter.mode)
     if(alertFilter.severity)params.set('severity',alertFilter.severity)
-    const rows=await api(`/api/alerts?${params.toString()}`)
-    if(seq===alertFilterSeq)filteredAlerts.value=rows
+    const result=await api<{items:any[];total:number;page:number;page_size:number}>(`/api/alerts?${params.toString()}`)
+    if(seq!==alertFilterSeq)return
+    const pages=Math.max(1,Math.ceil(result.total/result.page_size))
+    if(page>pages){await loadAlerts(pages);return}
+    alerts.value=result.items
+    Object.assign(alertData,{total:result.total,page:result.page,page_size:result.page_size})
+    selectedAlertIds.value=selectedAlertIds.value.filter(id=>result.items.some(row=>row.id===id))
+    expandedDeliveryIds.value=expandedDeliveryIds.value.filter(id=>result.items.some(row=>row.id===id))
   }catch(error:any){notify(`告警筛选加载失败：${error.message}`,'error')}
+  finally{if(seq===alertFilterSeq)alertLoading.value=false}
 }
-const resetAlertFilter = () => {alertFilter.date='';alertFilter.mode='';alertFilter.severity='';filteredAlerts.value=null;selectedAlertIds.value=[]}
+const applyAlertFilter = async () => {selectedAlertIds.value=[];await loadAlerts(1)}
+const resetAlertFilter = async () => {alertFilter.date='';alertFilter.mode='';alertFilter.severity='';selectedAlertIds.value=[];await loadAlerts(1)}
 watch(()=>[alertFilter.date,alertFilter.mode,alertFilter.severity],()=>{selectedAlertIds.value=[]})
 const loadAll = async (silent=false) => {
   if (!silent) loading.value=true
   try {
-    const [d,c,dirs,a,t,ds] = await Promise.all([
-      api('/api/dashboard'), api('/api/cameras'), api('/api/camera-directories'), api('/api/alerts?limit=100'),
+    const [d,c,dirs,recent,t,ds] = await Promise.all([
+      api('/api/dashboard'), api('/api/cameras'), api('/api/camera-directories'),
+      api<{items:any[]}>('/api/alerts?page=1&page_size=100'),
       api<TrafficSummary>('/api/traffic/summary'), api('/api/settings/display'),
     ])
-    dashboard.value=d; cameras.value=c; cameraDirectories.value=dirs; alerts.value=a; trafficSummary.value=t
+    dashboard.value=d; cameras.value=c; cameraDirectories.value=dirs; recentAlerts.value=recent.items; trafficSummary.value=t
     selectedCameraIds.value=selectedCameraIds.value.filter(id=>cameras.value.some(camera=>camera.id===id))
     Object.assign(displaySettings,ds)
+    await loadAlerts(alertData.page)
     if(isAdmin.value){const [st,cp]=await Promise.all([api('/api/scene-templates'),api('/api/capabilities')]);templates.value=st;capabilities.value=cp}
     if(active.value==='traffic'&&!displaySettings.show_traffic_report) setTab('dashboard')
     if(active.value==='traffic'&&trafficMonth.value===currentTrafficMonth) void loadTrafficMonthly(true)
@@ -249,7 +262,7 @@ const defaultOptions = () => ({health_interval_seconds:5,yolo_fps:.1,behavior_in
 const emptySchedule = () => ({timezone:'Asia/Shanghai',weekly:{},holidays:[]})
 const defaultIntrusionSchedule = () => ({timezone:'Asia/Shanghai',weekly:Object.fromEntries(Array.from({length:7},(_,day)=>[String(day),[{start:'20:00',end:'05:00'}]])),holidays:[]})
 const deepCopy = <T,>(value:T):T => JSON.parse(JSON.stringify(value))
-const newCamera = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'workstation' as SceneType,modes:[] as Mode[],schedule:emptySchedule(),intrusion_schedule:defaultIntrusionSchedule(),directory_id:null,options:defaultOptions(),frame_interval_seconds:1})
+const newCamera = reactive<any>({id:'',name:'',rtsp_url:'',substream_url:'',enabled:true,scene_type:'workstation' as SceneType,modes:[] as Mode[],schedule:emptySchedule(),intrusion_schedule:defaultIntrusionSchedule(),directory_id:null,options:defaultOptions(),frame_interval_seconds:1})
 const selectTemplate = (scene:SceneType) => {
   newCamera.scene_type=scene
   const item=templates.value.find(t=>t.scene_type===scene)
@@ -274,7 +287,7 @@ const createCamera = async () => {
     if(!newCamera.modes.length) throw new Error('请至少选择一种检测模式')
     const created=await api('/api/cameras',{method:'POST',body:JSON.stringify({...newCamera,geometry:defaultGeometry(newCamera.scene_type)})})
     notify('摄像头已添加，请继续校准检测区域'); await loadAll(true)
-    Object.assign(newCamera,{id:'',name:'',rtsp_url:'',enabled:true,scene_type:'workstation',modes:[],schedule:emptySchedule(),intrusion_schedule:defaultIntrusionSchedule(),directory_id:null,options:defaultOptions(),frame_interval_seconds:1}); selectTemplate('workstation')
+    Object.assign(newCamera,{id:'',name:'',rtsp_url:'',substream_url:'',enabled:true,scene_type:'workstation',modes:[],schedule:emptySchedule(),intrusion_schedule:defaultIntrusionSchedule(),directory_id:null,options:defaultOptions(),frame_interval_seconds:1}); selectTemplate('workstation')
     openEditor(created)
   } catch(error:any){notify(error.message,'error')}
 }
@@ -307,10 +320,10 @@ const saveOffDutySchedules=async()=>{
   finally{offDutyScheduleSaving.value=false}
 }
 
-const editForm = reactive<any>({id:'',name:'',rtsp_url:'',enabled:true,scene_type:'custom',modes:[],geometry:defaultGeometry('custom'),schedule:emptySchedule(),intrusion_schedule:defaultIntrusionSchedule(),directory_id:null,options:defaultOptions(),zone_name:'禁区',frame_interval_seconds:60})
+const editForm = reactive<any>({id:'',name:'',rtsp_url:'',substream_url:'',enabled:true,scene_type:'custom',modes:[],geometry:defaultGeometry('custom'),schedule:emptySchedule(),intrusion_schedule:defaultIntrusionSchedule(),directory_id:null,options:defaultOptions(),zone_name:'禁区',frame_interval_seconds:60})
 const openEditor = (camera:Camera) => {
   editor.value=camera
-  Object.assign(editForm,{id:camera.id,name:camera.name,rtsp_url:'',enabled:camera.enabled,scene_type:camera.scene_type,modes:[...camera.modes],geometry:deepCopy(camera.geometry||defaultGeometry('custom')),schedule:deepCopy(camera.schedule||emptySchedule()),intrusion_schedule:deepCopy(camera.intrusion_schedule||defaultIntrusionSchedule()),directory_id:camera.directory_id??null,options:{...defaultOptions(),...(camera.options||{})},zone_name:camera.geometry?.intrusion_zone?.name||'禁区',frame_interval_seconds:camera.frame_interval_seconds||60})
+  Object.assign(editForm,{id:camera.id,name:camera.name,rtsp_url:'',substream_url:'',enabled:camera.enabled,scene_type:camera.scene_type,modes:[...camera.modes],geometry:deepCopy(camera.geometry||defaultGeometry('custom')),schedule:deepCopy(camera.schedule||emptySchedule()),intrusion_schedule:deepCopy(camera.intrusion_schedule||defaultIntrusionSchedule()),directory_id:camera.directory_id??null,options:{...defaultOptions(),...(camera.options||{})},zone_name:camera.geometry?.intrusion_zone?.name||'禁区',frame_interval_seconds:camera.frame_interval_seconds||60})
   drawLayer.value = camera.scene_type==='security_area'?'intrusion_zone':'post_roi'
 }
 const editorTemplate = (scene:SceneType) => {
@@ -343,6 +356,7 @@ const saveEditor = async () => {
     if(!editForm.id||!editForm.name) throw new Error('请填写摄像头 ID 和显示名称')
     if(!/^[A-Za-z0-9_-]+$/.test(editForm.id)) throw new Error('摄像头 ID 只能使用英文字母、数字、短横线和下划线')
     if(editForm.rtsp_url&&!/^(rtsp|rtsps|file):\/\//.test(editForm.rtsp_url)) throw new Error('视频源必须以 rtsp://、rtsps:// 或 file:// 开头')
+    if(editForm.substream_url&&!/^rtsps?:\/\//.test(editForm.substream_url)) throw new Error('子码流必须以 rtsp:// 或 rtsps:// 开头')
     if(editForm.modes.includes('off_duty')||editForm.modes.includes('phone_use')||editForm.modes.includes('on_duty')) if(pointsFor('post_roi').length<3) throw new Error('岗位区域至少需要 3 个点')
     if(editForm.modes.includes('off_duty')&&!Object.keys(editForm.schedule.weekly||{}).length) throw new Error('离岗检测请至少选择一个生效星期')
     const configuredShifts=Object.values(editForm.schedule.weekly||{}).flat() as any[]
@@ -352,7 +366,7 @@ const saveEditor = async () => {
     if(editForm.modes.includes('phone_use')&&editForm.options.behavior_interval_seconds>editForm.options.phone_use_seconds) throw new Error('大模型检测间隔不能大于玩手机判定时间')
     if(editForm.geometry.intrusion_zone) editForm.geometry.intrusion_zone.name=editForm.zone_name||'禁区'
     const id=editor.value.id
-    const body=deepCopy(editForm);delete body.zone_name;if(!body.rtsp_url)delete body.rtsp_url
+    const body=deepCopy(editForm);delete body.zone_name;if(!body.rtsp_url)delete body.rtsp_url;if(!body.substream_url)delete body.substream_url
     const updated=await api<Camera>(`/api/cameras/${encodeURIComponent(id)}`,{method:'PATCH',body:JSON.stringify(body)})
     const index=cameras.value.findIndex(camera=>camera.id===id);if(index>=0)cameras.value[index]=updated
     editor.value=null;notify('修改成功');await loadAll(true)
@@ -763,8 +777,8 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         <div class="two-cols">
           <section class="panel">
             <div class="section-head"><div><h2>最近告警</h2><span class="head-en">RECENT ALERTS</span><p>按严重级别优先排序</p></div><button class="link" @click="setTab('alerts')">查看全部</button></div>
-            <div v-if="!alerts.length" class="empty"><b>NO ALERTS</b><p>暂无告警</p></div>
-            <div v-for="item in alerts.slice(0,6)" :key="item.id" class="alert-row" :class="`severity-${item.severity}`"><div class="alert-symbol">!</div><div><b>{{modeName(item.mode)}} · {{item.alert_name||item.camera_name}}</b><p>{{item.reason}}</p></div><time>{{formatTime(item.created_at)}}</time></div>
+            <div v-if="!recentAlerts.length" class="empty"><b>NO ALERTS</b><p>暂无告警</p></div>
+            <div v-for="item in recentAlerts.slice(0,6)" :key="item.id" class="alert-row" :class="`severity-${item.severity}`"><div class="alert-symbol">!</div><div><b>{{modeName(item.mode)}} · {{item.alert_name||item.camera_name}}</b><p>{{item.reason}}</p></div><time>{{formatTime(item.created_at)}}</time></div>
           </section>
           <section class="panel runtime-panel">
             <div class="section-head"><div><h2>运行状态</h2><span class="head-en">SYSTEM RUNTIME</span><p>普通与安全检测独立队列</p></div></div>
@@ -938,7 +952,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
               </select>
             </label>
             <button class="ghost filter-reset" :disabled="!hasAlertFilter" @click="resetAlertFilter"><TechIcon name="refresh" :size="13"/>清除筛选</button>
-            <span class="filter-count"><b>{{alertRows.length}}</b> / {{alerts.length}} <small>MATCHED / TOTAL</small></span>
+            <span class="filter-count"><b>{{alertRows.length}}</b> / {{alertData.total}} <small>CURRENT / TOTAL</small></span>
           </div>
           <table v-if="alertRows.length">
             <thead><tr><th><input type="checkbox" :checked="allAlertsSelected" @change="toggleAllAlerts"></th><th>级别</th><th>证据</th><th>名称</th><th>事件</th><th>原因</th><th>Webhook</th><th>时间</th></tr></thead>
@@ -958,8 +972,10 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
               </template>
             </tbody>
           </table>
-          <div v-else-if="alerts.length" class="empty"><b>NO MATCHED ALERTS</b><p>当前筛选条件下没有匹配的告警</p><button class="link" @click="resetAlertFilter">清除筛选</button></div>
+          <div v-else-if="hasAlertFilter" class="empty"><b>NO MATCHED ALERTS</b><p>当前筛选条件下没有匹配的告警</p><button class="link" @click="resetAlertFilter">清除筛选</button></div>
           <div v-else class="empty"><b>NO ALERTS</b><p>暂无告警记录</p></div>
+          <div class="log-summary"><span>共 {{alertData.total}} 条</span><span>第 {{alertData.page}} / {{alertPages}} 页 · 每页 100 条</span></div>
+          <div class="log-pagination"><button class="ghost" :disabled="alertData.page<=1||alertLoading" @click="loadAlerts(alertData.page-1)">上一页</button><span>{{alertData.page}} / {{alertPages}}</span><button class="ghost" :disabled="alertData.page>=alertPages||alertLoading" @click="loadAlerts(alertData.page+1)">下一页</button></div>
         </section>
       </section>
 

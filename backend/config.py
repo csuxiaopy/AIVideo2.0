@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     live_preview_fps: float = 2.0
     live_preview_timeout_seconds: int = 60
     frame_capture_timeout_seconds: int = 15
+    capture_fps: float = 1.0
+    capture_max_height: int = 960
     yolo_model_path: str = "models/yolo26s.pt"
     yolo_device: str = "cpu"
     yolo_imgsz: int = 640
@@ -40,6 +42,7 @@ class Settings(BaseSettings):
     yolo_iou: float = 0.5
     yolo_inference_timeout_seconds: int = 30
     yolo_inference_processes: int = 4
+    yolo_batch_size: int = 1
     yolo_threads_per_process: int = 5
     yolo_interop_threads: int = 1
     analysis_queue_maxsize: int = 256

@@ -1,6 +1,8 @@
 from uuid import uuid4
 from datetime import date, datetime, timezone
 
+from sqlalchemy import delete
+
 from backend import models
 from backend.database import Base, engine, session_scope
 from backend.repository import Repository
@@ -135,3 +137,37 @@ def test_alert_date_filter_uses_shanghai_day_boundaries():
         assert [row.id for row in repository.list_alerts(None, camera_id=camera_id, alert_date=date(2026, 9, 10))] == [second.id]
     finally:
         repository.delete_camera(camera_id)
+
+
+def test_alert_pagination_is_filtered_and_stable():
+    Base.metadata.create_all(engine)
+    repository = Repository()
+    camera_id = f"test-alert-pagination-{uuid4().hex}"
+    with session_scope() as session:
+        session.add(models.Camera(id=camera_id, name="page camera", rtsp_url_encrypted="encrypted"))
+    try:
+        with session_scope() as session:
+            created = [models.Alert(
+                camera_id=camera_id,
+                mode="off_duty" if index < 201 else "intrusion",
+                severity="normal",
+                created_at=datetime(2026, 9, 12, 4, 0, tzinfo=timezone.utc),
+            ) for index in range(205)]
+            session.add_all(created)
+            session.flush()
+            expected_ids = sorted((row.id for row in created[:201]), reverse=True)
+        first, total = repository.list_alerts_page(1, 100, camera_id=camera_id, mode="off_duty")
+        second, _ = repository.list_alerts_page(2, 100, camera_id=camera_id, mode="off_duty")
+        third, _ = repository.list_alerts_page(3, 100, camera_id=camera_id, mode="off_duty")
+
+        assert total == 201
+        assert [len(first), len(second), len(third)] == [100, 100, 1]
+        ids = [row.id for row in first + second + third]
+        assert ids == expected_ids
+        assert len(ids) == len(set(ids))
+    finally:
+        with session_scope() as session:
+            session.execute(delete(models.Alert).where(models.Alert.camera_id == camera_id))
+            camera = session.get(models.Camera, camera_id)
+            if camera:
+                session.delete(camera)

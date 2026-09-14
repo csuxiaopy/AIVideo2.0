@@ -94,8 +94,37 @@ def test_yolo_process_pool_configuration_and_main_process_tracking(monkeypatch):
     assert executor.closed
 
 
+def test_yolo_gpu_batcher_returns_detection(monkeypatch):
+    class ImmediateFuture:
+        def result(self):
+            return [[(100, 200, [(0, "person", 0.9, (0.1, 0.2, 0.3, 0.8))])][0]]
+
+    class FakeExecutor:
+        def __init__(self, **_kwargs):
+            pass
+        def submit(self, *_args):
+            return ImmediateFuture()
+        def shutdown(self, **_kwargs):
+            pass
+
+    monkeypatch.setitem(__import__("sys").modules, "ultralytics", ModuleType("ultralytics"))
+    monkeypatch.setitem(__import__("sys").modules, "supervision", None)
+    monkeypatch.setattr(yolo_module, "ProcessPoolExecutor", FakeExecutor)
+    detector = YoloDetector("models/yolo26s.pt", "0", 640, 0.35, batch_size=8)
+    detections = detector.detect("camera-1", b"jpeg")
+    detector.close()
+    assert detections[0].class_name == "person"
+    assert detector.status()["batch_size"] == 8
+
+
 def test_official_general_model_name_switches_within_configured_model_directory():
     runtime = object.__new__(MonitoringRuntime)
     runtime.settings = type("SettingsStub", (), {"yolo_model_path": "models/yolo26s.pt"})()
     assert Path(runtime._general_model_path("yolo26m.pt")) == Path("models/yolo26m.pt")
     assert runtime._general_model_path("custom/person.pt") == "custom/person.pt"
+
+
+def test_gpu_environment_device_overrides_legacy_cpu_database_value():
+    assert MonitoringRuntime._detector_device("0", "cpu") == "0"
+    assert MonitoringRuntime._detector_device("1", "cpu") == "1"
+    assert MonitoringRuntime._detector_device("cpu", "cuda:0") == "cuda:0"

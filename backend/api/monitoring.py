@@ -121,14 +121,22 @@ async def dashboard() -> dict[str, Any]:
 
 @router.get("/api/alerts", dependencies=[Depends(current_user)])
 async def alerts(
-    limit: int = Query(default=100, ge=1, le=500),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=100, le=100),
     camera_id: str | None = None,
     mode: str | None = None,
     severity: str | None = None,
     date: date_type | None = None,
-) -> list[dict[str, Any]]:
-    rows = context.repository.list_alerts(limit, camera_id, mode, severity, date)
-    return [alert_public(row, context.repository.webhook_deliveries(row.id)) for row in rows]
+) -> dict[str, Any]:
+    rows, total = context.repository.list_alerts_page(
+        page, page_size, camera_id, mode, severity, date
+    )
+    return {
+        "items": [alert_public(row, context.repository.webhook_deliveries(row.id)) for row in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 def _alert_workbook(rows: list[Any]) -> BytesIO:

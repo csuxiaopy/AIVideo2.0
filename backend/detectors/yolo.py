@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
+import threading
 import time
 from collections import defaultdict
 from collections import deque
@@ -60,6 +62,41 @@ def _predict_in_worker(
     return width, height, rows
 
 
+def _predict_batch_in_worker(
+    model_name: str, device: str, imgsz: int, confidence: float, iou: float, jpegs: list[bytes]
+) -> list[tuple[int, int, list[tuple[int, str, float, tuple[float, float, float, float]]]]]:
+    global _worker_model
+    if _worker_model is None:
+        from ultralytics import YOLO
+
+        _worker_model = YOLO(model_name)
+    images = [decode_jpeg(jpeg) for jpeg in jpegs]
+    predictions = _worker_model.predict(
+        source=images, imgsz=imgsz, conf=confidence, iou=iou, device=device, verbose=False
+    )
+    output = []
+    for image, result in zip(images, predictions, strict=True):
+        height, width = image.shape[:2]
+        rows = []
+        for box in result.boxes:
+            class_id = int(box.cls.item())
+            x1, y1, x2, y2 = (float(value) for value in box.xyxy[0].tolist())
+            rows.append((
+                class_id, str(result.names[class_id]), float(box.conf.item()),
+                (x1 / width, y1 / height, x2 / width, y2 / height),
+            ))
+        output.append((width, height, rows))
+    return output
+
+
+@dataclass
+class BatchRequest:
+    jpeg: bytes
+    ready: threading.Event
+    result: tuple | None = None
+    error: BaseException | None = None
+
+
 @dataclass
 class Track:
     track_id: int
@@ -96,6 +133,7 @@ class YoloDetector:
     def __init__(
         self, model_name: str, device: str, imgsz: int, confidence: float, iou: float = 0.5,
         inference_processes: int = 1, threads_per_process: int = 1, interop_threads: int = 1,
+        batch_size: int = 1,
     ):
         self.model_name = model_name
         self.device = device
@@ -105,7 +143,10 @@ class YoloDetector:
         self.inference_processes = max(1, inference_processes)
         self.threads_per_process = max(1, threads_per_process)
         self.interop_threads = max(1, interop_threads)
+        self.batch_size = max(1, min(batch_size, 64))
         self.executor: ProcessPoolExecutor | None = None
+        self.batch_queue: queue.Queue[BatchRequest | None] = queue.Queue(maxsize=4096)
+        self.batch_thread: threading.Thread | None = None
         self.available = False
         self.detail = "YOLO 依赖尚未加载"
         self.trackers: dict[str, object] = {}
@@ -123,6 +164,11 @@ class YoloDetector:
                 initargs=(self.threads_per_process, self.interop_threads),
             )
             self.available = True
+            if self.batch_size > 1:
+                self.batch_thread = threading.Thread(
+                    target=self._batch_loop, name="yolo-gpu-batcher", daemon=True
+                )
+                self.batch_thread.start()
             self.detail = (
                 f"{model_name} on {device}; {self.inference_processes} processes × "
                 f"{self.threads_per_process} threads"
@@ -142,10 +188,18 @@ class YoloDetector:
         if not self.available or self.executor is None:
             raise RuntimeError(self.detail)
         started = time.perf_counter()
-        width, height, rows = self.executor.submit(
-            _predict_in_worker,
-            self.model_name, self.device, self.imgsz, self.confidence, self.iou, jpeg,
-        ).result()
+        if self.batch_size > 1:
+            request = BatchRequest(jpeg=jpeg, ready=threading.Event())
+            self.batch_queue.put(request)
+            request.ready.wait()
+            if request.error:
+                raise request.error
+            width, height, rows = request.result
+        else:
+            width, height, rows = self.executor.submit(
+                _predict_in_worker,
+                self.model_name, self.device, self.imgsz, self.confidence, self.iou, jpeg,
+            ).result()
         self.last_latency_ms = (time.perf_counter() - started) * 1000
         self.inference_latencies_ms.append(self.last_latency_ms)
         detections = [
@@ -155,6 +209,41 @@ class YoloDetector:
         persons = [item for item in detections if item.class_name == "person"]
         self._track(camera_id, persons, width, height)
         return detections
+
+    def _batch_loop(self) -> None:
+        while True:
+            first = self.batch_queue.get()
+            if first is None:
+                return
+            requests = [first]
+            deadline = time.monotonic() + 0.01
+            while len(requests) < self.batch_size:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    item = self.batch_queue.get(timeout=remaining)
+                except queue.Empty:
+                    break
+                if item is None:
+                    self.batch_queue.put(None)
+                    break
+                requests.append(item)
+            try:
+                if self.executor is None:
+                    raise RuntimeError("YOLO executor is closed")
+                results = self.executor.submit(
+                    _predict_batch_in_worker, self.model_name, self.device, self.imgsz,
+                    self.confidence, self.iou, [request.jpeg for request in requests],
+                ).result()
+                for request, result in zip(requests, results, strict=True):
+                    request.result = result
+            except BaseException as exc:
+                for request in requests:
+                    request.error = exc
+            finally:
+                for request in requests:
+                    request.ready.set()
 
     def status(self) -> dict[str, object]:
         samples = sorted(self.inference_latencies_ms)
@@ -176,9 +265,14 @@ class YoloDetector:
             "inference_processes": self.inference_processes,
             "threads_per_process": self.threads_per_process,
             "interop_threads": self.interop_threads,
+            "batch_size": self.batch_size,
         }
 
     def close(self) -> None:
+        if self.batch_thread is not None:
+            self.batch_queue.put(None)
+            self.batch_thread.join(timeout=5)
+            self.batch_thread = None
         if self.executor is not None:
             self.executor.shutdown(wait=False, cancel_futures=True)
             self.executor = None

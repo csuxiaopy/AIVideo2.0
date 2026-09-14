@@ -68,6 +68,7 @@ def _validate_combination(camera: models.Camera, modes: list[Mode], geometry: Ge
         id=camera.id,
         name=camera.name,
         rtsp_url=context.cipher.decrypt(camera.rtsp_url_encrypted),
+        substream_url=(context.cipher.decrypt(camera.substream_url_encrypted) if camera.substream_url_encrypted else None),
         enabled=camera.enabled,
         scene_type=camera.scene_type,
         modes=modes,
@@ -83,6 +84,7 @@ def _effective_patch(camera: models.Camera, payload: CameraPatch) -> CameraCreat
         id=payload.id or camera.id,
         name=payload.name or camera.name,
         rtsp_url=payload.rtsp_url or context.cipher.decrypt(camera.rtsp_url_encrypted),
+        substream_url=(payload.substream_url if "substream_url" in payload.model_fields_set else (context.cipher.decrypt(camera.substream_url_encrypted) if camera.substream_url_encrypted else None)),
         enabled=payload.enabled if payload.enabled is not None else camera.enabled,
         scene_type=payload.scene_type or camera.scene_type,
         modes=payload.modes if payload.modes is not None else from_json(camera.modes_json, []),
@@ -100,6 +102,7 @@ def _camera_model(payload: CameraCreate) -> models.Camera:
         id=payload.id,
         name=payload.name,
         rtsp_url_encrypted=context.cipher.encrypt(payload.rtsp_url),
+        substream_url_encrypted=(context.cipher.encrypt(payload.substream_url) if payload.substream_url else None),
         scene_type=payload.scene_type.value,
         enabled=payload.enabled,
         modes_json=as_json([mode.value for mode in payload.modes]),
@@ -112,12 +115,13 @@ def _camera_model(payload: CameraCreate) -> models.Camera:
     )
 
 
-def _batch_default_camera(camera_id: str, name: str, rtsp_url: str) -> CameraCreate:
+def _batch_default_camera(camera_id: str, name: str, substream_url: str) -> CameraCreate:
     template = SCENE_TEMPLATES[SceneType.WORKSTATION]
     return CameraCreate(
         id=camera_id,
         name=name,
-        rtsp_url=rtsp_url,
+        rtsp_url=substream_url,
+        substream_url=substream_url,
         enabled=True,
         scene_type=SceneType.WORKSTATION,
         modes=template["modes"],
@@ -198,25 +202,25 @@ async def create_cameras_batch(payload: CameraBatchCreate) -> dict[str, Any]:
     validated: list[CameraCreate] = []
     seen: set[str] = set()
     for row, item in enumerate(payload.items, start=1):
-        camera_id = item.id.strip()
+        camera_id = item.camera_id.strip()
         if camera_id in seen:
             errors.append({"row": row, "id": camera_id, "message": "摄像头 ID 在本批次中重复"})
             continue
         seen.add(camera_id)
         try:
-            validated.append(_batch_default_camera(camera_id, item.name.strip(), item.rtsp_url.strip()))
+            validated.append(_batch_default_camera(camera_id, item.name.strip(), item.substream_url.strip()))
         except ValidationError as exc:
             messages = []
             for error in exc.errors(include_input=False, include_context=False):
                 field = str(error.get("loc", ["数据"])[-1])
-                field_name = {"id": "摄像头 ID", "name": "名称", "rtsp_url": "视频流地址"}.get(field, field)
+                field_name = {"camera_id": "摄像头 ID", "name": "名称", "substream_url": "子码流地址"}.get(field, field)
                 message = str(error.get("msg", "格式错误")).replace("Value error, ", "")
                 messages.append(f"{field_name}：{message}")
             errors.append({"row": row, "id": camera_id, "message": "；".join(messages)})
 
     existing = context.repository.existing_camera_ids([camera.id for camera in validated])
     for row, item in enumerate(payload.items, start=1):
-        camera_id = item.id.strip()
+        camera_id = item.camera_id.strip()
         if camera_id in existing:
             errors.append({"row": row, "id": camera_id, "message": "数据库中已存在该摄像头 ID"})
     if errors:
@@ -232,6 +236,26 @@ async def create_cameras_batch(payload: CameraBatchCreate) -> dict[str, Any]:
         ) from exc
     await context.require_runtime().sync_cameras()
     return {"success": True, "created": len(cameras), "failed": 0}
+
+
+@router.post("/cameras/substreams/batch", dependencies=[Depends(admin_user)])
+async def update_camera_substreams(payload: CameraBatchCreate) -> dict[str, Any]:
+    ids = [item.camera_id.strip() for item in payload.items]
+    duplicates = sorted({camera_id for camera_id in ids if ids.count(camera_id) > 1})
+    existing = context.repository.existing_camera_ids(ids)
+    missing = sorted(set(ids) - existing)
+    if duplicates or missing:
+        raise HTTPException(
+            status_code=409,
+            detail={"success": False, "duplicate_ids": duplicates, "missing_ids": missing},
+        )
+    encrypted = {
+        item.camera_id.strip(): context.cipher.encrypt(item.substream_url.strip())
+        for item in payload.items
+    }
+    updated = context.repository.update_camera_substreams(encrypted)
+    await context.require_runtime().sync_cameras()
+    return {"success": True, "updated": updated, "missing_ids": []}
 
 
 @router.post("/cameras/batch-delete", dependencies=[Depends(admin_user)])
@@ -285,7 +309,7 @@ async def patch_camera(camera_id: str, payload: CameraPatch) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="目录不存在")
     values = payload.model_dump(
         exclude_none=True,
-        exclude={"id", "rtsp_url", "options", "modes", "geometry", "schedule", "intrusion_schedule", "directory_id"},
+        exclude={"id", "rtsp_url", "substream_url", "options", "modes", "geometry", "schedule", "intrusion_schedule", "directory_id"},
     )
     if "directory_id" in payload.model_fields_set:
         values["directory_id"] = payload.directory_id
@@ -293,6 +317,10 @@ async def patch_camera(camera_id: str, payload: CameraPatch) -> dict[str, Any]:
         values["scene_type"] = effective.scene_type.value
     if payload.rtsp_url:
         values["rtsp_url_encrypted"] = context.cipher.encrypt(payload.rtsp_url)
+    if "substream_url" in payload.model_fields_set:
+        values["substream_url_encrypted"] = (
+            context.cipher.encrypt(payload.substream_url) if payload.substream_url else None
+        )
     if payload.options:
         values["options_json"] = payload.options.model_dump_json()
     if payload.modes is not None:

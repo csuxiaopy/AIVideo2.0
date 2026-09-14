@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
+import random
 import time
 import uuid
 from collections import defaultdict, deque
@@ -29,6 +31,142 @@ logger = logging.getLogger(__name__)
 
 class PreviewLimitError(RuntimeError):
     pass
+
+
+class PersistentCaptureStream:
+    """One long-lived FFmpeg reader which publishes only the newest JPEG."""
+
+    BACKOFF_SECONDS = (1, 2, 4, 8, 15, 30)
+
+    def __init__(
+        self,
+        camera_id: str,
+        source: str,
+        on_frame: Callable[[str, bytes], object],
+        on_status: Callable[..., None],
+        output_fps: float = 1.0,
+        max_height: int = 960,
+    ):
+        self.camera_id = camera_id
+        self.source = source
+        self.on_frame = on_frame
+        self.on_status = on_status
+        self.output_fps = max(0.1, min(output_fps, 10.0))
+        self.max_height = max(160, max_height)
+        self.task: asyncio.Task | None = None
+        self.process: asyncio.subprocess.Process | None = None
+        self.running = False
+        self.reconnects = 0
+        self.frames = 0
+        self.started_at = 0.0
+        self.last_frame_monotonic = 0.0
+        self.last_error = ""
+
+    def start(self) -> None:
+        if self.task and not self.task.done():
+            return
+        self.running = True
+        self.started_at = time.monotonic()
+        self.task = asyncio.create_task(self._run(), name=f"capture-{self.camera_id}")
+
+    async def stop(self) -> None:
+        self.running = False
+        await _terminate_process(self.process)
+        if self.task:
+            self.task.cancel()
+            await asyncio.gather(self.task, return_exceptions=True)
+        self.task = None
+        self.process = None
+
+    async def _run(self) -> None:
+        attempt = 0
+        while self.running:
+            frames_before = self.frames
+            try:
+                await self._read_process()
+                if self.running:
+                    raise RuntimeError("FFmpeg 抓帧流已结束")
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                if self.frames > frames_before:
+                    attempt = 0
+                self.reconnects += 1
+                safe = str(exc).replace(self.source, redact_rtsp(self.source))[-600:]
+                self.last_error = safe
+                self.on_status(self.camera_id, False, safe, None)
+                delay = self.BACKOFF_SECONDS[min(attempt, len(self.BACKOFF_SECONDS) - 1)]
+                attempt += 1
+                await asyncio.sleep(delay * random.uniform(0.9, 1.1))
+
+    async def _read_process(self) -> None:
+        input_args, resolved = _input_args(self.source)
+        command = ["ffmpeg", "-hide_banner", "-loglevel", "error", *input_args]
+        command += [
+            "-i", resolved, "-an",
+            "-vf", f"fps={self.output_fps:.3f},scale=-2:min({self.max_height}\\,ih)",
+            "-c:v", "mjpeg", "-q:v", "4", "-f", "image2pipe", "pipe:1",
+        ]
+        process = await asyncio.create_subprocess_exec(
+            *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        self.process = process
+        if process.stdout is None or process.stderr is None:
+            await _terminate_process(process)
+            raise RuntimeError("FFmpeg 抓帧管道创建失败")
+        buffer = bytearray()
+        stderr_buffer = bytearray()
+
+        async def drain_stderr() -> None:
+            while True:
+                chunk = await process.stderr.read(16 * 1024)
+                if not chunk:
+                    return
+                stderr_buffer.extend(chunk)
+                if len(stderr_buffer) > 64 * 1024:
+                    del stderr_buffer[:-64 * 1024]
+
+        stderr_task = asyncio.create_task(drain_stderr(), name=f"capture-stderr-{self.camera_id}")
+        try:
+            while self.running:
+                chunk = await asyncio.wait_for(process.stdout.read(64 * 1024), timeout=15)
+                if not chunk:
+                    await asyncio.gather(stderr_task, return_exceptions=True)
+                    detail = stderr_buffer.decode("utf-8", errors="replace")[-600:]
+                    raise RuntimeError(detail or "FFmpeg 未返回画面")
+                buffer.extend(chunk)
+                while True:
+                    start = buffer.find(b"\xff\xd8")
+                    end = buffer.find(b"\xff\xd9", start + 2) if start >= 0 else -1
+                    if start < 0 or end < 0:
+                        if len(buffer) > 8 * 1024 * 1024:
+                            buffer.clear()
+                        break
+                    jpeg = bytes(buffer[start : end + 2])
+                    del buffer[: end + 2]
+                    self.frames += 1
+                    self.last_frame_monotonic = time.monotonic()
+                    self.last_error = ""
+                    published = self.on_frame(self.camera_id, jpeg)
+                    if inspect.isawaitable(published):
+                        await published
+        finally:
+            stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
+            await _terminate_process(process)
+            if self.process is process:
+                self.process = None
+
+    def status(self) -> dict[str, object]:
+        elapsed = max(0.001, time.monotonic() - self.started_at)
+        age = time.monotonic() - self.last_frame_monotonic if self.last_frame_monotonic else None
+        return {
+            "running": self.running,
+            "fps": round(self.frames / elapsed, 3),
+            "latest_frame_age_seconds": round(age, 3) if age is not None else None,
+            "reconnects": self.reconnects,
+            "last_error": self.last_error,
+        }
 
 
 def _input_args(source: str) -> tuple[list[str], str]:
@@ -159,7 +297,7 @@ class LivePreviewStream:
 
 
 class MediaGateway:
-    """Periodic single-frame capture plus leased, on-demand live previews."""
+    """Persistent latest-frame capture plus leased, on-demand main-stream previews."""
 
     def __init__(
         self,
@@ -169,6 +307,8 @@ class MediaGateway:
         preview_fps: float = 2.0,
         preview_timeout_seconds: int = 60,
         capture_timeout_seconds: int = 15,
+        capture_fps: float = 1.0,
+        capture_max_height: int = 960,
     ):
         self.status_callback = status_callback
         self.snapshot_dir = snapshot_dir
@@ -177,8 +317,14 @@ class MediaGateway:
         self.preview_fps = preview_fps
         self.preview_timeout_seconds = max(10, preview_timeout_seconds)
         self.capture_timeout_seconds = max(5, capture_timeout_seconds)
+        self.capture_fps = max(0.1, capture_fps)
+        self.capture_max_height = max(160, capture_max_height)
         self.sources: dict[str, str] = {}
-        self.snapshots: dict[str, deque[FramePacket]] = defaultdict(lambda: deque(maxlen=8))
+        self.preview_sources: dict[str, str] = {}
+        self.snapshots: dict[str, deque[FramePacket]] = defaultdict(lambda: deque(maxlen=1))
+        self.capture_streams: dict[str, PersistentCaptureStream] = {}
+        self.overwritten_frames: dict[str, int] = defaultdict(int)
+        self.consumed_sequences: dict[str, int] = defaultdict(int)
         self.capture_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.previews: dict[str, LivePreviewStream] = {}
         self.session_camera: dict[str, str] = {}
@@ -199,19 +345,40 @@ class MediaGateway:
         if not self.sweeper_task or self.sweeper_task.done():
             self.sweeper_task = asyncio.create_task(self._preview_sweeper(), name="preview-sweeper")
 
-    async def sync(self, cameras: list[tuple[str, str, bool]]) -> None:
-        wanted = {camera_id: source for camera_id, source, enabled in cameras if enabled}
+    async def sync(self, cameras: list[tuple]) -> None:
+        normalized = [
+            (row[0], row[1], row[1] if len(row) == 3 else row[2], row[-1]) for row in cameras
+        ]
+        preview_wanted = {camera_id: main for camera_id, main, _capture, enabled in normalized if enabled}
+        wanted = {camera_id: capture for camera_id, _main, capture, enabled in normalized if enabled}
         to_stop = [
             camera_id
             for camera_id, preview in self.previews.items()
-            if camera_id not in wanted or preview.source != wanted[camera_id]
+            if camera_id not in preview_wanted or preview.source != preview_wanted[camera_id]
         ]
         for camera_id in to_stop:
             await self.stop_camera_preview(camera_id)
+        for camera_id, stream in list(self.capture_streams.items()):
+            if camera_id not in wanted or stream.source != wanted[camera_id]:
+                await stream.stop()
+                self.capture_streams.pop(camera_id, None)
         self.sources = wanted
+        self.preview_sources = preview_wanted
+        for camera_id, source in wanted.items():
+            if camera_id not in self.capture_streams:
+                stream = PersistentCaptureStream(
+                    camera_id, source, self._publish_frame, self.status_callback,
+                    self.capture_fps, self.capture_max_height,
+                )
+                self.capture_streams[camera_id] = stream
+                stream.start()
 
     async def remove(self, camera_id: str) -> None:
         self.sources.pop(camera_id, None)
+        self.preview_sources.pop(camera_id, None)
+        capture_stream = self.capture_streams.pop(camera_id, None)
+        if capture_stream:
+            await capture_stream.stop()
         await self.stop_camera_preview(camera_id)
         self.snapshots.pop(camera_id, None)
         self.capture_locks.pop(camera_id, None)
@@ -230,27 +397,41 @@ class MediaGateway:
             await asyncio.gather(self.sweeper_task, return_exceptions=True)
             self.sweeper_task = None
         streams = list(self.previews.values())
+        capture_streams = list(self.capture_streams.values())
         self.previews.clear()
         self.session_camera.clear()
         await asyncio.gather(*(stream.stop() for stream in streams), return_exceptions=True)
+        await asyncio.gather(*(stream.stop() for stream in capture_streams), return_exceptions=True)
+        self.capture_streams.clear()
         self.snapshots.clear()
 
     async def capture(self, camera_id: str) -> FramePacket:
-        source = self.sources.get(camera_id)
-        if not source:
+        if camera_id not in self.sources:
             raise RuntimeError("摄像头未启用或视频源不存在")
-        async with self.capture_locks[camera_id]:
-            try:
-                jpeg = await self._grab_single_frame(source)
-                packet = FramePacket(datetime.now(timezone.utc), jpeg, self._next_sequence(camera_id))
-                self.snapshots[camera_id].append(packet)
-                await asyncio.to_thread(self._save_snapshot, camera_id, jpeg)
-                self.status_callback(camera_id, True, None, packet.captured_at)
-                return packet
-            except Exception as exc:
-                safe = str(exc).replace(source, redact_rtsp(source))[:1000]
-                self.status_callback(camera_id, False, safe, None)
-                raise RuntimeError(safe) from exc
+        previous = self.latest(camera_id)
+        previous_sequence = previous.sequence if previous else 0
+        deadline = time.monotonic() + self.capture_timeout_seconds
+        while time.monotonic() < deadline:
+            frame = self.latest(camera_id)
+            if frame and frame.sequence > previous_sequence:
+                return frame
+            await asyncio.sleep(0.05)
+        raise RuntimeError("等待常驻取帧流超时")
+
+    async def _publish_frame(self, camera_id: str, jpeg: bytes) -> None:
+        previous = self.latest(camera_id)
+        if previous and previous.sequence > self.consumed_sequences[camera_id]:
+            self.overwritten_frames[camera_id] += 1
+        packet = FramePacket(datetime.now(timezone.utc), jpeg, self._next_sequence(camera_id))
+        self.snapshots[camera_id].append(packet)
+        results = await asyncio.gather(
+            asyncio.to_thread(self._save_snapshot, camera_id, jpeg),
+            asyncio.to_thread(self.status_callback, camera_id, True, None, packet.captured_at),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning("Frame persistence failed for %s: %s", camera_id, result)
 
     async def _grab_single_frame(self, source: str) -> bytes:
         input_args, resolved = _input_args(source)
@@ -329,7 +510,7 @@ class MediaGateway:
         self.intrusions[camera_id] = (zone, track_ids)
 
     async def start_preview(self, camera_id: str) -> dict[str, object]:
-        source = self.sources.get(camera_id)
+        source = self.preview_sources.get(camera_id)
         if not source:
             raise RuntimeError("摄像头未启用或视频源不存在")
         async with self.preview_lock:
@@ -427,6 +608,15 @@ class MediaGateway:
 
     def active_preview_ids(self) -> list[str]:
         return list(self.previews)
+
+    def capture_status(self) -> dict[str, dict[str, object]]:
+        return {
+            camera_id: {**stream.status(), "overwritten_frames": self.overwritten_frames[camera_id]}
+            for camera_id, stream in self.capture_streams.items()
+        }
+
+    def mark_consumed(self, camera_id: str, sequence: int) -> None:
+        self.consumed_sequences[camera_id] = max(self.consumed_sequences[camera_id], sequence)
 
     async def _preview_sweeper(self) -> None:
         while True:

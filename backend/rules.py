@@ -252,6 +252,12 @@ class CameraRuleState:
         if reset_review:
             self.absence_last_review_at = None
 
+    def start_new_off_duty_cycle(self, now: datetime) -> None:
+        """Start a fresh absence interval after an alert was persisted."""
+        self.absence_since = now
+        self.absence_alerted = False
+        self.reset_off_duty_confirmation(reset_review=True)
+
     def phone_event_update(
         self, confirmed: bool, threshold_seconds: int, now: datetime,
     ) -> tuple[str | None, datetime | None]:

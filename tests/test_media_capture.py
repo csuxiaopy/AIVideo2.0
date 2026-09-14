@@ -2,7 +2,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.media_capture import LivePreviewStream, MediaGateway, PreviewLimitError
+from backend.media_capture import (
+    LivePreviewStream,
+    MediaGateway,
+    PersistentCaptureStream,
+    PreviewLimitError,
+)
 from backend.pipeline import staggered_capture_times
 from backend.schemas import CameraCreate, CameraOptions
 from backend.schemas import Detection
@@ -39,14 +44,56 @@ async def test_periodic_capture_saves_snapshot_without_creating_preview(tmp_path
     gateway = MediaGateway(lambda *args: updates.append(args), tmp_path)
     await gateway.sync([("camera-1", "rtsp://example.test/stream", True)])
 
-    async def fake_grab(_source: str) -> bytes:
-        return b"\xff\xd8frame\xff\xd9"
-
-    monkeypatch.setattr(gateway, "_grab_single_frame", fake_grab)
-    packet = await gateway.capture("camera-1")
+    await gateway._publish_frame("camera-1", b"\xff\xd8frame\xff\xd9")
+    packet = gateway.latest("camera-1")
+    assert packet is not None
     assert (tmp_path / "camera-1.jpg").read_bytes() == packet.jpeg
     assert gateway.previews == {}
     assert updates[-1][1] is True
+    await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_latest_frame_slot_overwrites_old_frame(tmp_path):
+    gateway = MediaGateway(lambda *_: None, tmp_path)
+    await gateway._publish_frame("camera-1", b"\xff\xd8one\xff\xd9")
+    await gateway._publish_frame("camera-1", b"\xff\xd8two\xff\xd9")
+    assert gateway.latest("camera-1").jpeg == b"\xff\xd8two\xff\xd9"
+    assert len(gateway.snapshots["camera-1"]) == 1
+    assert gateway.overwritten_frames["camera-1"] == 1
+
+
+@pytest.mark.asyncio
+async def test_persistent_capture_parses_multiple_jpegs(monkeypatch):
+    published = []
+
+    class Reader:
+        def __init__(self, chunks):
+            self.chunks = list(chunks)
+        async def read(self, _size=-1):
+            return self.chunks.pop(0) if self.chunks else b""
+
+    class Process:
+        returncode = None
+        stdout = Reader([b"noise\xff\xd8one\xff\xd9\xff\xd8tw", b"o\xff\xd9", b""])
+        stderr = Reader([])
+        def kill(self):
+            self.returncode = -9
+        async def wait(self):
+            return self.returncode
+
+    async def fake_subprocess(*_args, **_kwargs):
+        return Process()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_subprocess)
+    stream = PersistentCaptureStream(
+        "camera-1", "rtsp://example.test/sub", lambda _id, jpeg: published.append(jpeg),
+        lambda *_: None,
+    )
+    stream.running = True
+    with pytest.raises(RuntimeError, match="未返回画面"):
+        await stream._read_process()
+    assert published == [b"\xff\xd8one\xff\xd9", b"\xff\xd8two\xff\xd9"]
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ class Camera(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     scene_type: Mapped[str] = mapped_column(String(40), default="workstation", nullable=False, index=True)
     rtsp_url_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    substream_url_encrypted: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     modes_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
     geometry_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)

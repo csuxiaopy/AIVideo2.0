@@ -40,13 +40,13 @@ class FireSmokeDetector:
             self.detail = f"烟火模型文件不存在: {path}"
             return
         try:
-            from ultralytics import YOLO
-
             self.model_hash = hashlib.sha256(path.read_bytes()).hexdigest()
             if self.expected_sha256 and self.model_hash != self.expected_sha256:
                 raise RuntimeError(
                     f"model SHA256 mismatch: expected {self.expected_sha256}, got {self.model_hash}"
                 )
+            from ultralytics import YOLO
+
             self.model = YOLO(str(path))
             names = {str(value).lower() for value in self.model.names.values()}
             if not ({"fire", "flame"} & names) or "smoke" not in names:

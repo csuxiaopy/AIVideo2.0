@@ -284,6 +284,8 @@ docker compose -f compose.cpu.yml --profile monitoring up -d
 | `SESSION_IDLE_HOURS` | `8` | 会话闲置失效小时数 |
 | `YOLO_MODEL_PATH` | `models/yolo26s.pt` | 通用 YOLO 权重 |
 | `YOLO_DEVICE` | `cpu` | 通用模型设备 |
+| `CAPTURE_FPS` | `1` | 常驻分析流每秒输出帧数 |
+| `CAPTURE_MAX_HEIGHT` | `960` | 常驻分析流最大高度 |
 | `YOLO_IMGSZ` | `640` | 通用模型输入尺寸 |
 | `YOLO_INFERENCE_PROCESSES` | `4` | 独立 YOLO 推理进程数；每个进程加载一份模型 |
 | `YOLO_THREADS_PER_PROCESS` | `5` | 每个 YOLO 推理进程使用的 CPU 线程数 |

@@ -19,6 +19,11 @@ def camera_public(
         "enabled": camera.enabled,
         "scene_type": camera.scene_type,
         "source": redact_rtsp(cipher.decrypt(camera.rtsp_url_encrypted)),
+        "substream_source": (
+            redact_rtsp(cipher.decrypt(camera.substream_url_encrypted))
+            if getattr(camera, "substream_url_encrypted", None) else None
+        ),
+        "using_substream": bool(getattr(camera, "substream_url_encrypted", None)),
         "online": camera.online,
         "camera_online": camera.online,
         "last_seen_at": camera.last_seen_at,

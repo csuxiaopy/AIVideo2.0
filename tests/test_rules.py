@@ -150,6 +150,20 @@ def test_absence_event_emits_threshold_then_resolution_once():
     assert state.absence_event_update(True, True, 600, now + timedelta(seconds=800)) == ("resolved", now)
 
 
+def test_off_duty_alert_starts_a_fresh_threshold_cycle():
+    state = CameraRuleState()
+    now = datetime.now(timezone.utc)
+    state.absence_event_update(False, True, 300, now)
+    assert state.absence_event_update(False, True, 300, now + timedelta(minutes=5))[0] == "threshold"
+
+    alerted_at = now + timedelta(minutes=5)
+    state.start_new_off_duty_cycle(alerted_at)
+    assert state.absence_event_update(False, True, 300, alerted_at + timedelta(minutes=4, seconds=59))[0] is None
+    phase, started = state.absence_event_update(False, True, 300, alerted_at + timedelta(minutes=5))
+    assert phase == "threshold"
+    assert started == alerted_at
+
+
 def test_off_duty_final_review_retries_and_resets_with_event():
     state = CameraRuleState()
     now = datetime.now(timezone.utc)

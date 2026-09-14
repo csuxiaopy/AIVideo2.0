@@ -65,6 +65,7 @@ def test_off_duty_waits_for_every_directory_member_and_persists_every_image():
 
     second = runtime.rules.for_camera("b")
     second.absence_since = now - timedelta(minutes=10)
+    expected_event_start = second.absence_since
     second.absence_alerted = True
     second.record_off_duty_review(True, now, b"image-b", 0.87)
     assert asyncio.run(runtime._maybe_create_off_duty_alert(cameras[1], analysis, now))
@@ -74,7 +75,11 @@ def test_off_duty_waits_for_every_directory_member_and_persists_every_image():
     assert [item["jpeg"] for item in args[2]] == [b"image-a", b"image-b"]
     assert args[4] == 0.87
     assert args[5] == 300
-    assert kwargs["event_started_at"] == second.absence_since
+    assert kwargs["event_started_at"] == expected_event_start
+    assert first.absence_since == now
+    assert second.absence_since == now
+    assert not first.absence_alerted
+    assert not second.absence_alerted
     assert not first.absence_vlm_confirmed
     assert not second.absence_vlm_confirmed
 

@@ -43,6 +43,11 @@ TASKS = Counter("monitor_tasks_total", "Processed tasks", ["status"])
 ANALYSIS_LATENCY = Histogram("monitor_analysis_seconds", "Camera task latency")
 ONLINE_GAUGE = Gauge("monitor_cameras_online", "Online cameras")
 QUEUE_GAUGE = Gauge("monitor_queue_depth", "Queue depth", ["priority"])
+CAPTURE_FPS_GAUGE = Gauge("monitor_capture_fps", "Observed persistent capture FPS", ["camera_id"])
+FRAME_AGE_GAUGE = Gauge("monitor_latest_frame_age_seconds", "Age of newest frame", ["camera_id"])
+CAPTURE_RECONNECT_GAUGE = Gauge("monitor_capture_reconnects", "Capture reconnect count", ["camera_id"])
+CAPTURE_OVERWRITE_GAUGE = Gauge("monitor_capture_overwritten_frames", "Latest frames overwritten before analysis", ["camera_id"])
+ANALYSIS_FRAME_AGE = Histogram("monitor_analysis_frame_age_seconds", "Frame age when analysis starts")
 VLM_CALLS = Counter("monitor_vlm_calls_total", "VLM calls", ["mode", "status"])
 BEHAVIOR_INTERVAL_SECONDS = 180
 OFF_DUTY_REVIEW_INTERVAL_SECONDS = 30 * 60
@@ -114,21 +119,24 @@ class MonitoringRuntime:
             settings.live_preview_fps,
             settings.live_preview_timeout_seconds,
             settings.frame_capture_timeout_seconds,
+            settings.capture_fps,
+            settings.capture_max_height,
         )
         detector_settings = self.repository.get_detector_settings()
         self.yolo = YoloDetector(
             self._general_model_path(detector_settings.general_model),
-            detector_settings.general_device or settings.yolo_device,
+            self._detector_device(settings.yolo_device, detector_settings.general_device),
             settings.yolo_imgsz,
             settings.yolo_confidence,
             settings.yolo_iou,
             settings.yolo_inference_processes,
             settings.yolo_threads_per_process,
             settings.yolo_interop_threads,
+            settings.yolo_batch_size,
         )
         self.fire_smoke = FireSmokeDetector(
             detector_settings.fire_smoke_model or settings.fire_smoke_model,
-            detector_settings.fire_smoke_device or settings.fire_smoke_device,
+            self._detector_device(settings.fire_smoke_device, detector_settings.fire_smoke_device),
             settings.fire_smoke_imgsz,
             detector_settings.model_sha256 or settings.fire_smoke_sha256,
         )
@@ -154,6 +162,9 @@ class MonitoringRuntime:
         self.failures = 0
         self.last_heartbeat = utc_now()
         self.last_detector_error: dict[str, float] = defaultdict(float)
+        self.last_analyzed_sequence: dict[str, int] = defaultdict(int)
+        self.last_fire_sequence: dict[str, int] = defaultdict(int)
+        self.scheduler_cursor = 0
 
     async def start(self) -> None:
         await self.queue.start()
@@ -211,17 +222,18 @@ class MonitoringRuntime:
         self.yolo.close()
         self.yolo = YoloDetector(
             self._general_model_path(detector_settings.general_model),
-            detector_settings.general_device,
+            self._detector_device(self.settings.yolo_device, detector_settings.general_device),
             self.settings.yolo_imgsz,
             self.settings.yolo_confidence,
             self.settings.yolo_iou,
             self.settings.yolo_inference_processes,
             self.settings.yolo_threads_per_process,
             self.settings.yolo_interop_threads,
+            self.settings.yolo_batch_size,
         )
         self.fire_smoke = FireSmokeDetector(
             detector_settings.fire_smoke_model,
-            detector_settings.fire_smoke_device,
+            self._detector_device(self.settings.fire_smoke_device, detector_settings.fire_smoke_device),
             self.settings.fire_smoke_imgsz,
             detector_settings.model_sha256 or self.settings.fire_smoke_sha256,
         )
@@ -236,6 +248,11 @@ class MonitoringRuntime:
             return stored_model
         configured = Path(self.settings.yolo_model_path)
         return str(configured.with_name(model_name))
+
+    @staticmethod
+    def _detector_device(environment_device: str, stored_device: str) -> str:
+        """A non-CPU deployment override wins over legacy DB values such as 'cpu'."""
+        return environment_device if environment_device.lower() != "cpu" else (stored_device or "cpu")
 
     async def sync_cameras(self) -> None:
         cameras = self.repository.list_cameras()
@@ -253,9 +270,16 @@ class MonitoringRuntime:
                 for camera_id in set(previous) | set(current):
                     self.rules.for_camera(camera_id).reset_off_duty_confirmation(reset_review=True)
         self.off_duty_memberships = current_memberships
-        media_specs = [
-            (camera.id, self.cipher.decrypt(camera.rtsp_url_encrypted), camera.enabled) for camera in cameras
-        ]
+        media_specs = []
+        for camera in cameras:
+            main_source = self.cipher.decrypt(camera.rtsp_url_encrypted)
+            capture_source = (
+                self.cipher.decrypt(camera.substream_url_encrypted)
+                if getattr(camera, "substream_url_encrypted", None) else main_source
+            )
+            if camera.enabled and not getattr(camera, "substream_url_encrypted", None):
+                logger.warning("Camera %s has no substream; falling back to main stream", camera.id)
+            media_specs.append((camera.id, main_source, capture_source, camera.enabled))
         await self.media.sync(media_specs)
         now = time.monotonic()
         enabled = [camera for camera in cameras if camera.enabled]
@@ -284,12 +308,18 @@ class MonitoringRuntime:
         while self.running:
             now = time.monotonic()
             cameras = self.repository.list_cameras()
+            if cameras:
+                offset = self.scheduler_cursor % len(cameras)
+                cameras = cameras[offset:] + cameras[:offset]
+                self.scheduler_cursor = (offset + 1) % len(cameras)
             for camera in cameras:
                 if not camera.enabled:
                     continue
                 modes = set(from_json(camera.modes_json, []))
                 period = camera.frame_interval_seconds or 60
-                if modes and now >= self.next_run.get(camera.id, now):
+                frame = self.media.latest(camera.id)
+                has_new_frame = bool(frame and frame.sequence > self.last_analyzed_sequence[camera.id])
+                if modes and has_new_frame and now >= self.next_run.get(camera.id, now):
                     self.next_run[camera.id] = now + period
                     if camera.id not in self.queued:
                         priority = (
@@ -305,6 +335,13 @@ class MonitoringRuntime:
                 QUEUE_GAUGE.labels(priority=priority).set(depth)
             for priority, depth in (await self.fire_queue.depths()).items():
                 QUEUE_GAUGE.labels(priority=f"fire_{priority}").set(depth)
+            for camera_id, capture in self.media.capture_status().items():
+                CAPTURE_FPS_GAUGE.labels(camera_id=camera_id).set(float(capture["fps"]))
+                age = capture.get("latest_frame_age_seconds")
+                if age is not None:
+                    FRAME_AGE_GAUGE.labels(camera_id=camera_id).set(float(age))
+                CAPTURE_RECONNECT_GAUGE.labels(camera_id=camera_id).set(int(capture["reconnects"]))
+                CAPTURE_OVERWRITE_GAUGE.labels(camera_id=camera_id).set(int(capture["overwritten_frames"]))
             self.last_heartbeat = utc_now()
             await asyncio.sleep(0.5)
 
@@ -366,13 +403,26 @@ class MonitoringRuntime:
                     camera = self.repository.get_camera(task.camera_id)
                     if camera and camera.enabled:
                         if fire_only:
+                            frame = self.media.latest(camera.id)
+                            if not frame or frame.sequence <= self.last_fire_sequence[camera.id]:
+                                continue
+                            ANALYSIS_FRAME_AGE.observe(
+                                max(0.0, (utc_now() - frame.captured_at).total_seconds())
+                            )
                             await self._process_fire(camera)
+                            self.last_fire_sequence[camera.id] = frame.sequence
                             self.repository.set_last_analysis_at(camera.id)
                         else:
-                            # Scheduled capture is short lived: FFmpeg exits after one JPEG.
                             recovering = not camera.online
-                            await self.media.capture(camera.id)
+                            frame = self.media.latest(camera.id)
+                            if not frame or frame.sequence <= self.last_analyzed_sequence[camera.id]:
+                                continue
+                            ANALYSIS_FRAME_AGE.observe(
+                                max(0.0, (utc_now() - frame.captured_at).total_seconds())
+                            )
                             await self._process(camera, recovering=recovering)
+                            self.last_analyzed_sequence[camera.id] = frame.sequence
+                            self.media.mark_consumed(camera.id, frame.sequence)
                             self.repository.set_last_analysis_at(camera.id)
                             modes = set(from_json(camera.modes_json, []))
                             if Mode.FIRE_SMOKE.value in modes and camera.id not in self.fire_queued:
@@ -773,12 +823,14 @@ class MonitoringRuntime:
         state = self.rules.for_camera(camera.id)
         if not hasattr(self.repository, "list_cameras") or not hasattr(self.alerts, "create_group"):
             if analysis is not None and state.absence_evidence_jpeg is not None:
-                await self.alerts.create(
+                alert = await self.alerts.create(
                     camera, analysis, state.absence_evidence_jpeg, bypass_cooldown=True,
                     event_phase="threshold", event_started_at=state.absence_since,
                     event_ended_at=now,
                 )
-                return True
+                if alert is not None:
+                    state.start_new_off_duty_cycle(now)
+                    return True
             return False
         current_camera = self.repository.get_camera(camera.id) if hasattr(self.repository, "get_camera") else None
         if current_camera is not None:
@@ -843,7 +895,7 @@ class MonitoringRuntime:
             if alert is None:
                 return False
             for member_state in member_states:
-                member_state.reset_off_duty_confirmation()
+                member_state.start_new_off_duty_cycle(now)
             return True
 
     async def _create_phone_alert(
@@ -1044,6 +1096,11 @@ class MonitoringRuntime:
                 "snapshots": len(self.media.snapshots),
                 "active_previews": len(self.media.previews),
                 "max_live_previews": self.media.max_live_previews,
+                "captures": self.media.capture_status(),
+                "substream_cameras": sum(
+                    1 for camera in self.repository.list_cameras()
+                    if getattr(camera, "substream_url_encrypted", None)
+                ),
             },
             "yolo": {"status": "ready" if self.yolo.available else "degraded", "detail": self.yolo.detail},
             "queue": {

@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1
+FROM docker.m.daocloud.io/library/node:22-bookworm-slim AS web
+ENV COREPACK_NPM_REGISTRY=https://registry.npmmirror.com npm_config_node_linker=hoisted
+WORKDIR /src/frontend
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
+RUN corepack enable && pnpm install --frozen-lockfile
+COPY frontend/ ./
+RUN pnpm run build
+
+FROM pytorch/pytorch:2.5.1-cuda12.1-cudnn9-runtime
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt requirements-yolo.txt ./
+RUN pip install --no-cache-dir --progress-bar off -r requirements-yolo.txt
+COPY backend ./backend
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
+COPY run.py ./run.py
+COPY --from=web /src/frontend/dist ./frontend/dist
+RUN mkdir -p /app/data/evidence /app/data/snapshots /app/models \
+    && python -c "import torch; assert torch.version.cuda, 'CUDA-enabled PyTorch is required'"
+EXPOSE 8100
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health')"
+CMD ["python", "run.py"]

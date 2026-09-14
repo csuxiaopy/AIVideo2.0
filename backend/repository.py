@@ -209,6 +209,21 @@ class Repository:
             session.flush()
         return cameras
 
+    def update_camera_substreams(self, encrypted_by_id: dict[str, str]) -> int:
+        """Update a validated substream mapping in one transaction."""
+        if not encrypted_by_id:
+            return 0
+        updated = 0
+        with session_scope() as session:
+            for camera_id, encrypted_url in encrypted_by_id.items():
+                result = session.execute(
+                    update(models.Camera)
+                    .where(models.Camera.id == camera_id)
+                    .values(substream_url_encrypted=encrypted_url, updated_at=utc_now())
+                )
+                updated += result.rowcount
+        return updated
+
     def existing_camera_ids(self, camera_ids: list[str]) -> set[str]:
         if not camera_ids:
             return set()
@@ -559,6 +574,52 @@ class Repository:
                 alert.camera_name = camera_name
                 rows.append(alert)
             return rows
+
+    def list_alerts_page(
+        self,
+        page: int,
+        page_size: int,
+        camera_id: str | None = None,
+        mode: str | None = None,
+        severity: str | None = None,
+        alert_date: date | None = None,
+    ) -> tuple[list[models.Alert], int]:
+        with session_scope() as session:
+            filters = []
+            if camera_id:
+                filters.append(models.Alert.camera_id == camera_id)
+            if mode:
+                filters.append(models.Alert.mode == mode)
+            if severity:
+                filters.append(models.Alert.severity == severity)
+            if alert_date:
+                zone = ZoneInfo("Asia/Shanghai")
+                start = datetime.combine(alert_date, datetime.min.time(), tzinfo=zone).astimezone(timezone.utc)
+                end = (datetime.combine(alert_date, datetime.min.time(), tzinfo=zone) + timedelta(days=1)).astimezone(timezone.utc)
+                filters.extend((models.Alert.created_at >= start, models.Alert.created_at < end))
+
+            total = session.scalar(
+                select(func.count()).select_from(models.Alert).where(*filters)
+            ) or 0
+            priority = case(
+                (models.Alert.severity == "critical", 0),
+                (models.Alert.severity == "high", 1),
+                (models.Alert.severity == "normal", 2),
+                else_=3,
+            )
+            stmt = (
+                select(models.Alert, models.Camera.name)
+                .join(models.Camera, models.Camera.id == models.Alert.camera_id)
+                .where(*filters)
+                .order_by(priority, desc(models.Alert.created_at), desc(models.Alert.id))
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+            rows = []
+            for alert, camera_name in session.execute(stmt):
+                alert.camera_name = camera_name
+                rows.append(alert)
+            return rows, total
 
     def list_analyses(self, limit: int = 100, camera_id: str | None = None):
         with session_scope() as session:

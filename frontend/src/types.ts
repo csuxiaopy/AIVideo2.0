@@ -16,6 +16,8 @@ export interface Camera {
   id: string
   name: string
   source: string
+  substream_source?: string
+  using_substream: boolean
   enabled: boolean
   online: boolean
   camera_online: boolean
