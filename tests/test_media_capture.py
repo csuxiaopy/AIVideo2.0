@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from collections import defaultdict
 
 import pytest
 
@@ -8,9 +9,116 @@ from backend.media_capture import (
     PersistentCaptureStream,
     PreviewLimitError,
 )
-from backend.pipeline import staggered_capture_times
+from backend.pipeline import (
+    FIRE_SMOKE_INTERVAL_SECONDS,
+    OFF_DUTY_INTERVAL_SECONDS,
+    PEOPLE_FLOW_INTERVAL_SECONDS,
+    general_detection_interval,
+    staggered_capture_times,
+)
+from backend.pipeline import MonitoringRuntime
 from backend.schemas import CameraCreate, CameraOptions
 from backend.schemas import Detection
+
+
+def test_cuda_capture_samples_before_download():
+    stream = PersistentCaptureStream("1", "rtsp://test/main", lambda *_: None,
+                                     lambda *_: None, decode_device="1")
+    command = stream.command()
+    assert command[command.index("-hwaccel") + 1] == "cuda"
+    assert command[command.index("-hwaccel_device") + 1] == "1"
+    assert command.index("-hwaccel") < command.index("-i")
+    assert command[command.index("-vf") + 1].startswith("fps=1.000,hwdownload,format=nv12,")
+    assert stream.status()["decoder"] == "cuda"
+
+
+def test_cpu_capture_keeps_software_filters():
+    stream = PersistentCaptureStream("1", "rtsp://test/main", lambda *_: None, lambda *_: None)
+    assert "-hwaccel" not in stream.command()
+    assert "hwdownload" not in stream.command()[stream.command().index("-vf") + 1]
+
+
+def test_gpu_allocation_is_bounded_balanced_and_stable(tmp_path):
+    gateway = MediaGateway(lambda *_: None, tmp_path, capture_decode_devices="0,1",
+                           capture_gpu_streams_per_device=2, capture_cpu_camera_ids="002")
+    sources = {f"{i:03}": "rtsp://test/main" for i in range(7)}
+    assigned = gateway.decode_assignments(sources)
+    assert assigned["002"] is None
+    assert list(assigned.values()).count("0") == 2
+    assert list(assigned.values()).count("1") == 2
+    assert list(assigned.values()).count(None) == 3
+    assert assigned == gateway.decode_assignments(dict(reversed(list(sources.items()))))
+
+
+def test_capture_gpu_disabled_by_default(tmp_path):
+    gateway = MediaGateway(lambda *_: None, tmp_path)
+    assert gateway.decode_assignments({"1": "rtsp://test/main"}) == {"1": None}
+
+
+def test_fire_interval_is_per_camera(monkeypatch):
+    runtime = MonitoringRuntime.__new__(MonitoringRuntime)
+    runtime.next_fire_run = {"1": 105.0}
+    monkeypatch.setattr("backend.pipeline.time.monotonic", lambda: 104.9)
+    assert not runtime.fire_due("1")
+    assert runtime.fire_due("2")
+    monkeypatch.setattr("backend.pipeline.time.monotonic", lambda: 105.0)
+    assert runtime.fire_due("1")
+
+
+def test_fixed_mode_intervals_and_general_pipeline_cadence():
+    camera = SimpleNamespace(frame_interval_seconds=60)
+    assert PEOPLE_FLOW_INTERVAL_SECONDS == 1
+    assert OFF_DUTY_INTERVAL_SECONDS == 10
+    assert FIRE_SMOKE_INTERVAL_SECONDS == 30
+    assert general_detection_interval(camera, {"people_flow"}) == 1
+    assert general_detection_interval(camera, {"off_duty"}) == 10
+    assert general_detection_interval(camera, {"people_flow", "off_duty"}) == 1
+    assert general_detection_interval(camera, {"fire_smoke"}) is None
+    assert general_detection_interval(camera, {"black_screen"}) == 60
+
+
+@pytest.mark.asyncio
+async def test_fire_only_camera_is_scheduled_without_general_task(monkeypatch):
+    enqueued = []
+
+    class Queue:
+        def __init__(self, name):
+            self.name = name
+
+        async def enqueue(self, camera_id, priority):
+            enqueued.append((self.name, camera_id, priority))
+            return "task"
+
+        async def depths(self):
+            return {"critical": 0, "high": 0, "normal": 0, "low": 0}
+
+    runtime = MonitoringRuntime.__new__(MonitoringRuntime)
+    runtime.running = True
+    runtime.repository = SimpleNamespace(list_cameras=lambda: [SimpleNamespace(
+        id="fire-1", enabled=True, modes_json='["fire_smoke"]', frame_interval_seconds=1,
+    )])
+    frame = SimpleNamespace(sequence=1)
+    runtime.media = SimpleNamespace(
+        latest=lambda _camera_id: frame,
+        capture_status=lambda: {},
+    )
+    runtime.queue = Queue("general")
+    runtime.fire_queue = Queue("fire")
+    runtime.next_run = {}
+    runtime.next_fire_run = {"fire-1": 0.0}
+    runtime.last_analyzed_sequence = defaultdict(int)
+    runtime.last_fire_sequence = defaultdict(int)
+    runtime.queued = set()
+    runtime.fire_queued = set()
+    runtime.scheduler_cursor = 0
+
+    async def stop_after_iteration(_seconds):
+        runtime.running = False
+
+    monkeypatch.setattr("backend.pipeline.asyncio.sleep", stop_after_iteration)
+    await runtime._scheduler()
+
+    assert enqueued == [("fire", "fire-1", "critical")]
 
 
 def test_frame_interval_defaults_and_preserves_legacy_detector_options():

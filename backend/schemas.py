@@ -33,7 +33,7 @@ Point = tuple[Annotated[float, Field(ge=0, le=1)], Annotated[float, Field(ge=0, 
 
 class CameraOptions(BaseModel):
     health_interval_seconds: int = Field(default=5, ge=2, le=60)
-    yolo_fps: float = Field(default=0.1, ge=0.1, le=10)
+    yolo_fps: float = Field(default=0.1, ge=0.1, le=10, deprecated=True)
     behavior_interval_seconds: int = Field(default=180, ge=60, le=3600)
     phone_use_seconds: int = Field(default=600, ge=60, le=86400)
     off_duty_seconds: int = Field(default=300, ge=60, le=86400)
@@ -43,7 +43,7 @@ class CameraOptions(BaseModel):
     black_mean_max: float = Field(default=18.0, ge=0, le=255)
     black_std_max: float = Field(default=12.0, ge=0, le=255)
     black_ratio_min: float = Field(default=0.92, ge=0, le=1)
-    fire_smoke_fps: float = Field(default=1.0, ge=0.2, le=5)
+    fire_smoke_fps: float = Field(default=1.0, ge=0.2, le=5, deprecated=True)
     fire_confidence: float = Field(default=0.90, ge=0, le=1)
     smoke_confidence: float = Field(default=0.90, ge=0, le=1)
     intrusion_confidence: float = Field(default=0.50, ge=0, le=1)
@@ -157,7 +157,9 @@ class CameraCreate(BaseModel):
 
     @field_validator("rtsp_url", "substream_url")
     @classmethod
-    def valid_source(cls, value: str) -> str:
+    def valid_source(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if not value.startswith(("rtsp://", "rtsps://", "rtmp://", "http://", "https://", "file://")):
             raise ValueError("视频源必须是 rtsp://、rtsps://、rtmp://、http://、https:// 或 file://")
         return value

@@ -62,6 +62,15 @@ class AlertService:
         elif analysis.mode == Mode.INTRUSION.value:
             cooldown_seconds = options.intrusion_cooldown_seconds
 
+        if getattr(self, "async_pipeline", None):
+            self.async_pipeline.enqueue_alert(camera, analysis, [{"camera_id": camera.id,
+                "camera_name": camera.name, "confidence": analysis.confidence, "jpeg": jpeg}],
+                f"{analysis.reason}；监控源：{camera.name}", analysis.confidence,
+                directory_cooldown_seconds if directory_cooldown_seconds is not None else cooldown_seconds,
+                event_phase, event_started_at, event_ended_at,
+                directory_cooldown_seconds is not None, bypass_cooldown)
+            return None
+
         directory_id, alert_name = self._directory_subject(camera)
         last = (
             self.repository.latest_directory_alert_time(directory_id, analysis.mode)
@@ -104,6 +113,10 @@ class AlertService:
         event_started_at=None,
         event_ended_at=None,
     ) -> models.Alert | None:
+        if getattr(self, "async_pipeline", None):
+            self.async_pipeline.enqueue_alert(camera, analysis, evidence_items, reason, confidence,
+                cooldown_seconds, event_phase, event_started_at, event_ended_at, True)
+            return None
         directory_id, alert_name = self._directory_subject(camera)
         last = self.repository.latest_directory_alert_time(directory_id, analysis.mode)
         if self._cooldown_active(last, cooldown_seconds):

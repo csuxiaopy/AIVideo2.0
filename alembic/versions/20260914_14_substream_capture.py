@@ -11,7 +11,9 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("cameras", sa.Column("substream_url_encrypted", sa.Text(), nullable=True))
+    columns = {column["name"] for column in sa.inspect(op.get_bind()).get_columns("cameras")}
+    if "substream_url_encrypted" not in columns:
+        op.add_column("cameras", sa.Column("substream_url_encrypted", sa.Text(), nullable=True))
 
 
 def downgrade() -> None:

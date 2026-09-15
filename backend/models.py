@@ -8,6 +8,28 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from backend.database import Base, utc_now
 
 
+class BackgroundTask(Base):
+    """Durable outbox. Payloads contain JSON values/references, never sessions."""
+
+    __tablename__ = "background_tasks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(240), unique=True, nullable=False)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    camera_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    retry_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[str | None] = mapped_column(String(36))
+    evidence_ref: Mapped[str | None] = mapped_column(Text)
+    result_json: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
 class Camera(Base):
     __tablename__ = "cameras"
 

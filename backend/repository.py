@@ -279,6 +279,22 @@ class Repository:
                 if frame_at is not None:
                     camera.last_frame_at = frame_at
 
+    def set_camera_runtime_batch(self, batch: list[tuple[str, dict]]) -> None:
+        """One transaction for replaceable status; never accepts event increments."""
+        if len(batch) > 100:
+            raise ValueError("Camera status batches are limited to 100")
+        allowed = {"online", "last_error", "last_seen_at", "last_frame_at", "last_analysis_at"}
+        with session_scope() as session:
+            for camera_id, values in batch:
+                if not set(values) <= allowed:
+                    raise ValueError("Unexpected camera runtime field")
+                normalized = {
+                    key: datetime.fromisoformat(value) if key.endswith("_at") and isinstance(value, str) else value
+                    for key, value in values.items()
+                }
+                if normalized:
+                    session.execute(update(models.Camera).where(models.Camera.id == camera_id).values(**normalized))
+
     def set_last_analysis_at(self, camera_id: str, analyzed_at: datetime | None = None) -> None:
         with session_scope() as session:
             camera = session.get(models.Camera, camera_id)

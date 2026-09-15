@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +13,8 @@ from prometheus_client import Counter, Gauge, Histogram
 
 from backend import models
 from backend.alerts import AlertService
+from backend.background import IOPool
+from backend.capture_persistence import CapturePersistence
 from backend.annotation import annotate_detections
 from backend.capabilities import CORE_CAPABILITIES, mode_is_active
 from backend.cleanup import CleanupService
@@ -48,9 +50,16 @@ FRAME_AGE_GAUGE = Gauge("monitor_latest_frame_age_seconds", "Age of newest frame
 CAPTURE_RECONNECT_GAUGE = Gauge("monitor_capture_reconnects", "Capture reconnect count", ["camera_id"])
 CAPTURE_OVERWRITE_GAUGE = Gauge("monitor_capture_overwritten_frames", "Latest frames overwritten before analysis", ["camera_id"])
 ANALYSIS_FRAME_AGE = Histogram("monitor_analysis_frame_age_seconds", "Frame age when analysis starts")
+PERSON_COMPLETED = Counter("monitor_person_detections_total", "Completed general person detections", ["camera_id"])
+PERSON_LAST_COMPLETED = Gauge("monitor_person_detection_last_timestamp_seconds", "Last successful person detection completion", ["camera_id"])
 VLM_CALLS = Counter("monitor_vlm_calls_total", "VLM calls", ["mode", "status"])
+MODE_COMPLETED = Counter("monitor_mode_detections_total", "Completed detections", ["camera_id", "mode"])
+MODE_LAST_COMPLETED = Gauge("monitor_mode_detection_last_timestamp_seconds", "Last completed detection", ["camera_id", "mode"])
 BEHAVIOR_INTERVAL_SECONDS = 180
 OFF_DUTY_REVIEW_INTERVAL_SECONDS = 30 * 60
+PEOPLE_FLOW_INTERVAL_SECONDS = 1
+OFF_DUTY_INTERVAL_SECONDS = 10
+FIRE_SMOKE_INTERVAL_SECONDS = 30
 
 
 def event_time(value: datetime, schedule: ScheduleSpec) -> str:
@@ -74,7 +83,25 @@ def off_duty_schedule_context(
 
 def yolo_required_modes(modes: set[str]) -> set[str]:
     """Return modes that still depend on the general object detector."""
-    return modes - {Mode.BLACK_SCREEN.value, Mode.PHONE_USE.value, Mode.SMOKING.value}
+    return modes - {
+        Mode.BLACK_SCREEN.value, Mode.PHONE_USE.value, Mode.SMOKING.value,
+        Mode.FIRE_SMOKE.value,
+    }
+
+
+def general_detection_interval(camera: models.Camera, modes: set[str]) -> int | None:
+    """Return the fixed general-pipeline cadence required by enabled modes."""
+    candidates: list[int] = []
+    if Mode.PEOPLE_FLOW.value in modes:
+        candidates.append(PEOPLE_FLOW_INTERVAL_SECONDS)
+    if Mode.OFF_DUTY.value in modes:
+        candidates.append(OFF_DUTY_INTERVAL_SECONDS)
+    other_modes = modes - {
+        Mode.PEOPLE_FLOW.value, Mode.OFF_DUTY.value, Mode.FIRE_SMOKE.value,
+    }
+    if other_modes:
+        candidates.append(camera.frame_interval_seconds or 60)
+    return min(candidates) if candidates else None
 
 
 def reuse_behavior_for_off_duty(
@@ -121,7 +148,19 @@ class MonitoringRuntime:
             settings.frame_capture_timeout_seconds,
             settings.capture_fps,
             settings.capture_max_height,
+            settings.capture_decode_devices,
+            settings.capture_gpu_streams_per_device,
+            settings.capture_cpu_camera_ids,
         )
+        self.background_io = None
+        self.capture_persistence = None
+        if settings.async_capture_persistence or settings.async_postprocessing:
+            self.background_io = IOPool(settings.background_io_workers)
+            self.capture_persistence = CapturePersistence(
+                self.background_io, repository, self.media._snapshot_path,
+            )
+            self.media.frame_persistence = self.capture_persistence.publish
+            self.media.status_callback = self.capture_persistence.status_update
         detector_settings = self.repository.get_detector_settings()
         self.yolo = YoloDetector(
             self._general_model_path(detector_settings.general_model),
@@ -133,6 +172,7 @@ class MonitoringRuntime:
             settings.yolo_threads_per_process,
             settings.yolo_interop_threads,
             settings.yolo_batch_size,
+            settings.yolo_batch_wait_ms,
         )
         self.fire_smoke = FireSmokeDetector(
             detector_settings.fire_smoke_model or settings.fire_smoke_model,
@@ -165,6 +205,22 @@ class MonitoringRuntime:
         self.last_analyzed_sequence: dict[str, int] = defaultdict(int)
         self.last_fire_sequence: dict[str, int] = defaultdict(int)
         self.scheduler_cursor = 0
+        self.async_pipeline = None
+        if settings.async_postprocessing:
+            from backend.async_pipeline import AsyncPipeline
+            if self.background_io is None:
+                self.background_io = IOPool(settings.background_io_workers)
+            self.async_pipeline = AsyncPipeline(self, repository, self.background_io)
+            self.repository = self.async_pipeline.repository
+            self.alerts.async_pipeline = self.async_pipeline
+        self.person_detection_times: dict[str, deque] = defaultdict(lambda: deque(maxlen=600))
+        self.person_detection_started: dict[str, float] = {}
+        self.person_detection_last: dict[str, datetime] = {}
+        self.mode_detection_times: dict[tuple[str, str], deque] = defaultdict(lambda: deque(maxlen=600))
+        self.mode_detection_started: dict[tuple[str, str], float] = {}
+        self.mode_detection_last: dict[tuple[str, str], datetime] = {}
+        self.mode_queue_wait_seconds: dict[tuple[str, str], float] = {}
+        self.mode_frame_age_seconds: dict[tuple[str, str], float] = {}
 
     async def start(self) -> None:
         await self.queue.start()
@@ -172,6 +228,10 @@ class MonitoringRuntime:
         await self.reload_models()
         await self.media.start()
         await self.sync_cameras()
+        if self.capture_persistence:
+            self.capture_persistence.start()
+        if self.async_pipeline:
+            await self.async_pipeline.start()
         self.running = True
         self.preview_detector_task = asyncio.create_task(
             self._preview_detector_loop(), name="preview-yolo-detector"
@@ -195,6 +255,12 @@ class MonitoringRuntime:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await self.media.close()
+        if self.async_pipeline:
+            await self.async_pipeline.close()
+        if self.capture_persistence:
+            await self.capture_persistence.close()
+        if self.background_io:
+            await self.background_io.close()
         await self.queue.close()
         await self.fire_queue.close()
         await self.webhook.close()
@@ -230,6 +296,7 @@ class MonitoringRuntime:
             self.settings.yolo_threads_per_process,
             self.settings.yolo_interop_threads,
             self.settings.yolo_batch_size,
+            self.settings.yolo_batch_wait_ms,
         )
         self.fire_smoke = FireSmokeDetector(
             detector_settings.fire_smoke_model,
@@ -255,7 +322,13 @@ class MonitoringRuntime:
         return environment_device if environment_device.lower() != "cpu" else (stored_device or "cpu")
 
     async def sync_cameras(self) -> None:
-        cameras = self.repository.list_cameras()
+        if getattr(self, "async_pipeline", None):
+            await self.async_pipeline.refresh()
+        io = getattr(self, "background_io", None)
+        cameras = (await io.run(self.repository.list_cameras)
+                   if io and not getattr(self, "async_pipeline", None) else self.repository.list_cameras())
+        if getattr(self, "capture_persistence", None):
+            self.capture_persistence.register(camera.id for camera in cameras if camera.enabled)
         memberships: dict[int | None, list[str]] = defaultdict(list)
         for camera in cameras:
             if camera.enabled and Mode.OFF_DUTY.value in from_json(camera.modes_json, []):
@@ -286,7 +359,20 @@ class MonitoringRuntime:
         # Recompute the complete plan after a camera is added, removed, enabled or edited.
         # Keeping old due times while bulk-adding cameras would cluster new cameras near
         # the end of the period instead of preserving an even distribution.
-        self.next_run = staggered_capture_times(enabled, now)
+        self.next_run = {}
+        interval_groups: dict[int, list[models.Camera]] = defaultdict(list)
+        for camera in enabled:
+            interval = general_detection_interval(camera, set(from_json(camera.modes_json, [])))
+            if interval is not None:
+                interval_groups[interval].append(camera)
+        for interval, group in interval_groups.items():
+            for index, camera in enumerate(group):
+                self.next_run[camera.id] = now + index * interval / max(1, len(group))
+        fire_cameras = [camera for camera in enabled if Mode.FIRE_SMOKE.value in from_json(camera.modes_json, [])]
+        self.next_fire_run = {
+            camera.id: now + index * FIRE_SMOKE_INTERVAL_SECONDS / max(1, len(fire_cameras))
+            for index, camera in enumerate(fire_cameras)
+        }
         ONLINE_GAUGE.set(sum(1 for camera in cameras if camera.online))
 
     async def analyze_now(self, camera_id: str) -> dict[str, Any]:
@@ -301,8 +387,83 @@ class MonitoringRuntime:
             if Mode.FIRE_SMOKE.value in modes:
                 fire = await self._process_fire(camera, force=True)
                 general["results"].extend(fire["results"])
-            self.repository.set_last_analysis_at(camera_id)
+            self._record_analysis_time(camera_id)
             return general
+
+    def _record_analysis_time(self, camera_id: str) -> None:
+        persistence = getattr(self, "capture_persistence", None)
+        if persistence:
+            persistence.analysis_update(camera_id)
+        else:
+            self.repository.set_last_analysis_at(camera_id)
+
+    def _record_person_detection(self, camera_id: str) -> None:
+        now = utc_now()
+        PERSON_COMPLETED.labels(camera_id=camera_id).inc()
+        PERSON_LAST_COMPLETED.labels(camera_id=camera_id).set(now.timestamp())
+        if not hasattr(self, "person_detection_times"):
+            self.person_detection_times = defaultdict(lambda: deque(maxlen=600))
+            self.person_detection_started = {}
+            self.person_detection_last = {}
+        stamp = time.monotonic()
+        self.person_detection_started.setdefault(camera_id, stamp)
+        self.person_detection_times[camera_id].append(stamp)
+        self.person_detection_last[camera_id] = now
+
+    def person_detection_status(self) -> dict[str, dict]:
+        now = time.monotonic()
+        result = {}
+        for camera_id, samples in getattr(self, "person_detection_times", {}).items():
+            while samples and samples[0] < now - 60:
+                samples.popleft()
+            elapsed = min(60, now - self.person_detection_started[camera_id])
+            result[camera_id] = {
+                "completed_in_window": len(samples),
+                "window_seconds": round(elapsed, 3),
+                "frequency_hz": round(len(samples) / elapsed, 3) if elapsed >= 1 else None,
+                "last_person_detection_at": self.person_detection_last[camera_id].isoformat(),
+            }
+        return result
+
+    def _record_mode_detection(
+        self, camera_id: str, mode: str, queue_wait: float | None = None,
+        frame_age: float | None = None,
+    ) -> None:
+        now = utc_now()
+        stamp = time.monotonic()
+        key = (camera_id, mode)
+        MODE_COMPLETED.labels(camera_id=camera_id, mode=mode).inc()
+        MODE_LAST_COMPLETED.labels(camera_id=camera_id, mode=mode).set(now.timestamp())
+        if not hasattr(self, "mode_detection_times"):
+            self.mode_detection_times = defaultdict(lambda: deque(maxlen=600))
+            self.mode_detection_started = {}
+            self.mode_detection_last = {}
+            self.mode_queue_wait_seconds = {}
+            self.mode_frame_age_seconds = {}
+        self.mode_detection_started.setdefault(key, stamp)
+        self.mode_detection_times[key].append(stamp)
+        self.mode_detection_last[key] = now
+        if queue_wait is not None:
+            self.mode_queue_wait_seconds[key] = max(0.0, queue_wait)
+        if frame_age is not None:
+            self.mode_frame_age_seconds[key] = max(0.0, frame_age)
+
+    def mode_detection_status(self) -> dict[str, dict[str, dict]]:
+        now = time.monotonic()
+        result: dict[str, dict[str, dict]] = defaultdict(dict)
+        for (camera_id, mode), samples in self.mode_detection_times.items():
+            while samples and samples[0] < now - 60:
+                samples.popleft()
+            elapsed = min(60, now - self.mode_detection_started[(camera_id, mode)])
+            result[mode][camera_id] = {
+                "completed_in_window": len(samples),
+                "window_seconds": round(elapsed, 3),
+                "frequency_hz": round(len(samples) / elapsed, 3) if elapsed >= 1 else None,
+                "last_completed_at": self.mode_detection_last[(camera_id, mode)].isoformat(),
+                "last_queue_wait_seconds": round(self.mode_queue_wait_seconds.get((camera_id, mode), 0.0), 3),
+                "last_frame_age_seconds": round(self.mode_frame_age_seconds.get((camera_id, mode), 0.0), 3),
+            }
+        return dict(result)
 
     async def _scheduler(self) -> None:
         while self.running:
@@ -316,21 +477,23 @@ class MonitoringRuntime:
                 if not camera.enabled:
                     continue
                 modes = set(from_json(camera.modes_json, []))
-                period = camera.frame_interval_seconds or 60
+                period = general_detection_interval(camera, modes)
                 frame = self.media.latest(camera.id)
                 has_new_frame = bool(frame and frame.sequence > self.last_analyzed_sequence[camera.id])
-                if modes and has_new_frame and now >= self.next_run.get(camera.id, now):
+                if period is not None and has_new_frame and now >= self.next_run.get(camera.id, now):
                     self.next_run[camera.id] = now + period
                     if camera.id not in self.queued:
-                        priority = (
-                            "critical" if Mode.FIRE_SMOKE.value in modes
-                            else "high" if modes & {Mode.BLACK_SCREEN.value, Mode.INTRUSION.value}
-                            else "low" if modes == {Mode.PEOPLE_FLOW.value}
-                            else "normal"
-                        )
+                        priority = "normal"
                         task_id = await self.queue.enqueue(camera.id, priority)
                         if task_id:
                             self.queued.add(camera.id)
+                fire_has_new_frame = bool(frame and frame.sequence > self.last_fire_sequence[camera.id])
+                if (Mode.FIRE_SMOKE.value in modes and fire_has_new_frame
+                        and now >= self.next_fire_run.get(camera.id, now)
+                        and camera.id not in self.fire_queued):
+                    task_id = await self.fire_queue.enqueue(camera.id, "critical")
+                    if task_id:
+                        self.fire_queued.add(camera.id)
             for priority, depth in (await self.queue.depths()).items():
                 QUEUE_GAUGE.labels(priority=priority).set(depth)
             for priority, depth in (await self.fire_queue.depths()).items():
@@ -396,12 +559,16 @@ class MonitoringRuntime:
             task = await queue.get()
             acquired = False
             try:
+                if getattr(self, "async_pipeline", None) and self.async_pipeline.blocked(task.camera_id):
+                    continue
                 acquired = await queue.acquire_camera(task.camera_id)
                 if not acquired:
                     continue
                 async with self.camera_locks[task.camera_id]:
                     camera = self.repository.get_camera(task.camera_id)
                     if camera and camera.enabled:
+                        queue_wait = ((utc_now() - task.created_at).total_seconds()
+                                      if task.created_at else None)
                         if fire_only:
                             frame = self.media.latest(camera.id)
                             if not frame or frame.sequence <= self.last_fire_sequence[camera.id]:
@@ -409,26 +576,30 @@ class MonitoringRuntime:
                             ANALYSIS_FRAME_AGE.observe(
                                 max(0.0, (utc_now() - frame.captured_at).total_seconds())
                             )
+                            self.next_fire_run[camera.id] = time.monotonic() + FIRE_SMOKE_INTERVAL_SECONDS
                             await self._process_fire(camera)
                             self.last_fire_sequence[camera.id] = frame.sequence
-                            self.repository.set_last_analysis_at(camera.id)
+                            self._record_mode_detection(
+                                camera.id, Mode.FIRE_SMOKE.value, queue_wait,
+                                (utc_now() - frame.captured_at).total_seconds(),
+                            )
+                            self._record_analysis_time(camera.id)
                         else:
                             recovering = not camera.online
                             frame = self.media.latest(camera.id)
                             if not frame or frame.sequence <= self.last_analyzed_sequence[camera.id]:
                                 continue
-                            ANALYSIS_FRAME_AGE.observe(
-                                max(0.0, (utc_now() - frame.captured_at).total_seconds())
-                            )
-                            await self._process(camera, recovering=recovering)
-                            self.last_analyzed_sequence[camera.id] = frame.sequence
-                            self.media.mark_consumed(camera.id, frame.sequence)
-                            self.repository.set_last_analysis_at(camera.id)
-                            modes = set(from_json(camera.modes_json, []))
-                            if Mode.FIRE_SMOKE.value in modes and camera.id not in self.fire_queued:
-                                task_id = await self.fire_queue.enqueue(camera.id, "critical")
-                                if task_id:
-                                    self.fire_queued.add(camera.id)
+                            if not getattr(self, "async_pipeline", None):
+                                ANALYSIS_FRAME_AGE.observe(max(0.0, (utc_now() - frame.captured_at).total_seconds()))
+                            result = await self._process(camera, recovering=recovering)
+                            for item in result.get("results", []):
+                                mode = item.get("mode")
+                                if mode in {Mode.OFF_DUTY.value, Mode.PEOPLE_FLOW.value} and queue_wait is not None:
+                                    self.mode_queue_wait_seconds[(camera.id, mode)] = max(0.0, queue_wait)
+                            consumed = result.get("frame_sequence", frame.sequence)
+                            self.last_analyzed_sequence[camera.id] = consumed
+                            self.media.mark_consumed(camera.id, consumed)
+                            self._record_analysis_time(camera.id)
                 TASKS.labels(status="ok").inc()
                 self.processed += 1
             except asyncio.CancelledError:
@@ -442,6 +613,15 @@ class MonitoringRuntime:
                     await queue.release_camera(task.camera_id)
                 queued.discard(task.camera_id)
                 await queue.ack(task)
+
+    def fire_due(self, camera_id: str) -> bool:
+        return time.monotonic() >= self.next_fire_run.get(camera_id, 0.0)
+
+    def _latest_inference_frame(self, camera_id):
+        frame = self.media.latest(camera_id)
+        if frame:
+            ANALYSIS_FRAME_AGE.observe(max(0, (utc_now() - frame.captured_at).total_seconds()))
+        return frame
 
     async def _process(self, camera: models.Camera, force: bool = False, recovering: bool = False) -> dict[str, Any]:
         started = time.perf_counter()
@@ -491,10 +671,19 @@ class MonitoringRuntime:
         detections = []
         if yolo_modes:
             try:
-                detections = await asyncio.wait_for(
-                    asyncio.to_thread(self.yolo.detect, camera.id, frame.jpeg),
-                    timeout=self.settings.yolo_inference_timeout_seconds,
-                )
+                if getattr(self, "async_pipeline", None) and hasattr(self.yolo, "detect_latest"):
+                    detections, frame = await asyncio.wait_for(
+                        asyncio.to_thread(self.yolo.detect_latest, camera.id, lambda: self._latest_inference_frame(camera.id)),
+                        timeout=self.settings.yolo_inference_timeout_seconds,
+                    )
+                    now = utc_now()
+                    intrusion_active = is_scheduled(intrusion_schedule, now)
+                else:
+                    detections = await asyncio.wait_for(
+                        asyncio.to_thread(self.yolo.detect, camera.id, frame.jpeg),
+                        timeout=self.settings.yolo_inference_timeout_seconds,
+                    )
+                self._record_person_detection(camera.id)
             except Exception as exc:
                 if force or time.monotonic() - self.last_detector_error[camera.id] > 60:
                     self.last_detector_error[camera.id] = time.monotonic()
@@ -505,7 +694,9 @@ class MonitoringRuntime:
                     )
                 if force:
                     raise
-                if Mode.OFF_DUTY.value in modes:
+                if Mode.OFF_DUTY.value in modes and self._mode_due(
+                    camera.id, "off_duty_sample", OFF_DUTY_INTERVAL_SECONDS, force
+                ):
                     phase, started_at = state.absence_event_update(
                         occupied=False, scheduled=False, threshold_seconds=options.off_duty_seconds,
                         now=now, grace_seconds=options.shift_grace_seconds,
@@ -519,6 +710,8 @@ class MonitoringRuntime:
                         )
                 return {"camera_id": camera.id, "results": results, "detector_error": str(exc)}
 
+        if getattr(self, "async_pipeline", None) and not self.async_pipeline.current(camera):
+            return {"camera_id": camera.id, "results": [], "skipped": "configuration_changed"}
         people = self.yolo.people(detections)
         self.media.set_person_detections(camera.id, people)
         self.media.set_object_detections(camera.id, detections)
@@ -536,18 +729,28 @@ class MonitoringRuntime:
         off_duty_reuses_behavior = False
         off_duty_event_start: datetime | None = None
         off_duty_local_confirmed = False
-        if Mode.OFF_DUTY.value in modes:
+        if Mode.OFF_DUTY.value in modes and self._mode_due(
+            camera.id, "off_duty_sample", OFF_DUTY_INTERVAL_SECONDS, force
+        ):
             scheduled, schedule_key, threshold_seconds = off_duty_schedule_context(
                 schedule, options.off_duty_seconds, now
             )
-            event_phase, event_start = state.absence_event_update(
-                occupied, scheduled, threshold_seconds, now, options.shift_grace_seconds,
-                schedule_key=schedule_key,
-            )
+            cooldown_active = self._off_duty_cooldown_active(camera, now)
+            if cooldown_active:
+                # Cooldown observations belong to neither event cycle. Discard
+                # their timing and evidence so the next cycle starts afterwards.
+                state.reset_off_duty_event()
+                event_phase, event_start = None, None
+            else:
+                event_phase, event_start = state.absence_event_update(
+                    occupied, scheduled, threshold_seconds, now, options.shift_grace_seconds,
+                    schedule_key=schedule_key,
+                )
             off_duty_event_start = event_start
             off_duty_local_confirmed = bool(scheduled and not occupied and state.absence_alerted)
             off_duty_reuses_behavior = reuse_behavior_for_off_duty(
-                modes, scheduled, options.behavior_interval_seconds, threshold_seconds
+                modes, scheduled and not cooldown_active,
+                options.behavior_interval_seconds, threshold_seconds
             )
             review_due = not off_duty_reuses_behavior and event_start is not None and state.off_duty_review_due(
                 now, OFF_DUTY_REVIEW_INTERVAL_SECONDS
@@ -558,10 +761,15 @@ class MonitoringRuntime:
                     event_started_at=event_time(event_start, schedule),
                     event_ended_at=event_time(now, schedule),
                 )
-                results.append(await self._review_off_duty(
-                    camera, evidence, event_start, now
-                ))
-            elif self._mode_due(camera.id, Mode.OFF_DUTY.value, 15, force) or event_phase:
+                if getattr(self, "async_pipeline", None):
+                    if self.async_pipeline.schedule_review("off_duty", camera, evidence, now, event_start):
+                        state.absence_last_review_at = now
+                    results.append({"mode": Mode.OFF_DUTY.value, "status": "pending_review"})
+                else:
+                    results.append(await self._review_off_duty(camera, evidence, event_start, now))
+            elif not cooldown_active and (
+                self._mode_due(camera.id, Mode.OFF_DUTY.value, 15, force) or event_phase
+            ):
                 reason = (
                     "离岗事件已结束" if event_phase == "resolved"
                     else "离岗事件持续中，已通过大模型终审" if state.absence_vlm_confirmed
@@ -576,8 +784,14 @@ class MonitoringRuntime:
                     model_version=self.yolo.model_name, reason=reason, latency_ms=0,
                 )
                 results.append({"mode": Mode.OFF_DUTY.value, "status": "none", "reason": reason})
-            if state.absence_vlm_confirmed:
+            if not cooldown_active and state.absence_vlm_confirmed:
                 await self._maybe_create_off_duty_alert(camera, None, now)
+            if not cooldown_active:
+                self._record_mode_detection(
+                    camera.id, Mode.OFF_DUTY.value,
+                    frame_age=(utc_now() - frame.captured_at).total_seconds()
+                    if getattr(frame, "captured_at", None) else None,
+                )
 
         if Mode.PEOPLE_FLOW.value in modes and mode_is_active(Mode.PEOPLE_FLOW.value, schedule, now):
             tracks = [
@@ -601,14 +815,23 @@ class MonitoringRuntime:
                     geometry.flow_roi, flow_events,
                 )
             results.append({"mode": Mode.PEOPLE_FLOW.value, "current": current_count, "entered": entered})
+            self._record_mode_detection(
+                camera.id, Mode.PEOPLE_FLOW.value,
+                frame_age=(utc_now() - frame.captured_at).total_seconds()
+                if getattr(frame, "captured_at", None) else None,
+            )
 
         phone_active = Mode.PHONE_USE.value in modes and mode_is_active(Mode.PHONE_USE.value, schedule, now)
+        phone_cooldown_active = phone_active and self._phone_use_cooldown_active(camera, now)
+        if phone_cooldown_active:
+            state.reset_phone_event()
         if Mode.PHONE_USE.value in modes and not phone_active:
             state.phone_event_update(False, options.phone_use_seconds, now)
 
         behavior_modes = {
             mode for mode in (Mode.PHONE_USE, Mode.SMOKING)
             if mode.value in modes and mode_is_active(mode.value, schedule, now)
+            and not (mode == Mode.PHONE_USE and phone_cooldown_active)
         }
         if off_duty_reuses_behavior:
             behavior_modes.add(Mode.OFF_DUTY)
@@ -626,16 +849,16 @@ class MonitoringRuntime:
                     ),
                     event_ended_at=(event_time(now, schedule) if off_duty_event_start else None),
                 )
-            results.extend(await self._behaviors(
-                camera,
-                behavior_modes,
-                behavior_frame,
-                options,
-                schedule,
-                now,
-                off_duty_local_confirmed=off_duty_local_confirmed,
-                off_duty_event_started_at=off_duty_event_start,
-            ))
+            if getattr(self, "async_pipeline", None):
+                self.async_pipeline.schedule_review("behavior", camera, behavior_frame, now,
+                    off_duty_event_start, behavior_modes, off_duty_local_confirmed)
+                results.append({"mode": "behavior", "status": "pending_review"})
+            else:
+                results.extend(await self._behaviors(
+                    camera, behavior_modes, behavior_frame, options, schedule, now,
+                    off_duty_local_confirmed=off_duty_local_confirmed,
+                    off_duty_event_started_at=off_duty_event_start,
+                ))
 
         if Mode.INTRUSION.value in modes and geometry.intrusion_zone and intrusion_active:
             intrusion_people = [
@@ -686,7 +909,7 @@ class MonitoringRuntime:
             self.media.set_intrusion(camera.id, [], set())
 
         ANALYSIS_LATENCY.observe(time.perf_counter() - started)
-        return {"camera_id": camera.id, "results": results}
+        return {"camera_id": camera.id, "results": results, "frame_sequence": getattr(frame, "sequence", 0)}
 
     async def _process_fire(self, camera: models.Camera, force: bool = False) -> dict[str, Any]:
         frame = self.media.latest(camera.id)
@@ -817,6 +1040,54 @@ class MonitoringRuntime:
             and mode.value in from_json(item.modes_json, [])
         ], key=lambda item: item.id)
 
+    def _off_duty_cooldown_active(self, camera: models.Camera, now: datetime) -> bool:
+        """Check the directory cooldown that separates off-duty event cycles."""
+        if not hasattr(self.repository, "latest_directory_alert_time"):
+            return False
+        members = (
+            self._directory_mode_cameras(camera, Mode.OFF_DUTY)
+            if hasattr(self.repository, "list_cameras") else [camera]
+        )
+        cooldown_seconds = max(
+            (CameraOptions.model_validate(from_json(item.options_json, {})).alert_cooldown_seconds
+             for item in members),
+            default=CameraOptions.model_validate(
+                from_json(camera.options_json, {})
+            ).alert_cooldown_seconds,
+        )
+        last = self.repository.latest_directory_alert_time(
+            self._directory_key(camera), Mode.OFF_DUTY.value
+        )
+        if not last:
+            return False
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        return now - last < timedelta(seconds=cooldown_seconds)
+
+    def _phone_use_cooldown_active(self, camera: models.Camera, now: datetime) -> bool:
+        """Check the directory cooldown that separates phone-use event cycles."""
+        if not hasattr(self.repository, "latest_directory_alert_time"):
+            return False
+        members = (
+            self._directory_mode_cameras(camera, Mode.PHONE_USE)
+            if hasattr(self.repository, "list_cameras") else [camera]
+        )
+        cooldown_seconds = max(
+            (CameraOptions.model_validate(from_json(item.options_json, {})).alert_cooldown_seconds
+             for item in members),
+            default=CameraOptions.model_validate(
+                from_json(camera.options_json, {})
+            ).alert_cooldown_seconds,
+        )
+        last = self.repository.latest_directory_alert_time(
+            self._directory_key(camera), Mode.PHONE_USE.value
+        )
+        if not last:
+            return False
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        return now - last < timedelta(seconds=cooldown_seconds)
+
     async def _maybe_create_off_duty_alert(
         self, camera: models.Camera, analysis: models.Analysis | None, now: datetime,
     ) -> bool:
@@ -873,6 +1144,8 @@ class MonitoringRuntime:
             if last_alert and last_alert.tzinfo is None:
                 last_alert = last_alert.replace(tzinfo=timezone.utc)
             if last_alert and utc_now() - last_alert < timedelta(seconds=cooldown_seconds):
+                for member_state in member_states:
+                    member_state.reset_off_duty_event()
                 return False
             reason = f"目录内 {len(members)} 个监控源均经大模型确认离岗"
             anchor_analysis = analysis or self.repository.add_analysis(
@@ -953,6 +1226,9 @@ class MonitoringRuntime:
             else:
                 response = await self.vlm.analyze_off_duty(evidence_jpeg)
             result = response.results[Mode.OFF_DUTY]
+            stale = self._stale_review(camera.id, Mode.OFF_DUTY.value, response, result)
+            if stale:
+                return stale
             VLM_CALLS.labels(mode=Mode.OFF_DUTY.value, status=result.status).inc()
             confirmed = result.status == "confirmed"
             analysis = self.repository.add_analysis(
@@ -974,6 +1250,12 @@ class MonitoringRuntime:
             }
         except VLMError as exc:
             VLM_CALLS.labels(mode=Mode.OFF_DUTY.value, status="error").inc()
+            if getattr(self, "async_pipeline", None):
+                reason = self.async_pipeline.review_invalid(camera.id, Mode.OFF_DUTY.value)
+                if reason:
+                    self.repository.add_analysis(camera_id=camera.id, mode=Mode.OFF_DUTY.value,
+                        status="stale", reason=reason, error=type(exc).__name__)
+                    return {"mode": Mode.OFF_DUTY.value, "status": "stale", "reason": reason}
             state.record_off_duty_review(False, now)
             analysis = self.repository.add_analysis(
                 camera_id=camera.id, mode=Mode.OFF_DUTY.value, status="uncertain",
@@ -986,6 +1268,18 @@ class MonitoringRuntime:
                 "mode": Mode.OFF_DUTY.value, "status": analysis.status,
                 "final_review": True, "reason": analysis.reason, "error": str(exc),
             }
+
+    def _stale_review(self, camera_id, mode, response, result):
+        engine = getattr(self, "async_pipeline", None)
+        reason = engine.review_invalid(camera_id, mode) if engine else None
+        if not reason:
+            return None
+        engine.stale_results += 1
+        self.repository.add_analysis(camera_id=camera_id, mode=mode, status="stale",
+            confidence=result.confidence, reason=f"复核已过期：{reason}；原结果：{result.reason}",
+            request_id=response.request_id, provider=response.provider, model=response.model,
+            usage_json=as_json(response.usage), latency_ms=response.latency_ms)
+        return {"mode": mode, "status": "stale", "reason": reason}
 
     async def _behaviors(
         self,
@@ -1029,6 +1323,10 @@ class MonitoringRuntime:
             output = []
             for mode in sorted(modes, key=lambda item: item.value):
                 result = response.results[mode]
+                stale = self._stale_review(camera.id, mode.value, response, result)
+                if stale:
+                    output.append(stale)
+                    continue
                 VLM_CALLS.labels(mode=mode.value, status=result.status).inc()
                 analysis = self.repository.add_analysis(
                     camera_id=camera.id, mode=mode.value, status=result.status,
@@ -1071,6 +1369,12 @@ class MonitoringRuntime:
         except VLMError as exc:
             VLM_CALLS.labels(mode="behavior_combined", status="error").inc()
             output = []
+            if getattr(self, "async_pipeline", None):
+                for mode in modes:
+                    self.repository.add_analysis(camera_id=camera.id, mode=mode.value,
+                        status="uncertain", reason="视觉大模型分析失败", error=type(exc).__name__)
+                # Never mutate an event on a failed asynchronous model request.
+                return [{"mode": mode.value, "status": "uncertain"} for mode in modes]
             if Mode.PHONE_USE in modes:
                 state.phone_event_update(False, options.phone_use_seconds, now)
             if Mode.OFF_DUTY in modes:
@@ -1089,7 +1393,18 @@ class MonitoringRuntime:
         general_depth = await self.queue.depths()
         fire_depth = await self.fire_queue.depths()
         return {
-            "scheduler": {"status": "running" if self.running else "stopped", "last_heartbeat": self.last_heartbeat.isoformat()},
+            "postprocessing": (self.async_pipeline.status() if getattr(self, "async_pipeline", None)
+                               else {"enabled": False}),
+            "person_detection": self.person_detection_status(),
+            "mode_detection": self.mode_detection_status(),
+            "capture_persistence": (self.capture_persistence.status()
+                                    if getattr(self, "capture_persistence", None)
+                                    else {"mode": "legacy", "enabled": False}),
+            "scheduler": {
+                "status": "failed" if self.scheduler_task and self.scheduler_task.done() and not self.scheduler_task.cancelled() else ("running" if self.running else "stopped"),
+                "last_heartbeat": self.last_heartbeat.isoformat(),
+                "error": str(self.scheduler_task.exception()) if self.scheduler_task and self.scheduler_task.done() and not self.scheduler_task.cancelled() else None,
+            },
             "media": {
                 "status": "running",
                 "registered_cameras": len(self.media.sources),
@@ -1123,6 +1438,6 @@ class MonitoringRuntime:
             },
             "detectors": {
                 "general": self.yolo.status(),
-                "fire_smoke": self.fire_smoke.status(),
+                "fire_smoke": {**self.fire_smoke.status(), "min_interval_seconds": FIRE_SMOKE_INTERVAL_SECONDS},
             },
         }

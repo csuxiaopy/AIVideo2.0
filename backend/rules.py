@@ -258,6 +258,12 @@ class CameraRuleState:
         self.absence_alerted = False
         self.reset_off_duty_confirmation(reset_review=True)
 
+    def reset_off_duty_event(self) -> None:
+        """Discard an absence interval that must not carry into a new cycle."""
+        self.absence_since = None
+        self.absence_alerted = False
+        self.reset_off_duty_confirmation(reset_review=True)
+
     def phone_event_update(
         self, confirmed: bool, threshold_seconds: int, now: datetime,
     ) -> tuple[str | None, datetime | None]:
@@ -276,6 +282,11 @@ class CameraRuleState:
             self.phone_alerted = True
             return "threshold", self.phone_since
         return None, self.phone_since
+
+    def reset_phone_event(self) -> None:
+        """Discard phone-use timing that must not carry across a cooldown."""
+        self.phone_since = None
+        self.phone_alerted = False
 
     def behavior_confirmed(self, mode: str, confirmed: bool, now: datetime) -> bool:
         values = self.positive_windows[mode]

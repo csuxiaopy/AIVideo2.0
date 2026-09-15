@@ -84,7 +84,7 @@ def test_off_duty_waits_for_every_directory_member_and_persists_every_image():
     assert not second.absence_vlm_confirmed
 
 
-def test_off_duty_directory_cooldown_keeps_fresh_confirmations_for_later():
+def test_off_duty_directory_cooldown_discards_event_state():
     now = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
     camera = _camera("a", None, "off_duty", 600)
 
@@ -110,8 +110,30 @@ def test_off_duty_directory_cooldown_keeps_fresh_confirmations_for_later():
     state.record_off_duty_review(True, now, b"new-image", 0.9)
 
     assert not asyncio.run(runtime._maybe_create_off_duty_alert(camera, None, now))
-    assert state.absence_vlm_confirmed
-    assert state.absence_evidence_jpeg == b"new-image"
+    assert state.absence_since is None
+    assert not state.absence_alerted
+    assert not state.absence_vlm_confirmed
+    assert state.absence_evidence_jpeg is None
+
+
+def test_off_duty_starts_timing_only_after_directory_cooldown():
+    cooldown_ended_at = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
+    camera = _camera("a", 5, "off_duty", 300)
+
+    class Repository:
+        def list_cameras(self):
+            return [camera]
+
+        def latest_directory_alert_time(self, *_args):
+            return cooldown_ended_at - timedelta(seconds=300)
+
+    runtime = object.__new__(MonitoringRuntime)
+    runtime.repository = Repository()
+
+    assert not runtime._off_duty_cooldown_active(camera, cooldown_ended_at)
+    assert runtime._off_duty_cooldown_active(
+        camera, cooldown_ended_at - timedelta(microseconds=1)
+    )
 
 
 def test_off_duty_offline_member_blocks_directory_alert():
@@ -165,6 +187,26 @@ def test_phone_alert_uses_longest_directory_cooldown():
         cameras[0], analysis, b"phone", "threshold", now - timedelta(minutes=10), now
     ))
     assert received[0]["directory_cooldown_seconds"] == 900
+
+
+def test_phone_use_starts_timing_only_after_directory_cooldown():
+    cooldown_ended_at = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
+    cameras = [_camera("a", 2, "phone_use", 60), _camera("b", 2, "phone_use", 900)]
+
+    class Repository:
+        def list_cameras(self):
+            return cameras
+
+        def latest_directory_alert_time(self, *_args):
+            return cooldown_ended_at - timedelta(seconds=900)
+
+    runtime = object.__new__(MonitoringRuntime)
+    runtime.repository = Repository()
+
+    assert not runtime._phone_use_cooldown_active(cameras[0], cooldown_ended_at)
+    assert runtime._phone_use_cooldown_active(
+        cameras[0], cooldown_ended_at - timedelta(microseconds=1)
+    )
 
 
 def test_alert_service_snapshots_directory_name_and_publishes_all_evidence(tmp_path):

@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     frame_capture_timeout_seconds: int = 15
     capture_fps: float = 1.0
     capture_max_height: int = 960
+    capture_decode_devices: str = ""
+    capture_gpu_streams_per_device: int = 0
+    capture_cpu_camera_ids: str = ""
     yolo_model_path: str = "models/yolo26s.pt"
     yolo_device: str = "cpu"
     yolo_imgsz: int = 640
@@ -43,9 +46,19 @@ class Settings(BaseSettings):
     yolo_inference_timeout_seconds: int = 30
     yolo_inference_processes: int = 4
     yolo_batch_size: int = 1
+    yolo_batch_wait_ms: float = 10.0
     yolo_threads_per_process: int = 5
     yolo_interop_threads: int = 1
     analysis_queue_maxsize: int = 256
+    # Separate staged switch: this does NOT enable asynchronous review/alerts.
+    async_capture_persistence: bool = False
+    background_io_workers: int = 4
+    async_postprocessing: bool = False
+    background_queue_capacity: int = 4096
+    review_workers: int = 2
+    review_timeout_seconds: float = 90
+    review_max_evidence_age_seconds: float = 120
+    notification_workers: int = 4
     fire_smoke_model: str = "models/fire_smoke_yolov8.pt"
     fire_smoke_sha256: str = "ac0a10257b2bc1f20c9d957f8adeeb61dd6140322fc19d0b4a116cb491776d16"
     fire_smoke_device: str = "cpu"
@@ -53,6 +66,7 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = True
     analysis_workers: int = 10
     fire_smoke_workers: int = 1
+    fire_smoke_min_interval_seconds: float = 30.0
     web_dist_dir: Path = ROOT / "frontend" / "dist"
 
     def prepare(self) -> None:
