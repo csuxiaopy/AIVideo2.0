@@ -159,6 +159,8 @@ class CameraRuleState:
     absence_confirmation_at: datetime | None = None
     absence_evidence_jpeg: bytes | None = None
     absence_confidence: float = 0.0
+    absence_threshold_at: datetime | None = None
+    absence_threshold_sampled_at: datetime | None = None
     phone_since: datetime | None = None
     phone_alerted: bool = False
     positive_windows: dict[str, deque[datetime]] = field(default_factory=lambda: defaultdict(deque))
@@ -241,20 +243,40 @@ class CameraRuleState:
         self.absence_last_review_at = now
         self.absence_vlm_confirmed = confirmed
         self.absence_confirmation_at = now if confirmed else None
-        self.absence_evidence_jpeg = evidence_jpeg if confirmed else None
+        if confirmed and evidence_jpeg is not None:
+            self.absence_evidence_jpeg = evidence_jpeg
+        elif self.absence_threshold_at is None:
+            self.absence_evidence_jpeg = None
         self.absence_confidence = confidence if confirmed else 0.0
+
+    def latch_off_duty_threshold(
+        self, threshold_at: datetime, sampled_at: datetime, evidence_jpeg: bytes,
+    ) -> None:
+        """Freeze the first frame crossing the local absence threshold."""
+        if self.absence_threshold_at is None:
+            self.absence_threshold_at = threshold_at
+            self.absence_threshold_sampled_at = sampled_at
+            self.absence_evidence_jpeg = evidence_jpeg
 
     def reset_off_duty_confirmation(self, reset_review: bool = False) -> None:
         self.absence_vlm_confirmed = False
         self.absence_confirmation_at = None
         self.absence_evidence_jpeg = None
         self.absence_confidence = 0.0
+        self.absence_threshold_at = None
+        self.absence_threshold_sampled_at = None
         if reset_review:
             self.absence_last_review_at = None
 
     def start_new_off_duty_cycle(self, now: datetime) -> None:
         """Start a fresh absence interval after an alert was persisted."""
         self.absence_since = now
+        self.absence_alerted = False
+        self.reset_off_duty_confirmation(reset_review=True)
+
+    def reset_off_duty_event(self) -> None:
+        """Discard an absence interval that must not carry into a new cycle."""
+        self.absence_since = None
         self.absence_alerted = False
         self.reset_off_duty_confirmation(reset_review=True)
 
@@ -276,6 +298,11 @@ class CameraRuleState:
             self.phone_alerted = True
             return "threshold", self.phone_since
         return None, self.phone_since
+
+    def reset_phone_event(self) -> None:
+        """Discard phone-use timing that must not carry across a cooldown."""
+        self.phone_since = None
+        self.phone_alerted = False
 
     def behavior_confirmed(self, mode: str, confirmed: bool, now: datetime) -> bool:
         values = self.positive_windows[mode]

@@ -74,6 +74,7 @@ class WebhookClient:
     def __init__(self, client: httpx.AsyncClient | None = None):
         self.client = client or httpx.AsyncClient(timeout=15)
         self._owns_client = client is None
+        self.io_pool = None
 
     async def close(self) -> None:
         if self._owns_client:
@@ -106,7 +107,8 @@ class WebhookClient:
         await self.send_markdown(url, build_alert_markdown(payload), attempts)
         paths = [evidence_paths] if isinstance(evidence_paths, Path) else evidence_paths
         for evidence_path in paths:
-            image_bytes = prepare_wecom_image(evidence_path)
+            image_bytes = (await self.io_pool.run(prepare_wecom_image, evidence_path)
+                           if self.io_pool else await asyncio.to_thread(prepare_wecom_image, evidence_path))
             await self._post(url, {"msgtype": "image", "image": {
                 "base64": base64.b64encode(image_bytes).decode("ascii"),
                 "md5": hashlib.md5(image_bytes, usedforsecurity=False).hexdigest(),

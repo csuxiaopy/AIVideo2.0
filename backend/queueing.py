@@ -18,6 +18,7 @@ class TaskEnvelope:
     task_id: str
     stream: str | None = None
     message_id: str | None = None
+    created_at: datetime | None = None
 
 
 class AnalysisQueue:
@@ -78,7 +79,9 @@ class AnalysisQueue:
         ranks = {"critical": 0, "high": 1, "normal": 2, "low": 3}
         self.sequence += 1
         try:
-            self.fallback.put_nowait((ranks[priority], self.sequence, TaskEnvelope(camera_id, priority, task_id)))
+            self.fallback.put_nowait((ranks[priority], self.sequence, TaskEnvelope(
+                camera_id, priority, task_id, created_at=datetime.now(timezone.utc)
+            )))
             return task_id
         except asyncio.QueueFull:
             return None
@@ -100,11 +103,21 @@ class AnalysisQueue:
                     self.group, self.consumer, streams=streams, count=1, block=1000
                 )
                 if messages:
+                    for extra_stream, extra_rows in messages[1:]:
+                        for extra_id, extra_fields in extra_rows:
+                            self.recovered.put_nowait(TaskEnvelope(
+                                camera_id=extra_fields["camera_id"],
+                                priority=extra_fields.get("priority", "normal"),
+                                task_id=extra_fields.get("task_id", extra_id),
+                                stream=extra_stream, message_id=extra_id,
+                                created_at=datetime.fromisoformat(extra_fields["created_at"]) if extra_fields.get("created_at") else None,
+                            ))
                     stream, rows = messages[0]
                     message_id, fields = rows[0]
                     return TaskEnvelope(
                         camera_id=fields["camera_id"], priority=fields.get("priority", "normal"),
                         task_id=fields.get("task_id", message_id), stream=stream, message_id=message_id,
+                        created_at=datetime.fromisoformat(fields["created_at"]) if fields.get("created_at") else None,
                     )
         _, _, envelope = await self.fallback.get()
         return envelope
@@ -128,6 +141,7 @@ class AnalysisQueue:
                         camera_id=fields["camera_id"], priority=fields.get("priority", "normal"),
                         task_id=fields.get("task_id", message_id), stream=stream,
                         message_id=message_id,
+                        created_at=datetime.fromisoformat(fields["created_at"]) if fields.get("created_at") else None,
                     ))
                 if not rows or start_id == "0-0":
                     break

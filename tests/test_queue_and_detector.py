@@ -19,6 +19,7 @@ async def test_fallback_queue_respects_priority_and_reports_per_priority_depth()
     assert await queue.depths() == {"critical": 1, "high": 1, "normal": 0, "low": 1}
     first = await queue.get()
     assert first.camera_id == "fire-camera"
+    assert first.created_at is not None
     await queue.ack(first)
 
 
@@ -110,11 +111,25 @@ def test_yolo_gpu_batcher_returns_detection(monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "ultralytics", ModuleType("ultralytics"))
     monkeypatch.setitem(__import__("sys").modules, "supervision", None)
     monkeypatch.setattr(yolo_module, "ProcessPoolExecutor", FakeExecutor)
-    detector = YoloDetector("models/yolo26s.pt", "0", 640, 0.35, batch_size=8)
+    detector = YoloDetector("models/yolo26s.pt", "0", 640, 0.35, batch_size=8, batch_wait_ms=1)
     detections = detector.detect("camera-1", b"jpeg")
+    status = detector.status()
     detector.close()
     assert detections[0].class_name == "person"
-    assert detector.status()["batch_size"] == 8
+    assert status["batch_size"] == 8
+    assert status["batch_wait_ms"] == 1
+    assert status["batch_metrics"]["count"] == 1
+    assert status["batch_metrics"]["last_size"] == 1
+    assert status["batch_metrics"]["full_batch_ratio"] == 0
+
+
+def test_yolo_batch_wait_is_bounded(monkeypatch):
+    monkeypatch.setitem(__import__("sys").modules, "ultralytics", ModuleType("ultralytics"))
+    monkeypatch.setattr(yolo_module, "ProcessPoolExecutor", lambda **_kwargs: None)
+    low = YoloDetector("models/yolo26s.pt", "0", 640, 0.35, batch_wait_ms=-1)
+    high = YoloDetector("models/yolo26s.pt", "0", 640, 0.35, batch_wait_ms=5000)
+    assert low.batch_wait_ms == 0
+    assert high.batch_wait_ms == 1000
 
 
 def test_official_general_model_name_switches_within_configured_model_directory():

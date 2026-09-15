@@ -1,0 +1,8 @@
+ARG BASE_IMAGE=yolo-vlm-cpu-rollback:20260914
+FROM ${BASE_IMAGE}
+RUN pip install --no-cache-dir --progress-bar off torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu118
+RUN python -c "import torch; assert torch.version.cuda == '11.8'"
+COPY backend /app/backend
+COPY alembic /app/alembic
+COPY alembic.ini run.py /app/
+COPY frontend/dist /app/frontend/dist

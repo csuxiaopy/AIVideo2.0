@@ -1,0 +1,38 @@
+services:
+  app:
+    image: yolo-vlm-gpu:production
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu.production
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility,video"
+      CAPTURE_DECODE_DEVICES: "0,1"
+      CAPTURE_GPU_STREAMS_PER_DEVICE: "32"
+      CAPTURE_CPU_CAMERA_IDS: "143"
+      YOLO_DEVICE: "0,1"
+      FIRE_SMOKE_DEVICE: "1"
+      YOLO_INFERENCE_PROCESSES: "1"
+      YOLO_BATCH_SIZE: "2"
+      YOLO_BATCH_WAIT_MS: "10"
+      YOLO_THREADS_PER_PROCESS: "1"
+      FIRE_SMOKE_WORKERS: "1"
+      FIRE_SMOKE_MIN_INTERVAL_SECONDS: "30"
+      ANALYSIS_WORKERS: "24"
+      CAPTURE_FPS: "1"
+      CAPTURE_MAX_HEIGHT: "640"
+      ASYNC_CAPTURE_PERSISTENCE: "true"
+      BACKGROUND_IO_WORKERS: "4"
+      ASYNC_POSTPROCESSING: "true"
+      BACKGROUND_QUEUE_CAPACITY: "4096"
+      REVIEW_WORKERS: "4"
+      NOTIFICATION_WORKERS: "4"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0", "1"]
+              capabilities: [gpu]

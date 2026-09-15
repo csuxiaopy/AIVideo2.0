@@ -46,6 +46,8 @@ class PersistentCaptureStream:
         on_status: Callable[..., None],
         output_fps: float = 1.0,
         max_height: int = 960,
+        decode_device: str | None = None,
+        startup_delay_seconds: float = 0.0,
     ):
         self.camera_id = camera_id
         self.source = source
@@ -53,6 +55,8 @@ class PersistentCaptureStream:
         self.on_status = on_status
         self.output_fps = max(0.1, min(output_fps, 10.0))
         self.max_height = max(160, max_height)
+        self.decode_device = decode_device
+        self.startup_delay_seconds = max(0.0, startup_delay_seconds)
         self.task: asyncio.Task | None = None
         self.process: asyncio.subprocess.Process | None = None
         self.running = False
@@ -80,6 +84,8 @@ class PersistentCaptureStream:
 
     async def _run(self) -> None:
         attempt = 0
+        if self.startup_delay_seconds:
+            await asyncio.sleep(self.startup_delay_seconds)
         while self.running:
             frames_before = self.frames
             try:
@@ -93,20 +99,32 @@ class PersistentCaptureStream:
                     attempt = 0
                 self.reconnects += 1
                 safe = str(exc).replace(self.source, redact_rtsp(self.source))[-600:]
-                self.last_error = safe
+                self.last_error = f"{type(exc).__name__}: {safe}"
                 self.on_status(self.camera_id, False, safe, None)
                 delay = self.BACKOFF_SECONDS[min(attempt, len(self.BACKOFF_SECONDS) - 1)]
                 attempt += 1
                 await asyncio.sleep(delay * random.uniform(0.9, 1.1))
 
-    async def _read_process(self) -> None:
+    def command(self) -> list[str]:
         input_args, resolved = _input_args(self.source)
-        command = ["ffmpeg", "-hide_banner", "-loglevel", "error", *input_args]
+        command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-threads", "1", *input_args]
+        filters = f"fps={self.output_fps:.3f},"
+        if self.decode_device is not None:
+            command += ["-hwaccel", "cuda", "-hwaccel_device", self.decode_device,
+                        "-hwaccel_output_format", "cuda", "-extra_hw_frames", "4"]
+            # These production HEVC main streams are NV12. Sample on GPU before
+            # downloading the selected frames; do not transfer all 25 FPS to CPU.
+            filters += "hwdownload,format=nv12,"
+        filters += f"scale=-2:min({self.max_height}\\,ih)"
         command += [
-            "-i", resolved, "-an",
-            "-vf", f"fps={self.output_fps:.3f},scale=-2:min({self.max_height}\\,ih)",
+            "-i", resolved, "-an", "-threads", "1", "-filter_threads", "1",
+            "-vf", filters,
             "-c:v", "mjpeg", "-q:v", "4", "-f", "image2pipe", "pipe:1",
         ]
+        return command
+
+    async def _read_process(self) -> None:
+        command = self.command()
         process = await asyncio.create_subprocess_exec(
             *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
@@ -133,7 +151,8 @@ class PersistentCaptureStream:
                 if not chunk:
                     await asyncio.gather(stderr_task, return_exceptions=True)
                     detail = stderr_buffer.decode("utf-8", errors="replace")[-600:]
-                    raise RuntimeError(detail or "FFmpeg 未返回画面")
+                    exit_code = await process.wait()
+                    raise RuntimeError(detail or f"FFmpeg 未返回画面 (exit={exit_code})")
                 buffer.extend(chunk)
                 while True:
                     start = buffer.find(b"\xff\xd8")
@@ -162,6 +181,9 @@ class PersistentCaptureStream:
         age = time.monotonic() - self.last_frame_monotonic if self.last_frame_monotonic else None
         return {
             "running": self.running,
+            "decoder": "cuda" if self.decode_device is not None else "cpu",
+            "decode_device": self.decode_device,
+            "frames": self.frames,
             "fps": round(self.frames / elapsed, 3),
             "latest_frame_age_seconds": round(age, 3) if age is not None else None,
             "reconnects": self.reconnects,
@@ -309,8 +331,12 @@ class MediaGateway:
         capture_timeout_seconds: int = 15,
         capture_fps: float = 1.0,
         capture_max_height: int = 960,
+        capture_decode_devices: str = "",
+        capture_gpu_streams_per_device: int = 0,
+        capture_cpu_camera_ids: str = "",
     ):
         self.status_callback = status_callback
+        self.frame_persistence = None
         self.snapshot_dir = snapshot_dir
         self.snapshot_dir.mkdir(parents=True, exist_ok=True)
         self.max_live_previews = max(1, max_live_previews)
@@ -319,6 +345,11 @@ class MediaGateway:
         self.capture_timeout_seconds = max(5, capture_timeout_seconds)
         self.capture_fps = max(0.1, capture_fps)
         self.capture_max_height = max(160, capture_max_height)
+        self.decode_devices = [item.strip() for item in capture_decode_devices.split(",") if item.strip()]
+        if any(not item.isdigit() for item in self.decode_devices) or len(set(self.decode_devices)) != len(self.decode_devices):
+            raise ValueError("Capture GPU devices must be unique numeric device IDs")
+        self.gpu_streams_per_device = max(0, capture_gpu_streams_per_device)
+        self.cpu_camera_ids = {item.strip() for item in capture_cpu_camera_ids.split(",") if item.strip()}
         self.sources: dict[str, str] = {}
         self.preview_sources: dict[str, str] = {}
         self.snapshots: dict[str, deque[FramePacket]] = defaultdict(lambda: deque(maxlen=1))
@@ -358,8 +389,10 @@ class MediaGateway:
         ]
         for camera_id in to_stop:
             await self.stop_camera_preview(camera_id)
+        assignments = self.decode_assignments(wanted)
+        gpu_order = {key: index for index, key in enumerate(sorted(key for key, value in assignments.items() if value is not None))}
         for camera_id, stream in list(self.capture_streams.items()):
-            if camera_id not in wanted or stream.source != wanted[camera_id]:
+            if camera_id not in wanted or stream.source != wanted[camera_id] or stream.decode_device != assignments.get(camera_id):
                 await stream.stop()
                 self.capture_streams.pop(camera_id, None)
         self.sources = wanted
@@ -369,9 +402,21 @@ class MediaGateway:
                 stream = PersistentCaptureStream(
                     camera_id, source, self._publish_frame, self.status_callback,
                     self.capture_fps, self.capture_max_height,
+                    assignments[camera_id],
+                    gpu_order.get(camera_id, 0) * 0.5,
                 )
                 self.capture_streams[camera_id] = stream
                 stream.start()
+
+    def decode_assignments(self, sources: dict[str, str]) -> dict[str, str | None]:
+        """Bounded, deterministic GPU placement. Failures never trigger mass CPU fallback."""
+        assigned: dict[str, str | None] = dict.fromkeys(sources)
+        candidates = [key for key in sorted(sources) if key not in self.cpu_camera_ids
+                      and sources[key].startswith(("rtsp://", "rtsps://"))]
+        capacity = len(self.decode_devices) * self.gpu_streams_per_device
+        for index, camera_id in enumerate(candidates[:capacity]):
+            assigned[camera_id] = self.decode_devices[index % len(self.decode_devices)]
+        return assigned
 
     async def remove(self, camera_id: str) -> None:
         self.sources.pop(camera_id, None)
@@ -419,11 +464,16 @@ class MediaGateway:
         raise RuntimeError("等待常驻取帧流超时")
 
     async def _publish_frame(self, camera_id: str, jpeg: bytes) -> None:
-        previous = self.latest(camera_id)
+        # Publication must never load yesterday's on-disk snapshot.
+        frames = self.snapshots.get(camera_id)
+        previous = frames[-1] if frames else None
         if previous and previous.sequence > self.consumed_sequences[camera_id]:
             self.overwritten_frames[camera_id] += 1
         packet = FramePacket(datetime.now(timezone.utc), jpeg, self._next_sequence(camera_id))
         self.snapshots[camera_id].append(packet)
+        if self.frame_persistence is not None:
+            self.frame_persistence(camera_id, packet)
+            return
         results = await asyncio.gather(
             asyncio.to_thread(self._save_snapshot, camera_id, jpeg),
             asyncio.to_thread(self.status_callback, camera_id, True, None, packet.captured_at),
@@ -463,6 +513,9 @@ class MediaGateway:
         frames = self.snapshots.get(camera_id)
         if frames:
             return frames[-1]
+        if self.frame_persistence is not None:
+            # Fresh detection must wait for the live stream, never synchronous disk I/O.
+            return None
         path = self._snapshot_path(camera_id)
         if not path.is_file():
             return None

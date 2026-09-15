@@ -10,8 +10,8 @@ import type { Camera, CameraDirectory, DrawLayer, Mode, Point, SceneType, SceneT
 const modeInfo:Record<Mode,{name:string;icon:string;note:string}> = {
   off_duty:{name:'离岗检测',icon:'offDuty',note:'持续无人后由大模型终审'},
   phone_use:{name:'玩手机检测',icon:'phone',note:'每 3 分钟单帧大模型联合检测'},
-  people_flow:{name:'人员计数',icon:'traffic',note:'新人员进入画面自动统计'},
-  fire_smoke:{name:'烟火检测',icon:'flame',note:'本地安全模型'},
+  people_flow:{name:'人员计数',icon:'traffic',note:'每 1 秒检测，新人员进入画面自动统计'},
+  fire_smoke:{name:'烟火检测',icon:'flame',note:'每 30 秒运行本地安全模型'},
   intrusion:{name:'区域入侵',icon:'intrusion',note:'进入禁区立即告警'},
   black_screen:{name:'屏幕黑屏',icon:'blackScreen',note:'亮度与内容变化'},
   on_duty:{name:'在岗判定',icon:'onDuty',note:'高级模式'},
@@ -137,6 +137,15 @@ let clockTimer:number|undefined
 let socket:WebSocket|undefined
 let previewHeartbeatTimer:number|undefined
 const frameIntervalOptions = [1,5,10,20,30,60,120] as const
+const modeFrequencyText = (camera:Pick<Camera,'modes'|'frame_interval_seconds'>) => {
+  const labels:string[]=[]
+  if(camera.modes.includes('people_flow'))labels.push('人流 1 秒')
+  if(camera.modes.includes('off_duty'))labels.push('离岗 10 秒')
+  if(camera.modes.includes('fire_smoke'))labels.push('烟火 30 秒')
+  const fixed=new Set<Mode>(['people_flow','off_duty','fire_smoke'])
+  if(camera.modes.some(mode=>!fixed.has(mode)))labels.push(`其他 ${camera.frame_interval_seconds} 秒`)
+  return labels.join(' / ')||`每 ${camera.frame_interval_seconds} 秒`
+}
 
 /* ---------- 顶栏时钟 / 全屏 / 系统状态 ---------- */
 const dateStr = computed(()=>now.value.toLocaleDateString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit'}).replace(/\//g,'-'))
@@ -749,7 +758,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
                 <span class="cam-id">{{camera.id}}</span>
               </div>
               <div class="shot-bottom">
-                <div><h3>{{camera.name}}</h3><p>{{sceneInfo[camera.scene_type]?.name}} · 每 {{camera.frame_interval_seconds}} 秒</p></div>
+                <div><h3>{{camera.name}}</h3><p>{{sceneInfo[camera.scene_type]?.name}} · {{modeFrequencyText(camera)}}</p></div>
                 <span v-if="camera.enabled" class="ai-tag"><TechIcon name="cpu" :size="10"/>AI ACTIVE</span>
                 <span v-else class="ai-tag" style="color:var(--text-muted);border-color:var(--border-dim)">PAUSED</span>
               </div>
@@ -761,7 +770,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             </div>
             <dl class="snapshot-meta">
               <div><dt>最近抓帧</dt><dd>{{formatTime(camera.last_frame_at)}}</dd></div>
-              <div><dt>抽帧频率</dt><dd>每 {{camera.frame_interval_seconds}} 秒</dd></div>
+              <div><dt>检测频率</dt><dd>{{modeFrequencyText(camera)}}</dd></div>
             </dl>
             <div class="chips"><span v-for="mode in camera.modes" :key="mode">{{modeName(mode)}}</span></div>
             <button v-if="isAdmin" class="preview-button" :class="{active:camera.preview_active}" @click="openPreview(camera)"><TechIcon name="eye" :size="13"/>{{camera.preview_active?'加入实时预览':'查看实时视频'}}</button>
@@ -910,7 +919,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
                   <label class="camera-select" :aria-label="`选择 ${camera.name}`"><input v-model="selectedCameraIds" type="checkbox" :value="camera.id"></label>
                   <i class="source-state" :class="camera.online?'ok':'bad'"></i>
                   <div class="source-main">
-                    <h3>{{camera.name}}<small>{{sceneInfo[camera.scene_type]?.name}} · 每 {{camera.frame_interval_seconds}} 秒 · {{camera.id}}</small></h3>
+                    <h3>{{camera.name}}<small>{{sceneInfo[camera.scene_type]?.name}} · {{modeFrequencyText(camera)}} · {{camera.id}}</small></h3>
                     <p>{{maskedSource(camera.source)}}</p>
                     <div class="chips"><span v-for="mode in camera.modes" :key="mode">{{modeName(mode)}}</span></div>
                     <small v-if="camera.last_error" class="error-text" :title="camera.last_error">最近抓帧失败：{{camera.last_error}}</small>
@@ -1253,7 +1262,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <p class="hint">岗位区域、人流 ROI 和禁区至少需要 3 个点。人流 ROI 与新建禁区默认为全屏。当前图层已有 {{pointsFor(drawLayer).length}} 个点。</p>
           </div>
           <aside class="editor-right">
-            <label>抽帧频率<select v-model.number="editForm.frame_interval_seconds"><option v-for="seconds in frameIntervalOptions" :key="seconds" :value="seconds">每 {{seconds}} 秒抓取一帧</option></select></label>
+            <label>其他模式检测周期<select v-model.number="editForm.frame_interval_seconds"><option v-for="seconds in frameIntervalOptions" :key="seconds" :value="seconds">每 {{seconds}} 秒一帧</option></select><small class="field-hint">人流固定每 1 秒、离岗固定每 10 秒、烟火固定每 30 秒；此项仅控制其他模式。</small></label>
             <label v-if="editForm.modes.includes('intrusion')">禁区名称<input v-model="editForm.zone_name"></label>
             <template v-if="editForm.modes.includes('intrusion')"><div class="field-title">区域入侵时段 <small>每天，支持跨午夜</small></div><div class="form-row"><label>开始时间<input v-model="intrusionShift.start" type="time" @change="syncIntrusionShift"></label><label>结束时间<input v-model="intrusionShift.end" type="time" @change="syncIntrusionShift"></label></div></template>
             <div class="field-title">普通模式排班</div>
@@ -1270,7 +1279,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <div v-if="editForm.modes.includes('phone_use') || editForm.modes.includes('smoking')" class="form-row"><label>大模型检测间隔（分钟）<input :value="optionMinutes('behavior_interval_seconds')" type="number" min="1" max="60" @input="setOptionMinutes('behavior_interval_seconds',$event)"></label><label v-if="editForm.modes.includes('phone_use')">玩手机判定时间（分钟）<input :value="optionMinutes('phone_use_seconds')" type="number" min="1" max="1440" @input="setOptionMinutes('phone_use_seconds',$event)"></label></div>
             <div class="form-row"><label>火焰阈值<input v-model.number="editForm.options.fire_confidence" type="number" min="0" max="1" step=".05"></label><label>烟雾阈值<input v-model.number="editForm.options.smoke_confidence" type="number" min="0" max="1" step=".05"></label></div>
             <label>入侵置信度<input v-model.number="editForm.options.intrusion_confidence" type="number" min="0" max="1" step=".05"></label>
-            <div class="config-note"><b>安全模式</b><p>烟火和黑屏始终运行；区域入侵仅在上方独立时段内运行。</p></div>
+            <div class="config-note"><b>固定检测频率</b><p>人流每 1 秒、离岗每 10 秒、烟火每 30 秒。烟火和黑屏始终运行；区域入侵仅在上方独立时段内运行。</p></div>
             <button class="primary wide" @click="saveEditor">保存策略</button>
           </aside>
         </div>

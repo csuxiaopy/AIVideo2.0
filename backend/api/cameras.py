@@ -47,6 +47,8 @@ async def _remove_camera_runtime(camera_id: str) -> None:
     runtime.next_fire_run.pop(camera_id, None)
     runtime.queued.discard(camera_id)
     runtime.fire_queued.discard(camera_id)
+    if getattr(runtime, "async_pipeline", None):
+        await runtime.sync_cameras()
 
 
 def _camera_or_404(camera_id: str) -> models.Camera:
@@ -152,6 +154,8 @@ async def create_camera_directory(payload: CameraDirectoryWrite) -> dict[str, An
         row = context.repository.create_camera_directory(payload.name)
     except IntegrityError as exc:
         raise HTTPException(status_code=409, detail="目录名称已存在") from exc
+    if context.runtime and getattr(context.runtime, "async_pipeline", None):
+        await context.runtime.sync_cameras()
     return {"id": row.id, "name": row.name, "camera_count": 0}
 
 
@@ -164,6 +168,8 @@ async def update_camera_directory(directory_id: int, payload: CameraDirectoryWri
     if not row:
         raise HTTPException(status_code=404, detail="目录不存在")
     count = next((item["camera_count"] for item in context.repository.list_camera_directories() if item["id"] == row.id), 0)
+    if context.runtime and getattr(context.runtime, "async_pipeline", None):
+        await context.runtime.sync_cameras()
     return {"id": row.id, "name": row.name, "camera_count": count}
 
 
@@ -171,6 +177,8 @@ async def update_camera_directory(directory_id: int, payload: CameraDirectoryWri
 async def delete_camera_directory(directory_id: int) -> Response:
     if not context.repository.delete_camera_directory(directory_id):
         raise HTTPException(status_code=404, detail="目录不存在")
+    if context.runtime and getattr(context.runtime, "async_pipeline", None):
+        await context.runtime.sync_cameras()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -274,6 +282,8 @@ async def move_cameras_batch(payload: CameraBatchMove) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="目录不存在")
     existing = context.repository.existing_camera_ids(payload.ids)
     moved = context.repository.move_cameras(list(existing), payload.directory_id)
+    if context.runtime and getattr(context.runtime, "async_pipeline", None):
+        await context.runtime.sync_cameras()
     return {"moved": moved, "missing_ids": [camera_id for camera_id in payload.ids if camera_id not in existing]}
 
 
@@ -367,6 +377,8 @@ async def update_modes(camera_id: str, payload: ModesUpdate) -> dict[str, Any]:
     updated = context.repository.update_camera(
         camera_id, {"modes_json": as_json([mode.value for mode in payload.modes])}
     )
+    if context.runtime and getattr(context.runtime, "async_pipeline", None):
+        await context.runtime.sync_cameras()
     return _public(updated)
 
 
@@ -375,9 +387,11 @@ async def update_geometry(camera_id: str, payload: GeometrySpec) -> dict[str, An
     camera = _camera_or_404(camera_id)
     modes = [Mode(value) for value in from_json(camera.modes_json, [])]
     _validate_combination(camera, modes, payload)
-    return _public(
-        context.repository.update_camera(camera_id, {"geometry_json": payload.model_dump_json()})
-    )
+    updated = context.repository.update_camera(camera_id, {"geometry_json": payload.model_dump_json()})
+    if context.runtime and getattr(context.runtime, "async_pipeline", None):
+        context.runtime.rules.remove(camera_id)
+        await context.runtime.sync_cameras()
+    return _public(updated)
 
 
 @router.put("/cameras/{camera_id}/schedule", dependencies=[Depends(admin_user)])
@@ -387,7 +401,41 @@ async def update_schedule(camera_id: str, payload: ScheduleSpec) -> dict[str, An
         camera_id, {"schedule_json": payload.model_dump_json()}
     )
     context.require_runtime().rules.remove(camera_id)
+    if getattr(context.require_runtime(), "async_pipeline", None):
+        await context.require_runtime().sync_cameras()
     return _public(updated)
+
+
+@router.get("/background-tasks/{task_id}", dependencies=[Depends(admin_user)])
+async def background_task(task_id: str) -> dict[str, Any]:
+    runtime = context.require_runtime()
+    engine = getattr(runtime, "async_pipeline", None)
+    if engine is None:
+        raise HTTPException(status_code=409, detail="后台处理模式未启用")
+    task = await engine.io.run(engine.store.get, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return task
+
+
+@router.post("/cameras/{camera_id}/reviews/{kind}/retry-result", dependencies=[Depends(admin_user)])
+async def retry_review_result(camera_id: str, kind: str) -> dict[str, Any]:
+    engine = getattr(context.require_runtime(), "async_pipeline", None)
+    if engine is None or kind not in {"off_duty", "behavior"}:
+        raise HTTPException(status_code=409, detail="复核处理模式或类型无效")
+    if not await engine.reviews.retry_completion(camera_id, kind):
+        raise HTTPException(status_code=409, detail="没有待保存的复核结果")
+    return {"camera_id": camera_id, "status": "saved"}
+
+
+@router.post("/background-tasks/{task_id}/retry", dependencies=[Depends(admin_user)])
+async def retry_background_task(task_id: str) -> dict[str, Any]:
+    engine = getattr(context.require_runtime(), "async_pipeline", None)
+    if engine is None:
+        raise HTTPException(status_code=409, detail="后台处理模式未启用")
+    if not await engine.io.run(engine.store.retry, task_id):
+        raise HTTPException(status_code=409, detail="仅可重试失败任务")
+    return {"task_id": task_id, "status": "pending"}
 
 
 @router.post("/cameras/{camera_id}/analyze", dependencies=[Depends(admin_user)])
