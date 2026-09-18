@@ -11,6 +11,7 @@ from starlette.responses import Response
 from backend.audit import audit_http_request
 from backend.api.context import context
 from backend.api.logs import _export_rows
+from backend.api.presenters import analysis_public
 from backend.auth import current_user
 from backend.main import create_app
 from backend.database import utc_now
@@ -120,3 +121,23 @@ def test_analysis_log_export_passes_camera_name_filter(monkeypatch):
     assert rows == []
     assert calls[0]["camera_name"] == "前台"
     assert "camera_id" not in calls[0]
+
+
+def test_analysis_presenter_exposes_off_duty_audit_fields():
+    row = SimpleNamespace(
+        id=1, camera_id="190", camera_name="玉祁营业厅视频2", mode="off_duty",
+        status="none", confidence=0.64, reason="岗位区域内检测到人员",
+        evidence_path="analysis-sample.jpg", occupancy_status="person_present",
+        off_duty_state="person_present", analysis_source="local_yolo",
+        absence_started_at=None, absence_elapsed_seconds=0, request_id=None,
+        provider=None, model=None, severity="normal", zone_name=None,
+        local_model="yolo", model_version="yolo", usage_json="{}", error=None,
+        latency_ms=0, created_at=datetime(2026, 9, 18, tzinfo=timezone.utc),
+    )
+
+    rendered = analysis_public(row)
+
+    assert rendered["occupancy_status"] == "person_present"
+    assert rendered["off_duty_state"] == "person_present"
+    assert rendered["analysis_source"] == "local_yolo"
+    assert rendered["evidence_url"] == "/evidence/analysis-sample.jpg"
