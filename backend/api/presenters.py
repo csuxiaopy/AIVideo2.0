@@ -56,6 +56,12 @@ def alert_public(alert: models.Alert, deliveries: list[models.WebhookDelivery] |
         "camera_name": row.camera_name,
         "confidence": row.confidence,
         "evidence_path": row.evidence_path,
+        "evidence_url": f"/evidence/{row.evidence_path}" if row.evidence_path else None,
+        "occupancy_status": getattr(row, "occupancy_status", None),
+        "off_duty_state": getattr(row, "off_duty_state", None),
+        "analysis_source": getattr(row, "analysis_source", None),
+        "absence_started_at": getattr(row, "absence_started_at", None),
+        "absence_elapsed_seconds": getattr(row, "absence_elapsed_seconds", None),
         "evidence_url": f"/evidence/{row.evidence_path}",
     } for row in evidence_rows]
     if not evidences and alert.evidence_path:

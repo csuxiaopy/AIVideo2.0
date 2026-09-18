@@ -95,6 +95,24 @@ def annotate_detections(
         return jpeg
 
 
+def compact_audit_image(jpeg: bytes, max_edge: int = 640, quality: int = 70) -> bytes:
+    """Resize an annotated frame for long-term analysis audit storage."""
+    try:
+        image = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            return jpeg
+        height, width = image.shape[:2]
+        scale = min(1.0, max_edge / max(height, width))
+        if scale < 1.0:
+            image = cv2.resize(image, (round(width * scale), round(height * scale)),
+                               interpolation=cv2.INTER_AREA)
+        ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        return encoded.tobytes() if ok else jpeg
+    except Exception:
+        logger.exception("Failed to compact analysis audit image")
+        return jpeg
+
+
 def _clamp_box(
     box: tuple[float, float, float, float], width: int, height: int
 ) -> tuple[int, int, int, int] | None:

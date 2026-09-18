@@ -205,7 +205,7 @@ def test_off_duty_confirmed_review_creates_one_alert_with_same_evidence():
     assert not state.off_duty_review_due(now + timedelta(hours=1), OFF_DUTY_REVIEW_INTERVAL_SECONDS)
 
 
-@pytest.mark.parametrize("status", ["none", "suspected", "uncertain"])
+@pytest.mark.parametrize("status", ["suspected", "uncertain"])
 def test_off_duty_non_confirmed_review_is_fail_closed(status):
     class VLM:
         async def analyze_off_duty(self, jpeg):
@@ -230,6 +230,26 @@ def test_off_duty_non_confirmed_review_is_fail_closed(status):
         now + timedelta(seconds=OFF_DUTY_REVIEW_INTERVAL_SECONDS),
         OFF_DUTY_REVIEW_INTERVAL_SECONDS,
     )
+
+
+def test_off_duty_vlm_person_result_ends_absence_event():
+    class VLM:
+        async def analyze_off_duty(self, jpeg):
+            return _response("none")
+
+    runtime, analyses, alerts = _runtime(VLM())
+    camera = SimpleNamespace(id="camera-1", name="一号工位")
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    _threshold(runtime, camera.id, now)
+
+    asyncio.run(runtime._review_off_duty(camera, b"frame", now - timedelta(seconds=60), now))
+
+    state = runtime.rules.for_camera(camera.id)
+    assert state.absence_since is None
+    assert not state.absence_alerted
+    assert analyses[0]["occupancy_status"] == "person_present"
+    assert analyses[0]["off_duty_state"] == "person_present_confirmed"
+    assert alerts == []
 
 
 def test_off_duty_missing_model_and_error_are_logged_without_alert():

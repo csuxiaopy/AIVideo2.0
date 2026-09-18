@@ -80,7 +80,7 @@ const alertLoading=ref(false)
 type LogCategory = 'audit'|'analyses'|'model-calls'
 const logCategory=ref<LogCategory>('audit')
 const logData=reactive<{items:any[];total:number;page:number;page_size:number}>({items:[],total:0,page:1,page_size:50})
-const logFilters=reactive({start:'',end:'',analysis_start:'',analysis_end:'',username:'',action:'',camera_id:'',camera_name:'',mode:'',status:'',model:'',stage:'',outcome:''})
+const logFilters=reactive({start:'',end:'',analysis_start:'',analysis_end:'',username:'',action:'',camera_id:'',camera_name:'',mode:'',status:'',occupancy_status:'',off_duty_state:'',model:'',stage:'',outcome:''})
 const logLoading=ref(false)
 const expandedLogId=ref<number|null>(null)
 const logDetails=reactive<Record<string,any>>({})
@@ -499,17 +499,20 @@ const activeLogFilters=()=>{
     ?{start:logDateTimeValue(logFilters.analysis_start),end:logDateTimeValue(logFilters.analysis_end)}
     :{start:logDateValue(logFilters.start),end:logDateValue(logFilters.end,true)}
   if(logCategory.value==='audit')Object.assign(values,{username:logFilters.username,action:logFilters.action,outcome:logFilters.outcome})
-  if(logCategory.value==='analyses')Object.assign(values,{camera_name:logFilters.camera_name,mode:logFilters.mode,status:logFilters.status})
+  if(logCategory.value==='analyses')Object.assign(values,{camera_name:logFilters.camera_name,mode:logFilters.mode,status:logFilters.status,occupancy_status:logFilters.occupancy_status,off_duty_state:logFilters.off_duty_state})
   if(logCategory.value==='model-calls')Object.assign(values,{camera_id:logFilters.camera_id,model:logFilters.model,stage:logFilters.stage,outcome:logFilters.outcome})
   return Object.fromEntries(Object.entries(values).filter(([,value])=>value!==''))
 }
 const loadLogs=async(page=1)=>{if(!isAdmin.value||!validateAnalysisLogRange())return;logLoading.value=true;try{const params=new URLSearchParams({...activeLogFilters(),page:String(page),page_size:String(logData.page_size)});const result=await api(`/api/logs/${logCategory.value}?${params}`);Object.assign(logData,result);expandedLogId.value=null}catch(error:any){notify(`日志加载失败：${error.message}`,'error')}finally{logLoading.value=false}}
 const switchLogCategory=(category:LogCategory)=>{logCategory.value=category;logData.page=1;expandedLogId.value=null;void loadLogs(1)}
-const resetLogFilters=()=>{Object.assign(logFilters,{start:'',end:'',analysis_start:'',analysis_end:'',username:'',action:'',camera_id:'',camera_name:'',mode:'',status:'',model:'',stage:'',outcome:''});void loadLogs(1)}
+const resetLogFilters=()=>{Object.assign(logFilters,{start:'',end:'',analysis_start:'',analysis_end:'',username:'',action:'',camera_id:'',camera_name:'',mode:'',status:'',occupancy_status:'',off_duty_state:'',model:'',stage:'',outcome:''});void loadLogs(1)}
 const logDetailKey=(id:number)=>`${logCategory.value}:${id}`
 const toggleLogDetail=async(row:any)=>{if(expandedLogId.value===row.id){expandedLogId.value=null;return}try{const key=logDetailKey(row.id);if(!logDetails[key])logDetails[key]=await api(`/api/logs/${logCategory.value}/${row.id}`);expandedLogId.value=row.id}catch(error:any){notify(error.message,'error')}}
 const exportLogs=async()=>{if(!validateAnalysisLogRange())return;try{await download(`/api/logs/${logCategory.value}/export`,activeLogFilters(),`${logCategory.value}-logs.csv`);notify('日志已导出')}catch(error:any){notify(error.message,'error')}}
 const logResultText=(row:any)=>row.outcome==='success'?'成功':row.outcome==='failure'||row.outcome==='error'?'失败':row.status||row.outcome
+const occupancyText=(value:string|null)=>value==='person_present'?'有人':value==='person_absent'?'无人':value==='unknown'?'未知':'—'
+const offDutyStateText=(value:string|null)=>({person_present:'有人',person_absent_accumulating:'无人·计时中',person_absent_pending_review:'无人·待复核',person_absent_confirmed:'确认无人',person_present_confirmed:'确认有人',analysis_failed:'分析失败',historical_unknown:'历史状态未知'} as Record<string,string>)[value||'']||'—'
+const elapsedText=(seconds:number|null)=>seconds==null?'—':seconds<60?`${seconds} 秒`:`${Math.floor(seconds/60)} 分 ${seconds%60} 秒`
 const prettyLog=(value:any)=>JSON.stringify(value,null,2)
 const loadSystemMonitor=async(silent=false)=>{
   if(!silent)systemMonitorLoading.value=true
@@ -1130,6 +1133,7 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <template v-if="logCategory==='analyses'"><label>摄像头<input v-model.trim="logFilters.camera_name" placeholder="摄像头名称"></label></template>
             <template v-else-if="logCategory==='model-calls'"><label>摄像头<input v-model.trim="logFilters.camera_id" placeholder="摄像头 ID"></label></template>
             <template v-if="logCategory==='analyses'"><label>检测模式<select v-model="logFilters.mode"><option value="">全部</option><option v-for="(_,mode) in modeInfo" :key="mode" :value="mode">{{modeName(mode)}}</option></select></label><label>分析状态<select v-model="logFilters.status"><option value="">全部</option><option value="confirmed">confirmed</option><option value="suspected">suspected</option><option value="uncertain">uncertain</option><option value="none">none</option></select></label></template>
+            <template v-if="logCategory==='analyses'"><label>人员判定<select v-model="logFilters.occupancy_status"><option value="">全部</option><option value="person_present">有人</option><option value="person_absent">无人</option><option value="unknown">未知</option></select></label><label>离岗阶段<select v-model="logFilters.off_duty_state"><option value="">全部</option><option value="person_present">有人</option><option value="person_absent_accumulating">无人·计时中</option><option value="person_absent_pending_review">无人·待复核</option><option value="person_absent_confirmed">确认无人</option><option value="person_present_confirmed">确认有人</option><option value="analysis_failed">分析失败</option><option value="historical_unknown">历史状态未知</option></select></label></template>
             <template v-if="logCategory==='model-calls'"><label>模型<input v-model.trim="logFilters.model" placeholder="模型名称"></label><label>阶段<select v-model="logFilters.stage"><option value="">全部</option><option value="single">单模型检测</option></select></label></template>
             <label v-if="logCategory!=='analyses'">结果<select v-model="logFilters.outcome"><option value="">全部</option><option value="success">成功</option><option value="failure">失败</option><option value="error">错误</option></select></label>
             <div class="actions"><button class="primary" @click="loadLogs(1)">查询</button><button class="ghost" @click="resetLogFilters">重置</button></div>
@@ -1137,15 +1141,15 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
           <div class="log-summary"><span>共 {{logData.total}} 条</span><span>第 {{logData.page}} / {{logPages}} 页</span></div>
           <div class="log-table-wrap">
             <table class="log-table">
-              <thead><tr v-if="logCategory==='audit'"><th>时间</th><th>用户</th><th>操作</th><th>目标</th><th>结果</th><th></th></tr><tr v-else-if="logCategory==='analyses'"><th>时间</th><th>摄像头</th><th>模式</th><th>状态</th><th>置信度</th><th>耗时</th><th></th></tr><tr v-else><th>时间</th><th>摄像头</th><th>阶段 / 模型</th><th>模式</th><th>结果</th><th>耗时</th><th></th></tr></thead>
+              <thead><tr v-if="logCategory==='audit'"><th>时间</th><th>用户</th><th>操作</th><th>目标</th><th>结果</th><th></th></tr><tr v-else-if="logCategory==='analyses'"><th>时间</th><th>摄像头</th><th>模式</th><th>人员判定 / 阶段</th><th>无人持续</th><th>分析图片</th><th>置信度</th><th>耗时</th><th></th></tr><tr v-else><th>时间</th><th>摄像头</th><th>阶段 / 模型</th><th>模式</th><th>结果</th><th>耗时</th><th></th></tr></thead>
               <tbody>
                 <template v-for="row in logData.items" :key="row.id">
                   <tr v-if="logCategory==='audit'"><td>{{formatTime(row.created_at)}}</td><td><b>{{row.actor_display_name||row.actor_username||'未知用户'}}</b><small>{{row.actor_username}}</small></td><td>{{row.action}}<small>{{row.method}} {{row.path}}</small></td><td>{{row.target_type}} {{row.target_id}}</td><td><span class="log-result" :class="row.outcome">{{logResultText(row)}} · {{row.status_code}}</span></td><td><button class="link" @click="toggleLogDetail(row)">详情</button></td></tr>
-                  <tr v-else-if="logCategory==='analyses'"><td>{{formatTime(row.created_at)}}</td><td><b>{{row.camera_name||row.camera_id||'已删除摄像头'}}</b><small>{{row.camera_id}}</small></td><td>{{modeName(row.mode)}}</td><td><span class="log-result" :class="row.status">{{row.status}}</span></td><td>{{Math.round(row.confidence*100)}}%</td><td>{{row.latency_ms}} ms</td><td><button class="link" @click="toggleLogDetail(row)">详情</button></td></tr>
+                  <tr v-else-if="logCategory==='analyses'"><td>{{formatTime(row.created_at)}}</td><td><b>{{row.camera_name||row.camera_id||'已删除摄像头'}}</b><small>{{row.camera_id}}</small></td><td>{{modeName(row.mode)}}<small>{{row.analysis_source||''}}</small></td><td><template v-if="row.mode==='off_duty'"><b>{{occupancyText(row.occupancy_status)}}</b><small>{{offDutyStateText(row.off_duty_state)}}</small></template><span v-else class="log-result" :class="row.status">{{row.status}}</span></td><td>{{row.mode==='off_duty'?elapsedText(row.absence_elapsed_seconds):'—'}}</td><td><EvidencePreview :src="row.evidence_url" alt="分析图片" /></td><td>{{Math.round(row.confidence*100)}}%</td><td>{{row.latency_ms}} ms</td><td><button class="link" @click="toggleLogDetail(row)">详情</button></td></tr>
                   <tr v-else><td>{{formatTime(row.created_at)}}</td><td><b>{{row.camera_name||row.camera_id||'已删除摄像头'}}</b><small>{{row.camera_id}}</small></td><td><b>{{row.stage==='single'?'单模型':row.stage==='economy'?'经济':'增强'}}</b><small>{{row.model}}</small></td><td>{{row.modes?.map((m:Mode)=>modeName(m)).join('、')}}</td><td><span class="log-result" :class="row.outcome">{{logResultText(row)}}<template v-if="row.http_status"> · {{row.http_status}}</template></span></td><td>{{row.latency_ms}} ms</td><td><button class="link" @click="toggleLogDetail(row)">详情</button></td></tr>
-                  <tr v-if="expandedLogId===row.id" class="log-detail-row"><td :colspan="logCategory==='audit'?6:7"><pre>{{prettyLog(logDetails[logDetailKey(row.id)]||row)}}</pre></td></tr>
+                  <tr v-if="expandedLogId===row.id" class="log-detail-row"><td :colspan="logCategory==='audit'?6:logCategory==='analyses'?9:7"><pre>{{prettyLog(logDetails[logDetailKey(row.id)]||row)}}</pre></td></tr>
                 </template>
-                <tr v-if="!logData.items.length"><td :colspan="7" class="empty-cell">{{logLoading?'正在加载…':'暂无日志'}}</td></tr>
+                <tr v-if="!logData.items.length"><td :colspan="logCategory==='analyses'?9:7" class="empty-cell">{{logLoading?'正在加载…':'暂无日志'}}</td></tr>
               </tbody>
             </table>
           </div>

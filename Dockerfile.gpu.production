@@ -1,8 +1,17 @@
 ARG BASE_IMAGE=yolo-vlm-cpu-rollback:20260914
+FROM docker.m.daocloud.io/library/node:22-bookworm-slim AS web
+ENV COREPACK_NPM_REGISTRY=https://registry.npmmirror.com npm_config_node_linker=hoisted
+WORKDIR /src/frontend
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
+RUN corepack enable && pnpm install --frozen-lockfile
+COPY frontend/ ./
+RUN pnpm build
+
 FROM ${BASE_IMAGE}
 RUN pip install --no-cache-dir --progress-bar off torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu118
 RUN python -c "import torch; assert torch.version.cuda == '11.8'"
 COPY backend /app/backend
 COPY alembic /app/alembic
 COPY alembic.ini run.py /app/
-COPY frontend/dist /app/frontend/dist
+RUN rm -rf /app/frontend/dist
+COPY --from=web /src/frontend/dist /app/frontend/dist

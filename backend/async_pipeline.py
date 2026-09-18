@@ -280,10 +280,10 @@ class AsyncPipeline:
             await asyncio.sleep(1)
 
     def schedule_review(self, kind, camera, jpeg, now, event_started_at=None, modes=None,
-                        off_duty_local_confirmed=False):
+                        off_duty_local_confirmed=False, evidence_ref=None):
         if self.blocked(camera.id):
             return False
-        ref = f"review-{uuid4().hex}.jpg"
+        ref = evidence_ref or f"review-{uuid4().hex}.jpg"
         request = ReviewRequest(camera.id, kind, event_started_at.isoformat() if event_started_at else "",
                                 self.version, now.isoformat(), ref, json.dumps({
                                     "modes": sorted(m.value for m in (modes or [])),
@@ -353,13 +353,15 @@ class AsyncPipeline:
             now = datetime.fromisoformat(request.sampled_at)
             event = datetime.fromisoformat(request.event_id) if request.event_id else None
             if request.kind == "off_duty":
-                result = await self.runtime._review_off_duty(camera, evidence, event, now)
+                result = await self.runtime._review_off_duty(
+                    camera, evidence, event, now, evidence_path=request.evidence_ref
+                )
             else:
                 payload = json.loads(request.payload_json)
                 result = await self.runtime._behaviors(camera, {Mode(m) for m in payload["modes"]}, evidence,
                     CameraOptions.model_validate(from_json(camera.options_json, {})),
                     ScheduleSpec.model_validate(from_json(camera.schedule_json, {})), now,
-                    payload["off_duty_local_confirmed"], event)
+                    payload["off_duty_local_confirmed"], event, request.evidence_ref)
             return {"result": result}
         finally:
             REVIEW.reset(token)
@@ -368,7 +370,12 @@ class AsyncPipeline:
         self.review_last[request.camera_id] = utc_now().isoformat()
         if error:
             self.repository.add_analysis(camera_id=request.camera_id, mode=request.kind,
-                status="uncertain", confidence=0, reason="后台复核超时或失败", error=type(error).__name__)
+                status="uncertain", confidence=0, reason="后台复核超时或失败",
+                occupancy_status="unknown" if request.kind == "off_duty" else None,
+                off_duty_state="analysis_failed" if request.kind == "off_duty" else None,
+                analysis_source="vlm" if request.kind == "off_duty" else None,
+                evidence_path=request.evidence_ref if request.kind == "off_duty" else None,
+                error=type(error).__name__)
         def finish():
             with session_scope() as session:
                 row = session.scalar(select(models.BackgroundTask).where(

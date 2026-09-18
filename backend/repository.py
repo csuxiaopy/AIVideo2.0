@@ -420,6 +420,7 @@ class Repository:
         self, *, page: int, page_size: int, start: datetime | None = None,
         end: datetime | None = None, camera_name: str | None = None,
         mode: str | None = None, status: str | None = None,
+        occupancy_status: str | None = None, off_duty_state: str | None = None,
     ) -> tuple[list[models.Analysis], int]:
         filters = []
         if start:
@@ -432,11 +433,34 @@ class Repository:
             filters.append(models.Analysis.mode == mode)
         if status:
             filters.append(models.Analysis.status == status)
+        if occupancy_status:
+            filters.append(models.Analysis.occupancy_status == occupancy_status)
+        if off_duty_state:
+            filters.append(models.Analysis.off_duty_state == off_duty_state)
         with session_scope() as session:
             total = session.scalar(select(func.count()).select_from(models.Analysis).where(*filters)) or 0
             stmt = (select(models.Analysis).where(*filters).order_by(desc(models.Analysis.created_at))
                     .offset((page - 1) * page_size).limit(page_size))
             return list(session.scalars(stmt)), total
+
+    def analysis_evidence_before(self, cutoff: datetime) -> list[str]:
+        with session_scope() as session:
+            return list(session.scalars(select(models.Analysis.evidence_path).where(
+                models.Analysis.created_at < cutoff,
+                models.Analysis.evidence_path.is_not(None),
+            )))
+
+    def retained_evidence_paths(self, cutoff: datetime) -> set[str]:
+        with session_scope() as session:
+            paths = set(session.scalars(select(models.Analysis.evidence_path).where(
+                models.Analysis.created_at >= cutoff,
+                models.Analysis.evidence_path.is_not(None),
+            )))
+            paths.update(session.scalars(select(models.Alert.evidence_path).where(
+                models.Alert.evidence_path.is_not(None),
+            )))
+            paths.update(session.scalars(select(models.AlertEvidence.evidence_path)))
+            return {path for path in paths if path}
 
     def list_model_call_logs(
         self, *, page: int, page_size: int, start: datetime | None = None,

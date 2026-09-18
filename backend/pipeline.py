@@ -7,15 +7,16 @@ from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from prometheus_client import Counter, Gauge, Histogram
 
 from backend import models
 from backend.alerts import AlertService
-from backend.background import IOPool
+from backend.background import IOPool, atomic_evidence
 from backend.capture_persistence import CapturePersistence
-from backend.annotation import annotate_detections
+from backend.annotation import annotate_detections, compact_audit_image
 from backend.capabilities import CORE_CAPABILITIES, mode_is_active
 from backend.cleanup import CleanupService
 from backend.config import Settings
@@ -221,6 +222,19 @@ class MonitoringRuntime:
         self.mode_detection_last: dict[tuple[str, str], datetime] = {}
         self.mode_queue_wait_seconds: dict[tuple[str, str], float] = {}
         self.mode_frame_age_seconds: dict[tuple[str, str], float] = {}
+
+    async def _save_analysis_evidence(self, jpeg: bytes, filename: str | None = None) -> str | None:
+        """Persist audit evidence without allowing storage failures to stop detection."""
+        name = filename or f"analysis-{uuid4().hex}.jpg"
+        try:
+            if self.background_io is not None:
+                await self.background_io.run(atomic_evidence, self.settings.evidence_dir, name, jpeg)
+            else:
+                await asyncio.to_thread(atomic_evidence, self.settings.evidence_dir, name, jpeg)
+            return name
+        except Exception:
+            logger.exception("Failed to persist analysis evidence %s", name)
+            return None
 
     async def start(self) -> None:
         await self.queue.start()
@@ -704,6 +718,8 @@ class MonitoringRuntime:
                     if phase == "resolved" and started_at:
                         self.repository.add_analysis(
                             camera_id=camera.id, mode=Mode.OFF_DUTY.value, status="uncertain",
+                            occupancy_status="unknown", off_duty_state="analysis_failed",
+                            analysis_source="local_yolo", absence_started_at=started_at,
                             confidence=0, severity="normal", local_model=self.yolo.model_name,
                             model_version=self.yolo.model_name, reason="离岗事件因人员检测失败结束",
                             error=f"{type(exc).__name__}: {str(exc)[:500]}", latency_ms=0,
@@ -755,35 +771,53 @@ class MonitoringRuntime:
             review_due = not off_duty_reuses_behavior and event_start is not None and state.off_duty_review_due(
                 now, OFF_DUTY_REVIEW_INTERVAL_SECONDS
             )
+            audit_path = None
+            audit_image = None
+            if scheduled and not cooldown_active:
+                audit_image = compact_audit_image(annotate_detections(
+                    frame.jpeg, qualified_people, zone=geometry.post_roi,
+                    event_started_at=event_time(event_start, schedule) if event_start else None,
+                    event_ended_at=event_time(now, schedule) if event_start else None,
+                ))
+                audit_path = await self._save_analysis_evidence(audit_image)
+                elapsed = max(0, int((now - event_start).total_seconds())) if event_start else 0
+                occupancy_status = "person_present" if occupied else "person_absent"
+                if occupied:
+                    off_duty_state = "person_present"
+                    reason = "岗位区域内检测到人员"
+                elif state.absence_alerted:
+                    off_duty_state = "person_absent_pending_review"
+                    reason = "岗位区域持续无人，等待大模型复核"
+                else:
+                    off_duty_state = "person_absent_accumulating"
+                    reason = "岗位区域无人，连续离岗计时中"
+                analysis = self.repository.add_analysis(
+                    camera_id=camera.id, mode=Mode.OFF_DUTY.value, status="none",
+                    occupancy_status=occupancy_status, off_duty_state=off_duty_state,
+                    analysis_source="local_yolo", absence_started_at=event_start,
+                    absence_elapsed_seconds=elapsed, evidence_path=audit_path,
+                    confidence=max((item.confidence for item in qualified_people), default=0.99),
+                    severity="normal", local_model=self.yolo.model_name,
+                    model_version=self.yolo.model_name, reason=reason, latency_ms=0,
+                )
+                results.append({"mode": Mode.OFF_DUTY.value, "status": analysis.status,
+                                "occupancy_status": occupancy_status, "reason": reason})
             if review_due:
-                evidence = annotate_detections(
+                evidence = audit_image or compact_audit_image(annotate_detections(
                     frame.jpeg, qualified_people, zone=geometry.post_roi,
                     event_started_at=event_time(event_start, schedule),
                     event_ended_at=event_time(now, schedule),
-                )
+                ))
                 if getattr(self, "async_pipeline", None):
-                    if self.async_pipeline.schedule_review("off_duty", camera, evidence, now, event_start):
+                    if self.async_pipeline.schedule_review(
+                        "off_duty", camera, evidence, now, event_start, evidence_ref=audit_path
+                    ):
                         state.absence_last_review_at = now
                     results.append({"mode": Mode.OFF_DUTY.value, "status": "pending_review"})
                 else:
-                    results.append(await self._review_off_duty(camera, evidence, event_start, now))
-            elif not cooldown_active and (
-                self._mode_due(camera.id, Mode.OFF_DUTY.value, 15, force) or event_phase
-            ):
-                reason = (
-                    "离岗事件已结束" if event_phase == "resolved"
-                    else "离岗事件持续中，已通过大模型终审" if state.absence_vlm_confirmed
-                    else "岗位区域持续无人，等待联合行为检测复核" if state.absence_alerted and off_duty_reuses_behavior
-                    else "岗位区域持续无人，等待大模型再次终审" if state.absence_alerted
-                    else "岗位有人或尚未达到离岗阈值" if scheduled
-                    else "当前不在排班时段"
-                )
-                analysis = self.repository.add_analysis(
-                    camera_id=camera.id, mode=Mode.OFF_DUTY.value, status="none",
-                    confidence=0.99, severity="normal", local_model=self.yolo.model_name,
-                    model_version=self.yolo.model_name, reason=reason, latency_ms=0,
-                )
-                results.append({"mode": Mode.OFF_DUTY.value, "status": "none", "reason": reason})
+                    results.append(await self._review_off_duty(
+                        camera, evidence, event_start, now, evidence_path=audit_path
+                    ))
             if not cooldown_active and state.absence_vlm_confirmed:
                 await self._maybe_create_off_duty_alert(camera, None, now)
             if not cooldown_active:
@@ -1206,6 +1240,7 @@ class MonitoringRuntime:
         evidence_jpeg: bytes,
         event_started_at: datetime,
         now: datetime,
+        evidence_path: str | None = None,
     ) -> dict[str, Any]:
         """Use the VLM as a fail-closed final gate for an off-duty alert."""
         state = self.rules.for_camera(camera.id)
@@ -1213,6 +1248,10 @@ class MonitoringRuntime:
             state.record_off_duty_review(False, now)
             analysis = self.repository.add_analysis(
                 camera_id=camera.id, mode=Mode.OFF_DUTY.value, status="uncertain",
+                occupancy_status="unknown", off_duty_state="analysis_failed", analysis_source="vlm",
+                absence_started_at=event_started_at,
+                absence_elapsed_seconds=max(0, int((now - event_started_at).total_seconds())),
+                evidence_path=evidence_path,
                 confidence=0, severity="normal", local_model=self.yolo.model_name,
                 model_version=self.yolo.model_name, reason="离岗终审大模型尚未配置",
                 error="model_not_configured", latency_ms=0,
@@ -1233,6 +1272,15 @@ class MonitoringRuntime:
             confirmed = result.status == "confirmed"
             analysis = self.repository.add_analysis(
                 camera_id=camera.id, mode=Mode.OFF_DUTY.value, status=result.status,
+                occupancy_status="person_absent" if confirmed else (
+                    "person_present" if result.status == "none" else "unknown"
+                ),
+                off_duty_state="person_absent_confirmed" if confirmed else (
+                    "person_present_confirmed" if result.status == "none" else "analysis_failed"
+                ),
+                analysis_source="vlm", absence_started_at=event_started_at,
+                absence_elapsed_seconds=max(0, int((now - event_started_at).total_seconds())),
+                evidence_path=evidence_path,
                 confidence=result.confidence, reason=result.reason, severity="normal",
                 local_model=self.yolo.model_name, model_version=self.yolo.model_name,
                 request_id=response.request_id, provider=response.provider, model=response.model,
@@ -1242,6 +1290,8 @@ class MonitoringRuntime:
                 confirmed, now, evidence_jpeg if confirmed else None,
                 result.confidence if confirmed else 0.0,
             )
+            if result.status == "none":
+                state.reset_off_duty_event()
             if confirmed:
                 await self._maybe_create_off_duty_alert(camera, analysis, now)
             return {
@@ -1259,6 +1309,10 @@ class MonitoringRuntime:
             state.record_off_duty_review(False, now)
             analysis = self.repository.add_analysis(
                 camera_id=camera.id, mode=Mode.OFF_DUTY.value, status="uncertain",
+                occupancy_status="unknown", off_duty_state="analysis_failed", analysis_source="vlm",
+                absence_started_at=event_started_at,
+                absence_elapsed_seconds=max(0, int((now - event_started_at).total_seconds())),
+                evidence_path=evidence_path,
                 confidence=0, severity="normal", local_model=self.yolo.model_name,
                 model_version=self.yolo.model_name, reason="离岗终审大模型分析失败",
                 request_id=exc.request_id, error=f"{type(exc).__name__}: {str(exc)[:500]}",
@@ -1276,6 +1330,9 @@ class MonitoringRuntime:
             return None
         engine.stale_results += 1
         self.repository.add_analysis(camera_id=camera_id, mode=mode, status="stale",
+            occupancy_status="unknown" if mode == Mode.OFF_DUTY.value else None,
+            off_duty_state="analysis_failed" if mode == Mode.OFF_DUTY.value else None,
+            analysis_source="vlm" if mode == Mode.OFF_DUTY.value else None,
             confidence=result.confidence, reason=f"复核已过期：{reason}；原结果：{result.reason}",
             request_id=response.request_id, provider=response.provider, model=response.model,
             usage_json=as_json(response.usage), latency_ms=response.latency_ms)
@@ -1291,6 +1348,7 @@ class MonitoringRuntime:
         now: datetime | None = None,
         off_duty_local_confirmed: bool = False,
         off_duty_event_started_at: datetime | None = None,
+        evidence_path: str | None = None,
     ) -> list[dict[str, Any]]:
         options = options or CameraOptions()
         schedule = schedule or ScheduleSpec()
@@ -1330,6 +1388,17 @@ class MonitoringRuntime:
                 VLM_CALLS.labels(mode=mode.value, status=result.status).inc()
                 analysis = self.repository.add_analysis(
                     camera_id=camera.id, mode=mode.value, status=result.status,
+                    occupancy_status=("person_absent" if result.status == "confirmed" else
+                                      "person_present" if result.status == "none" else "unknown")
+                                     if mode == Mode.OFF_DUTY else None,
+                    off_duty_state=("person_absent_confirmed" if result.status == "confirmed" else
+                                    "person_present_confirmed" if result.status == "none" else "analysis_failed")
+                                   if mode == Mode.OFF_DUTY else None,
+                    analysis_source="vlm" if mode == Mode.OFF_DUTY else None,
+                    absence_started_at=off_duty_event_started_at if mode == Mode.OFF_DUTY else None,
+                    absence_elapsed_seconds=(max(0, int((now - off_duty_event_started_at).total_seconds()))
+                                             if mode == Mode.OFF_DUTY and off_duty_event_started_at else None),
+                    evidence_path=evidence_path if mode == Mode.OFF_DUTY else None,
                     confidence=result.confidence, reason=result.reason, severity="normal",
                     local_model=self.yolo.model_name if mode == Mode.OFF_DUTY else None,
                     model_version=self.yolo.model_name if mode == Mode.OFF_DUTY else None,
@@ -1343,6 +1412,8 @@ class MonitoringRuntime:
                             True, now, frame_jpeg, result.confidence
                         )
                         await self._maybe_create_off_duty_alert(camera, analysis, now)
+                    elif result.status == "none":
+                        state.reset_off_duty_event()
                     else:
                         # Piggyback reviews retry at the behavior cadence. Do not
                         # update absence_last_review_at, so switching back to the
