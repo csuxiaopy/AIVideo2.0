@@ -108,11 +108,15 @@ def general_detection_interval(camera: models.Camera, modes: set[str]) -> int | 
 def reuse_behavior_for_off_duty(
     modes: set[str], scheduled: bool, behavior_interval_seconds: int, threshold_seconds: int,
 ) -> bool:
-    """Return whether off-duty review should share the phone-use VLM request."""
+    """Return whether behavior VLM requests own off-duty classification.
+
+    The interval arguments remain for call-site compatibility. Routing must not
+    depend on two independent schedulers becoming due in the same processing pass.
+    """
     return (
         scheduled
-        and {Mode.PHONE_USE.value, Mode.OFF_DUTY.value} <= modes
-        and behavior_interval_seconds < threshold_seconds
+        and Mode.OFF_DUTY.value in modes
+        and bool({Mode.PHONE_USE.value, Mode.SMOKING.value} & modes)
     )
 
 
@@ -742,15 +746,23 @@ class MonitoringRuntime:
             )
             results.append({"mode": Mode.ON_DUTY.value, "status": analysis.status, "reason": analysis.reason})
 
-        off_duty_reuses_behavior = False
-        off_duty_event_start: datetime | None = None
-        off_duty_local_confirmed = False
+        off_duty_scheduled, off_duty_schedule_key, off_duty_threshold_seconds = (
+            off_duty_schedule_context(schedule, options.off_duty_seconds, now)
+            if Mode.OFF_DUTY.value in modes else (False, None, options.off_duty_seconds)
+        )
+        off_duty_reuses_behavior = reuse_behavior_for_off_duty(
+            modes, off_duty_scheduled,
+            options.behavior_interval_seconds, off_duty_threshold_seconds,
+        )
+        # Carry event state into behavior-only passes. These passes frequently
+        # occur between the ten-second local off-duty samples.
+        off_duty_event_start: datetime | None = state.absence_since
+        off_duty_local_confirmed = bool(
+            off_duty_scheduled and state.absence_alerted
+        )
         if Mode.OFF_DUTY.value in modes and self._mode_due(
             camera.id, "off_duty_sample", OFF_DUTY_INTERVAL_SECONDS, force
         ):
-            scheduled, schedule_key, threshold_seconds = off_duty_schedule_context(
-                schedule, options.off_duty_seconds, now
-            )
             cooldown_active = self._off_duty_cooldown_active(camera, now)
             if cooldown_active:
                 # Cooldown observations belong to neither event cycle. Discard
@@ -759,21 +771,19 @@ class MonitoringRuntime:
                 event_phase, event_start = None, None
             else:
                 event_phase, event_start = state.absence_event_update(
-                    occupied, scheduled, threshold_seconds, now, options.shift_grace_seconds,
-                    schedule_key=schedule_key,
+                    occupied, off_duty_scheduled, off_duty_threshold_seconds, now,
+                    options.shift_grace_seconds, schedule_key=off_duty_schedule_key,
                 )
             off_duty_event_start = event_start
-            off_duty_local_confirmed = bool(scheduled and not occupied and state.absence_alerted)
-            off_duty_reuses_behavior = reuse_behavior_for_off_duty(
-                modes, scheduled and not cooldown_active,
-                options.behavior_interval_seconds, threshold_seconds
+            off_duty_local_confirmed = bool(
+                off_duty_scheduled and not occupied and state.absence_alerted
             )
             review_due = not off_duty_reuses_behavior and event_start is not None and state.off_duty_review_due(
                 now, OFF_DUTY_REVIEW_INTERVAL_SECONDS
             )
             audit_path = None
             audit_image = None
-            if scheduled and not cooldown_active:
+            if off_duty_scheduled and not cooldown_active:
                 audit_image = compact_audit_image(annotate_detections(
                     frame.jpeg, qualified_people, zone=geometry.post_roi,
                     event_started_at=event_time(event_start, schedule) if event_start else None,
@@ -802,6 +812,10 @@ class MonitoringRuntime:
                 )
                 results.append({"mode": Mode.OFF_DUTY.value, "status": analysis.status,
                                 "occupancy_status": occupancy_status, "reason": reason})
+                if event_phase == "threshold":
+                    # Behavior VLM has already classified absence during the
+                    # accumulation window. Freeze the actual threshold frame.
+                    state.latch_off_duty_threshold(now, now, audit_image)
             if review_due:
                 evidence = audit_image or compact_audit_image(annotate_detections(
                     frame.jpeg, qualified_people, zone=geometry.post_roi,
@@ -867,7 +881,7 @@ class MonitoringRuntime:
             if mode.value in modes and mode_is_active(mode.value, schedule, now)
             and not (mode == Mode.PHONE_USE and phone_cooldown_active)
         }
-        if off_duty_reuses_behavior:
+        if behavior_modes and off_duty_reuses_behavior:
             behavior_modes.add(Mode.OFF_DUTY)
         if behavior_modes and self._mode_due(
             camera.id, "behavior", options.behavior_interval_seconds, force
@@ -1181,7 +1195,7 @@ class MonitoringRuntime:
                 for member_state in member_states:
                     member_state.reset_off_duty_event()
                 return False
-            reason = f"目录内 {len(members)} 个监控源均经大模型确认离岗"
+            reason = f"目录内 {len(members)} 个监控源均达到离岗判定条件"
             anchor_analysis = analysis or self.repository.add_analysis(
                 camera_id=camera.id, mode=Mode.OFF_DUTY.value, status="confirmed",
                 confidence=confidence, reason=reason, severity="normal",
@@ -1358,17 +1372,23 @@ class MonitoringRuntime:
         state = self.rules.for_camera(camera.id)
         if not self.vlm:
             output = []
+            off_duty_analysis = None
             if Mode.PHONE_USE in modes:
                 state.phone_event_update(False, options.phone_use_seconds, now)
             if Mode.OFF_DUTY in modes:
-                state.reset_off_duty_confirmation()
+                if off_duty_event_started_at:
+                    state.record_off_duty_review(True, now, frame_jpeg, 0.0)
             for mode in sorted(modes, key=lambda item: item.value):
                 analysis = self.repository.add_analysis(
                     camera_id=camera.id, mode=mode.value, status="uncertain", confidence=0,
                     severity="normal", reason="视觉大模型尚未配置",
                     error="model_not_configured", latency_ms=0,
                 )
+                if mode == Mode.OFF_DUTY:
+                    off_duty_analysis = analysis
                 output.append({"mode": mode.value, "status": "uncertain", "reason": analysis.reason})
+            if Mode.OFF_DUTY in modes and state.absence_alerted:
+                await self._maybe_create_off_duty_alert(camera, off_duty_analysis, now)
             return output
         try:
             if isinstance(self.vlm, VisionModelClient):
@@ -1407,18 +1427,16 @@ class MonitoringRuntime:
                 )
                 confirmed = result.status == "confirmed"
                 if mode == Mode.OFF_DUTY:
-                    if confirmed and off_duty_local_confirmed and off_duty_event_started_at:
+                    if result.status == "none":
+                        state.reset_off_duty_event()
+                    elif off_duty_event_started_at:
+                        # Only an explicit "person present" result interrupts a
+                        # behavior-owned absence event. Other results keep timing.
                         state.record_off_duty_review(
                             True, now, frame_jpeg, result.confidence
                         )
-                        await self._maybe_create_off_duty_alert(camera, analysis, now)
-                    elif result.status == "none":
-                        state.reset_off_duty_event()
-                    else:
-                        # Piggyback reviews retry at the behavior cadence. Do not
-                        # update absence_last_review_at, so switching back to the
-                        # dedicated fallback review is immediate.
-                        state.reset_off_duty_confirmation()
+                        if state.absence_alerted:
+                            await self._maybe_create_off_duty_alert(camera, analysis, now)
                 elif mode == Mode.PHONE_USE:
                     phase, started_at = state.phone_event_update(confirmed, options.phone_use_seconds, now)
                     if phase == "threshold" and started_at:
@@ -1441,15 +1459,26 @@ class MonitoringRuntime:
             VLM_CALLS.labels(mode="behavior_combined", status="error").inc()
             output = []
             if getattr(self, "async_pipeline", None):
+                off_duty_analysis = None
                 for mode in modes:
-                    self.repository.add_analysis(camera_id=camera.id, mode=mode.value,
+                    analysis = self.repository.add_analysis(camera_id=camera.id, mode=mode.value,
                         status="uncertain", reason="视觉大模型分析失败", error=type(exc).__name__)
+                    if mode == Mode.OFF_DUTY:
+                        off_duty_analysis = analysis
+                if Mode.OFF_DUTY in modes and off_duty_event_started_at:
+                    state.record_off_duty_review(True, now, frame_jpeg, 0.0)
+                    if state.absence_alerted:
+                        await self._maybe_create_off_duty_alert(
+                            camera, off_duty_analysis, now
+                        )
                 # Never mutate an event on a failed asynchronous model request.
                 return [{"mode": mode.value, "status": "uncertain"} for mode in modes]
             if Mode.PHONE_USE in modes:
                 state.phone_event_update(False, options.phone_use_seconds, now)
             if Mode.OFF_DUTY in modes:
-                state.reset_off_duty_confirmation()
+                if off_duty_event_started_at:
+                    state.record_off_duty_review(True, now, frame_jpeg, 0.0)
+            off_duty_analysis = None
             for mode in sorted(modes, key=lambda item: item.value):
                 VLM_CALLS.labels(mode=mode.value, status="error").inc()
                 analysis = self.repository.add_analysis(
@@ -1457,7 +1486,11 @@ class MonitoringRuntime:
                     severity="normal", reason="视觉大模型分析失败", request_id=exc.request_id,
                     error=f"{type(exc).__name__}: {str(exc)[:500]}", latency_ms=0,
                 )
+                if mode == Mode.OFF_DUTY:
+                    off_duty_analysis = analysis
                 output.append({"mode": mode.value, "status": "uncertain", "error": str(exc)})
+            if Mode.OFF_DUTY in modes and state.absence_alerted:
+                await self._maybe_create_off_duty_alert(camera, off_duty_analysis, now)
             return output
 
     async def status(self) -> dict[str, Any]:

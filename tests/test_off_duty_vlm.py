@@ -103,8 +103,8 @@ def test_pipeline_only_reviews_after_local_absence_threshold():
     assert len(alerts) == 1
 
 
-@pytest.mark.parametrize(("behavior_interval", "piggyback_expected"), [(60, True), (120, False), (180, False)])
-def test_pipeline_routes_off_duty_review_by_active_threshold(behavior_interval, piggyback_expected):
+@pytest.mark.parametrize("behavior_interval", [60, 120, 180])
+def test_pipeline_always_routes_off_duty_through_enabled_behavior(behavior_interval):
     behavior_calls, dedicated_calls, alerts = [], [], []
 
     class VLM:
@@ -169,13 +169,21 @@ def test_pipeline_routes_off_duty_review_by_active_threshold(behavior_interval, 
     with patch("backend.pipeline.utc_now", return_value=started + timedelta(seconds=120)):
         asyncio.run(runtime._process(camera, force=True))
 
-    if piggyback_expected:
-        assert all(Mode.OFF_DUTY in modes for modes in behavior_calls)
-        assert dedicated_calls == []
-    else:
-        assert all(Mode.OFF_DUTY not in modes for modes in behavior_calls)
-        assert len(dedicated_calls) == 1
+    assert all(Mode.OFF_DUTY in modes for modes in behavior_calls)
+    assert dedicated_calls == []
     assert [mode for mode, _ in alerts].count(Mode.OFF_DUTY.value) == 1
+
+    # Regression: behavior can become due between ten-second off-duty samples.
+    # It must still carry off_duty instead of depending on same-pass alignment.
+    behavior_calls.clear()
+    runtime.last_mode_run[(camera.id, "off_duty_sample")] = 1000.0
+    runtime.last_mode_run[(camera.id, "behavior")] = 0.0
+    with patch("backend.pipeline.time.monotonic", return_value=1005.0), patch(
+        "backend.pipeline.utc_now", return_value=started + timedelta(seconds=130)
+    ):
+        asyncio.run(runtime._process(camera))
+    assert behavior_calls
+    assert all(Mode.OFF_DUTY in modes for modes in behavior_calls)
 
 
 def test_off_duty_confirmed_review_creates_one_alert_with_same_evidence():

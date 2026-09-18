@@ -48,8 +48,9 @@ def test_behavior_interval_is_three_minutes_and_shared():
 
 @pytest.mark.parametrize(("modes", "scheduled", "interval", "threshold", "expected"), [
     ({"phone_use", "off_duty"}, True, 60, 300, True),
-    ({"phone_use", "off_duty"}, True, 300, 300, False),
-    ({"phone_use", "off_duty"}, True, 301, 300, False),
+    ({"phone_use", "off_duty"}, True, 300, 300, True),
+    ({"phone_use", "off_duty"}, True, 301, 300, True),
+    ({"smoking", "off_duty"}, True, 300, 300, True),
     ({"off_duty"}, True, 60, 300, False),
     ({"phone_use", "off_duty"}, False, 60, 300, False),
 ])
@@ -57,7 +58,7 @@ def test_off_duty_behavior_reuse_routing(modes, scheduled, interval, threshold, 
     assert reuse_behavior_for_off_duty(modes, scheduled, interval, threshold) is expected
 
 
-def test_piggyback_off_duty_requires_local_threshold_and_same_frame_confirmation():
+def test_behavior_off_duty_accumulates_before_local_threshold_and_alerts_after_it():
     current = {"off_duty": "confirmed"}
     analyses, alerts, requests = [], [], []
 
@@ -85,13 +86,15 @@ def test_piggyback_off_duty_requires_local_threshold_and_same_frame_confirmation
     camera = SimpleNamespace(id="camera-1")
     started = datetime(2026, 1, 1, tzinfo=timezone.utc)
     modes = {Mode.PHONE_USE, Mode.SMOKING, Mode.OFF_DUTY}
+    state = runtime.rules.for_camera(camera.id)
+    state.absence_event_update(False, True, 600, started)
 
     asyncio.run(runtime._behaviors(
         camera, modes, b"before-threshold", CameraOptions(), ScheduleSpec(timezone="UTC"),
         started, off_duty_local_confirmed=False, off_duty_event_started_at=started,
     ))
     assert alerts == []
-    assert not runtime.rules.for_camera(camera.id).absence_vlm_confirmed
+    assert state.absence_vlm_confirmed
 
     current["off_duty"] = "uncertain"
     asyncio.run(runtime._behaviors(
@@ -100,11 +103,14 @@ def test_piggyback_off_duty_requires_local_threshold_and_same_frame_confirmation
         off_duty_event_started_at=started,
     ))
     assert alerts == []
+    assert state.absence_since == started
+    assert state.absence_vlm_confirmed
 
     current["off_duty"] = "confirmed"
+    state.absence_event_update(False, True, 600, started + timedelta(minutes=10))
     asyncio.run(runtime._behaviors(
         camera, modes, b"confirmed-frame", CameraOptions(), ScheduleSpec(timezone="UTC"),
-        started + timedelta(minutes=6), off_duty_local_confirmed=True,
+        started + timedelta(minutes=10), off_duty_local_confirmed=True,
         off_duty_event_started_at=started,
     ))
     assert len(requests) == 3
@@ -112,7 +118,78 @@ def test_piggyback_off_duty_requires_local_threshold_and_same_frame_confirmation
     assert [(mode, evidence) for mode, evidence, _ in alerts] == [
         ("off_duty", b"confirmed-frame")
     ]
-    assert runtime.rules.for_camera(camera.id).absence_vlm_confirmed
+    assert state.absence_vlm_confirmed
+
+
+def test_behavior_off_duty_none_restarts_local_absence_event():
+    class VLM:
+        async def analyze_behaviors(self, modes, jpeg):
+            return VLMResponse(
+                results={mode: make_result(mode, "none") for mode in modes},
+                request_id="present", usage={}, latency_ms=1, provider="test", model="test",
+            )
+
+    runtime = object.__new__(MonitoringRuntime)
+    runtime.vlm = VLM()
+    runtime.repository = SimpleNamespace(
+        add_analysis=lambda **values: SimpleNamespace(**values)
+    )
+    runtime.alerts = SimpleNamespace()
+    runtime.rules = RuleStateRegistry()
+    runtime.yolo = SimpleNamespace(model_name="local-yolo")
+    camera = SimpleNamespace(id="camera-1")
+    started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state = runtime.rules.for_camera(camera.id)
+    state.absence_event_update(False, True, 600, started)
+
+    asyncio.run(runtime._behaviors(
+        camera, {Mode.PHONE_USE, Mode.OFF_DUTY}, b"present-frame",
+        CameraOptions(), ScheduleSpec(timezone="UTC"), started + timedelta(minutes=3),
+        off_duty_event_started_at=started,
+    ))
+
+    assert state.absence_since is None
+    assert not state.absence_alerted
+    assert not state.absence_vlm_confirmed
+
+
+def test_behavior_off_duty_uncertain_can_alert_at_threshold():
+    alerts = []
+
+    class VLM:
+        async def analyze_behaviors(self, modes, jpeg):
+            return VLMResponse(
+                results={mode: make_result(mode, "uncertain") for mode in modes},
+                request_id="uncertain", usage={}, latency_ms=1, provider="test", model="test",
+            )
+
+    class Alerts:
+        async def create(self, camera, analysis, evidence, **kwargs):
+            alerts.append((analysis.mode, evidence, kwargs))
+
+    runtime = object.__new__(MonitoringRuntime)
+    runtime.vlm = VLM()
+    runtime.repository = SimpleNamespace(
+        add_analysis=lambda **values: SimpleNamespace(**values)
+    )
+    runtime.alerts = Alerts()
+    runtime.rules = RuleStateRegistry()
+    runtime.yolo = SimpleNamespace(model_name="local-yolo")
+    camera = SimpleNamespace(id="camera-1")
+    started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    state = runtime.rules.for_camera(camera.id)
+    state.absence_event_update(False, True, 600, started)
+    state.absence_event_update(False, True, 600, started + timedelta(minutes=10))
+
+    asyncio.run(runtime._behaviors(
+        camera, {Mode.PHONE_USE, Mode.OFF_DUTY}, b"threshold-frame",
+        CameraOptions(), ScheduleSpec(timezone="UTC"), started + timedelta(minutes=10),
+        off_duty_local_confirmed=True, off_duty_event_started_at=started,
+    ))
+
+    assert [(mode, evidence) for mode, evidence, _ in alerts] == [
+        (Mode.OFF_DUTY.value, b"threshold-frame")
+    ]
 
 
 def test_combined_behaviors_split_records_and_alerts_using_same_frame():

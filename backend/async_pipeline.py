@@ -369,13 +369,34 @@ class AsyncPipeline:
     async def _review_completed(self, request, result, error):
         self.review_last[request.camera_id] = utc_now().isoformat()
         if error:
-            self.repository.add_analysis(camera_id=request.camera_id, mode=request.kind,
+            payload = json.loads(request.payload_json)
+            modes = set(payload.get("modes", []))
+            includes_off_duty = (
+                request.kind == "off_duty" or Mode.OFF_DUTY.value in modes
+            )
+            analysis = self.repository.add_analysis(
+                camera_id=request.camera_id,
+                mode=Mode.OFF_DUTY.value if includes_off_duty else request.kind,
                 status="uncertain", confidence=0, reason="后台复核超时或失败",
-                occupancy_status="unknown" if request.kind == "off_duty" else None,
-                off_duty_state="analysis_failed" if request.kind == "off_duty" else None,
-                analysis_source="vlm" if request.kind == "off_duty" else None,
-                evidence_path=request.evidence_ref if request.kind == "off_duty" else None,
-                error=type(error).__name__)
+                occupancy_status="unknown" if includes_off_duty else None,
+                off_duty_state="analysis_failed" if includes_off_duty else None,
+                analysis_source="vlm" if includes_off_duty else None,
+                evidence_path=request.evidence_ref if includes_off_duty else None,
+                error=type(error).__name__,
+            )
+            if request.kind == "behavior" and includes_off_duty:
+                state = self.runtime.rules.for_camera(request.camera_id)
+                current_event = state.absence_since.isoformat() if state.absence_since else ""
+                if current_event == request.event_id:
+                    sampled_at = datetime.fromisoformat(request.sampled_at)
+                    evidence = self.review_evidence.get(request.evidence_ref)
+                    state.record_off_duty_review(True, sampled_at, evidence, 0.0)
+                    if state.absence_alerted:
+                        camera = self.repository.get_camera(request.camera_id)
+                        if camera is not None:
+                            await self.runtime._maybe_create_off_duty_alert(
+                                camera, analysis, sampled_at
+                            )
         def finish():
             with session_scope() as session:
                 row = session.scalar(select(models.BackgroundTask).where(
