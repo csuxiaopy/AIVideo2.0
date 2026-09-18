@@ -75,11 +75,11 @@ async def audit_logs(
 async def analysis_logs(
     _: AdminUser, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
     start: datetime | None = None, end: datetime | None = None,
-    camera_id: str | None = None, mode: str | None = None, status: str | None = None,
+    camera_name: str | None = None, mode: str | None = None, status: str | None = None,
 ) -> dict[str, Any]:
     rows, total = context.repository.list_analysis_logs(
         page=page, page_size=page_size, start=_aware(start), end=_aware(end),
-        camera_id=camera_id, mode=mode, status=status,
+        camera_name=camera_name, mode=mode, status=status,
     )
     return _page(rows, total, page, page_size, analysis_public)
 
@@ -130,7 +130,7 @@ def _export_rows(category: str, filters: dict[str, Any]):
                          outcome=filters.get("outcome")), audit_public
     if category == "analyses":
         return all_pages(context.repository.list_analysis_logs,
-                         camera_id=filters.get("camera_id"), mode=filters.get("mode"),
+                         camera_name=filters.get("camera_name"), mode=filters.get("mode"),
                          status=filters.get("status")), analysis_public
     if category == "model-calls":
         return all_pages(context.repository.list_model_call_logs,

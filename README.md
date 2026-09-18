@@ -1,10 +1,10 @@
-# 监衡：YOLO + 视觉大模型视频监控平台
+# 江苏有线无锡AI营业厅分析：YOLO + 视觉大模型视频监控平台
 
-监衡是一套面向营业厅、工位、出入口和库房的视频智能分析平台。系统通过 FFmpeg 周期抽帧，结合本地 YOLO、像素统计、目标跟踪和外部视觉大模型，实现黑屏、离岗、在岗、人流、玩手机、吸烟、烟火和区域入侵检测，并提供告警留证、企业微信推送、人流月报、账号权限、审计日志和运行状态监控。
+江苏有线无锡AI营业厅分析是一套面向营业厅、工位、出入口和库房的视频智能分析平台。系统通过 FFmpeg 周期抽帧，结合本地 YOLO、像素统计、目标跟踪和外部视觉大模型，实现黑屏、离岗、在岗、人流、玩手机、吸烟、烟火和区域入侵检测，并提供告警留证、企业微信推送、人流月报、账号权限、审计日志和运行状态监控。
 
 项目品牌图标统一存放在 `frontend/public/brand-icon.png`，同时用于浏览器页签图标、登录页和系统侧栏。替换品牌图标时保持 PNG 方形画布，并沿用该文件名即可。
 
-项目以 96 路 RTSP 接入为设计目标。实际可承载路数取决于视频编码、抽帧周期、CPU/GPU、模型大小和外部 VLM 延迟，正式上线前必须使用现场码流压测。
+项目以 96 路 RTSP 接入为设计目标。当前生产方案使用双 GPU 分担通用 YOLO，其中 GPU 1 还承担低频烟火检测，并以 1 FPS 采集为目标；实际可承载路数和有效分析频率仍取决于视频编码、在线路数、组批效率、CPU/GPU、模型大小和外部 VLM 延迟，正式上线前必须使用现场码流持续压测。
 
 ## 核心能力
 
@@ -74,17 +74,19 @@
 | 模式 | 实现与判定 | 结果 |
 | --- | --- | --- |
 | 黑屏 | OpenCV 灰度统计；默认 `mean≤18`、`std≤12`、近黑比例 `≥0.92`，连续 3 帧异常后确认 | `high` 告警 |
-| 离岗 | 排班内检测置信度不低于 0.30 的人员框是否与岗位 ROI 相交；持续无人达到当前时段的 `off_duty_seconds` 后由外部 VLM 终审当前岗位区域 | VLM 明确确认后产生 `normal` 告警；满足条件时复用玩手机联合请求 |
+| 离岗 | 排班内检测置信度不低于 0.30 的人员框是否与岗位 ROI 相交；本地连续无人独立计时，达到当前时段阈值后使用首次跨过阈值的固定帧进行 VLM 终审 | 本地阈值与 VLM 均确认后产生 `normal` 告警；有效的联合请求结果可复用 |
 | 在岗记录 | 人员框与岗位 ROI 有任意交叠即判定在岗 | 仅记录 |
 | 人流 | YOLO 人员检测和独立跟踪，每个 Track 首次出现在人流 ROI 内时累计一次 | 仅统计 |
-| 玩手机 | 外部 VLM 按每路频率分析当前帧，默认连续 10 分钟每次均确认后告警 | `normal` 告警 |
+| 玩手机 | 外部 VLM 按每路频率分析请求创建时的固定帧，连续判定和证据时间均使用该帧的采样时间 | 默认连续 10 分钟确认后产生 `normal` 告警 |
 | 吸烟 | 外部 VLM 分析持烟、吸食动作或可关联烟雾 | `normal` 告警 |
 | 烟火 | 独立 YOLO，火焰与烟雾默认阈值均为 0.90；火焰连续 2 帧命中，烟雾最近 5 帧至少 3 帧命中 | `critical` 告警 |
 | 区域入侵 | 人员跟踪脚点进入禁区即触发，按跟踪 ID 去重 | `high` 告警 |
 
-玩手机和吸烟共用一次单模型联合 VLM 请求。当同一路同时启用离岗和玩手机，且行为检测间隔严格小于当前班次离岗阈值时，该请求还会使用带岗位 ROI 标注的同一帧判断离岗；只有 YOLO 持续无人已达阈值且本次 VLM 明确确认才进入离岗告警流程。间隔大于等于阈值或缺少任一模式时，仍使用独立离岗终审。
+玩手机和吸烟共用一次单模型联合 VLM 请求。任务创建时会把 JPEG、`sampled_at` 和事件 ID 封装为不可变载荷，后续排队、重试和告警留证都复用该帧，不会改取回调时的最新画面。当同一路存在未中断的本地无人事件时，行为请求会顺带判断离岗；该确认与无人事件绑定，人员返回、排班结束或配置变化后立即失效。
 
-离岗时长由本地规则按排班时段判定，每个时段可以设置独立阈值；默认 09:00–11:00 为 5 分钟、12:00–13:30 为 15 分钟、13:30–17:00 为 5 分钟。切换时段时重新计时。达到阈值后，系统把带岗位 ROI 和事件时间标注的当前帧交给外部 VLM 复核。告警按目录聚合：同目录所有启用离岗检测的监控源都返回 `confirmed` 后才告警，并保存每路证据；单路目录直接告警。未确认、离线、未排班、模型未配置或调用失败都会阻止整组告警。持续全员离岗时，每路重新取得确认图片并超过目录最大冷却时间后可再次告警。
+离岗时长由本地规则按排班时段独立计时，每个时段可以设置独立阈值；默认 09:00–11:00 为 5 分钟、12:00–13:30 为 15 分钟、13:30–17:00 为 5 分钟。首次跨过阈值时固定保存阈值帧：若当前无人事件已有有效的 VLM 离岗确认则不重复调用，否则始终使用该阈值帧复核，失败重试也不更换证据。离岗告警 `START` 为无人开始时间，`END` 固定为 `START + 有效阈值`，模型排队和落库延迟只影响创建时间。
+
+告警按目录聚合：目录内各摄像头独立完成本地阈值和 VLM 确认，全部满足后生成一条目录告警并保存各自的阈值证据帧，目录事件区间由最后满足条件的成员确定。未确认、离线、未排班、模型未配置或调用失败都会阻止整组告警。持续全员离岗时，每路重新取得确认图片并超过目录最大冷却时间后可再次告警。
 
 所有正式告警使用“目录名+营业厅视频”作为名称，未分组摄像头统一归入“未分组营业厅视频”。玩手机保留每路持续判定时间，目录内任一路达到阈值即可告警，并按目录最大冷却时间合并；其他告警仍逐摄像头触发，具体监控源写入告警原因。
 
@@ -142,11 +144,11 @@ RTSP / 视频文件
        │
        └── high / normal / low：普通队列 ── 分析 worker
                                              ├── 黑屏统计
-                                             ├── 通用 YOLO + 跟踪
-                                             └── 外部 VLM（行为检测 / 离岗终审）
+                                             ├── 双 GPU 通用 YOLO + 跟踪
+                                             └── 持久化复核任务 ── VLM worker
                                                       │
                                                       ▼
-                         PostgreSQL ← 分析记录 / 告警 / 配置
+                         PostgreSQL ← 后台任务 / 分析记录 / 告警 / 配置
                                                       │
                              证据图片 + WebSocket + 企业微信
 ```
@@ -154,10 +156,10 @@ RTSP / 视频文件
 1. 调度器按每路摄像头的 `frame_interval_seconds` 触发任务，同周期摄像头错峰执行。
 2. 任务进入 Redis 优先级队列；Redis 不可用时降级为进程内队列。
 3. 烟火使用独立队列和 worker，其余任务按安全性和业务类型确定优先级。
-4. 通用 YOLO 使用独立多进程推理池；每个子进程加载一份模型并限制 CPU 线程数，检测框返回主进程后再按摄像头更新 Track。
-5. FFmpeg 以短生命周期进程抓取单张 JPEG，抓取完成后退出。
-6. 各模式按自身最小执行间隔节流，分析结果写入 PostgreSQL。
-7. 告警生成标注证据图，通过 WebSocket 更新页面，并按规则投递企业微信。
+4. 生产环境将摄像头稳定分配到 GPU 0/1 的通用 YOLO，GPU 1 同时处理低频烟火任务；YOLO 支持小批量组批并限制算子线程数。
+5. FFmpeg 常驻分析流按目标 FPS 输出 JPEG；生产环境优先使用双 GPU NVDEC，超出硬解分配或显式指定的摄像头使用 CPU 解码。
+6. VLM 复核、分析写入、客流写入、告警和通知进入后台任务链路；关键任务持久化到 PostgreSQL，可通过租约、幂等键和有限重试在重启后恢复。
+7. 各模式按自身最小执行间隔节流；告警生成标注证据图，通过 WebSocket 更新页面，并按规则投递企业微信。
 
 ## 技术栈
 
@@ -171,7 +173,7 @@ RTSP / 视频文件
 | AI | Ultralytics YOLO、ByteTrack/轻量跟踪、OpenAI 兼容 VLM |
 | 报表 | OpenPyXL、Excel/CSV 导出 |
 | 监控 | Prometheus、Grafana（可选 profile） |
-| 部署 | Docker Compose、CPU 基线镜像 |
+| 部署 | Docker Compose、CPU 基线镜像、NVIDIA 双 GPU 生产覆盖层 |
 
 ## 快速启动
 
@@ -232,6 +234,14 @@ docker compose -f compose.cpu.yml up -d --build
 
 生产模式由后端在 8100 端口同时提供 API 和构建后的前端，访问 <http://127.0.0.1:8100>。
 
+双 GPU 生产服务器使用基础 Compose 与 GPU 覆盖层：
+
+```bash
+docker compose -p yolo_vlm_monitor -f compose.cpu.yml -f compose.gpu.production.yml up -d --build
+```
+
+当前生产覆盖配置使用 `yolo26s.pt`，双 GPU 分担通用 YOLO，GPU 1 同时承担低频烟火检测；采集目标为 1 FPS，YOLO 批大小为 2，VLM 复核并发为 4。仅修改 Python 或部署配置时应使用 `bash scripts/update-gpu-production.sh`，前端也有变化时增加 `--frontend`。详细部署、回滚和容量边界见 [docs/GPU_PRODUCTION_229.md](docs/GPU_PRODUCTION_229.md)。
+
 启用 Prometheus 与 Grafana：
 
 ```powershell
@@ -286,14 +296,23 @@ docker compose -f compose.cpu.yml --profile monitoring up -d
 | `YOLO_DEVICE` | `cpu` | 通用模型设备 |
 | `CAPTURE_FPS` | `1` | 常驻分析流每秒输出帧数 |
 | `CAPTURE_MAX_HEIGHT` | `960` | 常驻分析流最大高度 |
+| `CAPTURE_DECODE_DEVICES` | 空 | NVDEC 解码设备列表；生产为 `0,1` |
+| `CAPTURE_GPU_STREAMS_PER_DEVICE` | `0` | 每张 GPU 分配的硬解视频流上限；生产为 `32` |
 | `YOLO_IMGSZ` | `640` | 通用模型输入尺寸 |
 | `YOLO_INFERENCE_PROCESSES` | `4` | 独立 YOLO 推理进程数；每个进程加载一份模型 |
+| `YOLO_BATCH_SIZE` | `1` | 通用 YOLO 最大组批大小；生产为 `2` |
+| `YOLO_BATCH_WAIT_MS` | `10` | 等待凑批的最大毫秒数 |
 | `YOLO_THREADS_PER_PROCESS` | `5` | 每个 YOLO 推理进程使用的 CPU 线程数 |
 | `YOLO_INTEROP_THREADS` | `1` | 每个进程的 PyTorch 算子间线程数 |
 | `FIRE_SMOKE_MODEL` | `models/fire_smoke_yolov8.pt` | 烟火模型权重 |
 | `ANALYSIS_WORKERS` | `10` | 抓图、入队和后处理的异步 worker 数量 |
 | `FIRE_SMOKE_WORKERS` | `1` | 烟火 worker 数量 |
 | `ANALYSIS_QUEUE_MAXSIZE` | `256` | 分析队列容量 |
+| `ASYNC_CAPTURE_PERSISTENCE` | `false` | 异步保存快照和采集状态 |
+| `ASYNC_POSTPROCESSING` | `false` | 启用持久化后台后处理链路，并自动启用异步采集持久化 |
+| `BACKGROUND_QUEUE_CAPACITY` | `4096` | 后台关键任务队列容量 |
+| `REVIEW_WORKERS` | `2` | VLM 复核并发数；当前生产覆盖为 `4` |
+| `NOTIFICATION_WORKERS` | `4` | 外部通知 worker 数量 |
 | `FRAME_CAPTURE_TIMEOUT_SECONDS` | `15` | 单帧抓取超时 |
 | `MAX_LIVE_PREVIEWS` | `4` | 同时实时预览上限 |
 | `LIVE_PREVIEW_FPS` | `2` | 实时预览输出帧率 |
@@ -325,9 +344,11 @@ deploy/                  Prometheus 与 Grafana 配置
 docs/                    启动、运维、数据库和架构文档
 models/                  本地模型权重
 scripts/load_test.py     多摄像头负载测试
+scripts/update-gpu-production.sh  GPU 生产构建、重启与健康检查
 tests/                   后端测试
 compose.cpu.yml          CPU 生产基线
 compose.cpu.dev.yml      开发环境覆盖层
+compose.gpu.production.yml  双 GPU 生产覆盖层
 ```
 
 ## 验证与上线建议
@@ -339,6 +360,8 @@ Invoke-RestMethod http://127.0.0.1:8100/health | ConvertTo-Json -Depth 8
 ```
 
 正式告警前建议依次完成 10、32、64 路及最终规模的影子运行，持续观察抓帧成功率、队列深度、推理 P95、VLM 延迟、CPU/GPU/内存、告警准确率和不确定率。
+
+生产 GPU 环境还应检查 `nvidia-smi`、`/health` 中每路 `decoder`/`frames`/`reconnects`、实际人员检测频率及后台任务积压。配置为 1 FPS 只代表采集目标，不代表每路所有模型都已稳定达到每秒一次；结论应以持续压测数据为准。
 
 ## 安全与使用限制
 

@@ -418,7 +418,7 @@ class Repository:
 
     def list_analysis_logs(
         self, *, page: int, page_size: int, start: datetime | None = None,
-        end: datetime | None = None, camera_id: str | None = None,
+        end: datetime | None = None, camera_name: str | None = None,
         mode: str | None = None, status: str | None = None,
     ) -> tuple[list[models.Analysis], int]:
         filters = []
@@ -426,8 +426,8 @@ class Repository:
             filters.append(models.Analysis.created_at >= start)
         if end:
             filters.append(models.Analysis.created_at < end)
-        if camera_id:
-            filters.append(models.Analysis.camera_id == camera_id)
+        if camera_name:
+            filters.append(models.Analysis.camera_name.ilike(f"%{camera_name}%"))
         if mode:
             filters.append(models.Analysis.mode == mode)
         if status:

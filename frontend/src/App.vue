@@ -80,7 +80,7 @@ const alertLoading=ref(false)
 type LogCategory = 'audit'|'analyses'|'model-calls'
 const logCategory=ref<LogCategory>('audit')
 const logData=reactive<{items:any[];total:number;page:number;page_size:number}>({items:[],total:0,page:1,page_size:50})
-const logFilters=reactive({start:'',end:'',username:'',action:'',camera_id:'',mode:'',status:'',model:'',stage:'',outcome:''})
+const logFilters=reactive({start:'',end:'',analysis_start:'',analysis_end:'',username:'',action:'',camera_id:'',camera_name:'',mode:'',status:'',model:'',stage:'',outcome:''})
 const logLoading=ref(false)
 const expandedLogId=ref<number|null>(null)
 const logDetails=reactive<Record<string,any>>({})
@@ -488,19 +488,27 @@ const cleanupAlerts=async()=>{
 const saveDetectors=async()=>{try{const body={...detectorSettings};delete body.runtime;delete body.updated_at;await api('/api/settings/detectors',{method:'PUT',body:JSON.stringify(body)});notify('本地检测器配置已保存并重新加载');await loadSettings()}catch(error:any){notify(error.message,'error')}}
 const logPages=computed(()=>Math.max(1,Math.ceil(logData.total/logData.page_size)))
 const logDateValue=(value:string,end=false)=>{if(!value)return '';const date=new Date(`${value}T00:00:00`);if(end)date.setDate(date.getDate()+1);return date.toISOString()}
+const logDateTimeValue=(value:string)=>value?new Date(value).toISOString():''
+const validateAnalysisLogRange=()=>{
+  if(logCategory.value!=='analyses'||!logFilters.analysis_start||!logFilters.analysis_end)return true
+  if(new Date(logFilters.analysis_start).getTime()<new Date(logFilters.analysis_end).getTime())return true
+  notify('结束时间必须晚于开始时间','error');return false
+}
 const activeLogFilters=()=>{
-  const values:any={start:logDateValue(logFilters.start),end:logDateValue(logFilters.end,true)}
+  const values:any=logCategory.value==='analyses'
+    ?{start:logDateTimeValue(logFilters.analysis_start),end:logDateTimeValue(logFilters.analysis_end)}
+    :{start:logDateValue(logFilters.start),end:logDateValue(logFilters.end,true)}
   if(logCategory.value==='audit')Object.assign(values,{username:logFilters.username,action:logFilters.action,outcome:logFilters.outcome})
-  if(logCategory.value==='analyses')Object.assign(values,{camera_id:logFilters.camera_id,mode:logFilters.mode,status:logFilters.status})
+  if(logCategory.value==='analyses')Object.assign(values,{camera_name:logFilters.camera_name,mode:logFilters.mode,status:logFilters.status})
   if(logCategory.value==='model-calls')Object.assign(values,{camera_id:logFilters.camera_id,model:logFilters.model,stage:logFilters.stage,outcome:logFilters.outcome})
   return Object.fromEntries(Object.entries(values).filter(([,value])=>value!==''))
 }
-const loadLogs=async(page=1)=>{if(!isAdmin.value)return;logLoading.value=true;try{const params=new URLSearchParams({...activeLogFilters(),page:String(page),page_size:String(logData.page_size)});const result=await api(`/api/logs/${logCategory.value}?${params}`);Object.assign(logData,result);expandedLogId.value=null}catch(error:any){notify(`日志加载失败：${error.message}`,'error')}finally{logLoading.value=false}}
+const loadLogs=async(page=1)=>{if(!isAdmin.value||!validateAnalysisLogRange())return;logLoading.value=true;try{const params=new URLSearchParams({...activeLogFilters(),page:String(page),page_size:String(logData.page_size)});const result=await api(`/api/logs/${logCategory.value}?${params}`);Object.assign(logData,result);expandedLogId.value=null}catch(error:any){notify(`日志加载失败：${error.message}`,'error')}finally{logLoading.value=false}}
 const switchLogCategory=(category:LogCategory)=>{logCategory.value=category;logData.page=1;expandedLogId.value=null;void loadLogs(1)}
-const resetLogFilters=()=>{Object.assign(logFilters,{start:'',end:'',username:'',action:'',camera_id:'',mode:'',status:'',model:'',stage:'',outcome:''});void loadLogs(1)}
+const resetLogFilters=()=>{Object.assign(logFilters,{start:'',end:'',analysis_start:'',analysis_end:'',username:'',action:'',camera_id:'',camera_name:'',mode:'',status:'',model:'',stage:'',outcome:''});void loadLogs(1)}
 const logDetailKey=(id:number)=>`${logCategory.value}:${id}`
 const toggleLogDetail=async(row:any)=>{if(expandedLogId.value===row.id){expandedLogId.value=null;return}try{const key=logDetailKey(row.id);if(!logDetails[key])logDetails[key]=await api(`/api/logs/${logCategory.value}/${row.id}`);expandedLogId.value=row.id}catch(error:any){notify(error.message,'error')}}
-const exportLogs=async()=>{try{await download(`/api/logs/${logCategory.value}/export`,activeLogFilters(),`${logCategory.value}-logs.csv`);notify('日志已导出')}catch(error:any){notify(error.message,'error')}}
+const exportLogs=async()=>{if(!validateAnalysisLogRange())return;try{await download(`/api/logs/${logCategory.value}/export`,activeLogFilters(),`${logCategory.value}-logs.csv`);notify('日志已导出')}catch(error:any){notify(error.message,'error')}}
 const logResultText=(row:any)=>row.outcome==='success'?'成功':row.outcome==='failure'||row.outcome==='error'?'失败':row.status||row.outcome
 const prettyLog=(value:any)=>JSON.stringify(value,null,2)
 const loadSystemMonitor=async(silent=false)=>{
@@ -1116,9 +1124,11 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <button :class="{active:logCategory==='model-calls'}" @click="switchLogCategory('model-calls')">大模型调用日志</button>
           </div>
           <div class="log-filters">
-            <label>开始日期<input v-model="logFilters.start" type="date"></label><label>结束日期<input v-model="logFilters.end" type="date"></label>
+            <template v-if="logCategory==='analyses'"><label>开始时间<input v-model="logFilters.analysis_start" type="datetime-local"></label><label>结束时间<input v-model="logFilters.analysis_end" type="datetime-local"></label></template>
+            <template v-else><label>开始日期<input v-model="logFilters.start" type="date"></label><label>结束日期<input v-model="logFilters.end" type="date"></label></template>
             <template v-if="logCategory==='audit'"><label>用户<input v-model.trim="logFilters.username" placeholder="用户名"></label><label>操作<input v-model.trim="logFilters.action" placeholder="操作名称"></label></template>
-            <template v-else><label>摄像头<input v-model.trim="logFilters.camera_id" placeholder="摄像头 ID"></label></template>
+            <template v-if="logCategory==='analyses'"><label>摄像头<input v-model.trim="logFilters.camera_name" placeholder="摄像头名称"></label></template>
+            <template v-else-if="logCategory==='model-calls'"><label>摄像头<input v-model.trim="logFilters.camera_id" placeholder="摄像头 ID"></label></template>
             <template v-if="logCategory==='analyses'"><label>检测模式<select v-model="logFilters.mode"><option value="">全部</option><option v-for="(_,mode) in modeInfo" :key="mode" :value="mode">{{modeName(mode)}}</option></select></label><label>分析状态<select v-model="logFilters.status"><option value="">全部</option><option value="confirmed">confirmed</option><option value="suspected">suspected</option><option value="uncertain">uncertain</option><option value="none">none</option></select></label></template>
             <template v-if="logCategory==='model-calls'"><label>模型<input v-model.trim="logFilters.model" placeholder="模型名称"></label><label>阶段<select v-model="logFilters.stage"><option value="">全部</option><option value="single">单模型检测</option></select></label></template>
             <label v-if="logCategory!=='analyses'">结果<select v-model="logFilters.outcome"><option value="">全部</option><option value="success">成功</option><option value="failure">失败</option><option value="error">错误</option></select></label>

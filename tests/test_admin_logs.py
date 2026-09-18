@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
@@ -10,6 +10,7 @@ from starlette.responses import Response
 
 from backend.audit import audit_http_request
 from backend.api.context import context
+from backend.api.logs import _export_rows
 from backend.auth import current_user
 from backend.main import create_app
 from backend.database import utc_now
@@ -98,3 +99,24 @@ def test_log_api_rejects_non_admin_user():
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == 403
+
+
+def test_analysis_log_export_passes_camera_name_filter(monkeypatch):
+    calls = []
+
+    def list_analysis_logs(**kwargs):
+        calls.append(kwargs)
+        return [], 0
+
+    monkeypatch.setattr(
+        context, "repository", SimpleNamespace(list_analysis_logs=list_analysis_logs)
+    )
+    rows, _ = _export_rows("analyses", {
+        "start": datetime(2026, 9, 18, tzinfo=timezone.utc),
+        "end": datetime(2026, 9, 19, tzinfo=timezone.utc),
+        "camera_name": "前台",
+    })
+
+    assert rows == []
+    assert calls[0]["camera_name"] == "前台"
+    assert "camera_id" not in calls[0]

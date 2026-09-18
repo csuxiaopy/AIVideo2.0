@@ -1,11 +1,63 @@
+from contextlib import contextmanager
+from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
-from datetime import date, datetime, timezone
 
-from sqlalchemy import delete
+from sqlalchemy import create_engine, delete
+from sqlalchemy.orm import sessionmaker
 
+import backend.repository as repository_module
 from backend import models
 from backend.database import Base, engine, session_scope
 from backend.repository import Repository
+
+
+def test_analysis_logs_filter_by_time_range_and_camera_name_snapshot(monkeypatch):
+    test_engine = create_engine("sqlite://")
+    Base.metadata.create_all(test_engine)
+    session_factory = sessionmaker(bind=test_engine, expire_on_commit=False)
+
+    @contextmanager
+    def local_session_scope():
+        session = session_factory()
+        try:
+            yield session
+            session.commit()
+        finally:
+            session.close()
+
+    monkeypatch.setattr(repository_module, "session_scope", local_session_scope)
+    repository = Repository()
+    start = datetime(2026, 9, 17, 23, 30, tzinfo=timezone.utc)
+    end = datetime(2026, 9, 18, 1, 0, tzinfo=timezone.utc)
+    rows = [
+        repository.add_analysis(
+            camera_id=None, camera_name="Lobby East", mode="intrusion",
+            status="confirmed", created_at=start,
+        ),
+        repository.add_analysis(
+            camera_id=None, camera_name="lobby west", mode="intrusion",
+            status="confirmed", created_at=end - timedelta(minutes=1),
+        ),
+        repository.add_analysis(
+            camera_id=None, camera_name="Lobby East", mode="intrusion",
+            status="confirmed", created_at=end,
+        ),
+        repository.add_analysis(
+            camera_id=None, camera_name="Warehouse", mode="intrusion",
+            status="confirmed", created_at=start + timedelta(minutes=1),
+        ),
+    ]
+    try:
+        matches, total = repository.list_analysis_logs(
+            page=1, page_size=50, start=start, end=end, camera_name="LOBBY"
+        )
+        assert total == 2
+        assert {row.id for row in matches} == {rows[0].id, rows[1].id}
+    finally:
+        with local_session_scope() as session:
+            session.execute(delete(models.Analysis).where(
+                models.Analysis.id.in_([row.id for row in rows])
+            ))
 
 
 def test_first_traffic_bucket_initializes_counters():
