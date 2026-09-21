@@ -38,6 +38,21 @@ def test_idempotent_insert_and_conflicting_key(store):
         store.persist(Job.make("analysis", first.key, {"value": 2}, "camera"))
 
 
+@pytest.mark.parametrize("status", ["completed", "pending", "retry", "running", "failed"])
+def test_conflicting_key_never_overwrites_any_existing_state(store, status):
+    first = Job.make("alert_write", "alert:event", {"analysis_job_id": "old"}, "camera")
+    store.persist(first)
+    with store.sessions() as session:
+        row = session.get(BackgroundTask, first.id)
+        row.status = status
+    with pytest.raises(ValueError):
+        store.persist(Job.make("alert_write", first.key, {"analysis_job_id": "new"}, "camera"))
+    with store.sessions() as session:
+        row = session.get(BackgroundTask, first.id)
+        assert row.status == status
+        assert json.loads(row.payload_json) == {"analysis_job_id": "old"}
+
+
 def test_effects_and_completion_are_atomic(store):
     job = Job.make("analysis", "one", {"value": 2})
     store.persist(job)
@@ -142,6 +157,43 @@ async def test_critical_full_and_failed_write_retain_work():
     assert persisted == ["1", "2"]
     assert await queue.close() == 0
     await io.close()
+
+
+@pytest.mark.asyncio
+async def test_conflict_in_batch_is_isolated_and_later_work_persists(store):
+    existing = Job.make("alert_write", "alert:event", {"analysis_job_id": "old"}, "a")
+    store.persist(existing)
+    conflict = Job.make("alert_write", existing.key, {"analysis_job_id": "new"}, "a")
+    analysis = Job.make("analysis_write", "analysis:new", {"value": 1}, "b")
+    model_log = Job.make("model_log_write", "model:new", {"value": 2}, "b")
+    io = IOPool(1)
+    queue = CriticalIngress(io, store.persist, 10)
+    queue.persist_batch = store.persist_many
+    assert all(queue.submit(job) for job in (conflict, analysis, model_log))
+
+    assert await queue.flush_one()
+    assert not queue.pending
+    assert store.get(existing.id)["status"] == "pending"
+    assert store.get(analysis.id)["status"] == "pending"
+    assert store.get(model_log.id)["status"] == "pending"
+    status = queue.status()
+    assert status["idempotency_conflicts"] == 1
+    assert status["dead_letters"] == 1
+    assert status["last_success_at"] is not None
+    assert status["degraded"]
+    await io.close()
+
+
+def test_alert_reservations_restore_all_durable_states(store):
+    expected = {}
+    for state in ("completed", "pending", "retry", "running", "failed"):
+        job = Job.make("alert_write", f"alert:{state}", {"state": state}, state)
+        store.persist(job)
+        with store.sessions() as session:
+            session.get(BackgroundTask, job.id).status = state
+        expected[job.key] = state
+    reservations = store.alert_reservations()
+    assert {key: value["status"] for key, value in reservations.items()} == expected
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,7 @@ from starlette.responses import Response
 from backend.audit import audit_http_request
 from backend.api.context import context
 from backend.api.logs import _export_rows
+from backend.api.monitoring import health
 from backend.api.presenters import analysis_public
 from backend.auth import current_user
 from backend.main import create_app
@@ -18,6 +19,16 @@ from backend.database import utc_now
 from backend.schemas import Mode, RetentionSettingsUpdate
 from backend.security import token_hash
 from backend.vlm import VisionModelClient
+
+
+def test_health_reports_postprocessing_degradation(monkeypatch):
+    class Runtime:
+        async def status(self):
+            return {"postprocessing": {"enabled": True, "degraded": True}}
+
+    monkeypatch.setattr(context, "runtime", Runtime())
+    result = asyncio.run(health())
+    assert result["status"] == "degraded"
 
 
 def test_log_retention_defaults_to_thirty_days():

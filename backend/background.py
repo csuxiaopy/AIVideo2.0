@@ -9,17 +9,21 @@ the affected event. No unbounded create_task-per-frame pattern is used here.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import logging
 import os
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,19 @@ class Job:
             raise ValueError("Invalid background job kind/idempotency key")
         return cls(str(uuid4()), key, kind, camera_id,
                    json.dumps(payload, ensure_ascii=False, allow_nan=False), evidence_ref)
+
+
+class IdempotencyConflict(ValueError):
+    """A durable key already exists with different immutable work."""
+
+    def __init__(self, job: Job, existing):
+        self.job_id = job.id
+        self.key = job.key
+        self.kind = job.kind
+        self.camera_id = job.camera_id
+        self.existing_id = existing.id
+        self.existing_status = existing.status
+        super().__init__("Idempotency key reused with different payload")
 
 
 class IOPool:
@@ -78,8 +95,13 @@ class CriticalIngress:
         self.persist_batch = None
         self.pending: OrderedDict[str, tuple[Job, float]] = OrderedDict()
         self.failures = 0
+        self.consecutive_failures = 0
         self.last_error: str | None = None
         self.persisted = 0
+        self.last_success_at: str | None = None
+        self.idempotency_conflicts = 0
+        self.isolated = 0
+        self.dead_letters: OrderedDict[str, dict] = OrderedDict()
         self.closed = False
         self.task: asyncio.Task | None = None
 
@@ -108,16 +130,82 @@ class CriticalIngress:
                 await self.io.run(self.persist_batch, [item[0] for _, item in batch])
             else:
                 await self.io.run(self.persist, batch[0][1][0])
+        except IdempotencyConflict as exc:
+            if self.persist_batch and len(batch) > 1:
+                return await self._flush_individually(batch, exc)
+            # A durable row is already the authoritative audit record. Isolate
+            # the conflicting reconstruction so it cannot poison unrelated
+            # analysis/model-log writes after a restart.
+            self._isolate_conflict(exc)
+            return True
         except Exception as exc:
+            if self.persist_batch and len(batch) > 1:
+                return await self._flush_individually(batch, exc)
             self.failures += 1
+            self.consecutive_failures += 1
             # Expose type, not exception text which may contain credentials/SQL.
             self.last_error = type(exc).__name__
             return False
         for key, _ in batch:
             self.pending.pop(key)
         self.persisted += len(batch)
+        self.consecutive_failures = 0
         self.last_error = None
+        self.last_success_at = datetime.now(timezone.utc).isoformat()
         return True
+
+    async def _flush_individually(self, batch, _batch_error) -> bool:
+        """Salvage valid jobs from a failed batch and isolate known conflicts."""
+        progressed = False
+        remaining_error = None
+        for key, (job, _) in batch:
+            try:
+                await self.io.run(self.persist, job)
+            except IdempotencyConflict as exc:
+                self._isolate_conflict(exc)
+                progressed = True
+            except Exception as exc:
+                remaining_error = exc
+                # Keep unpersisted work, but move it behind healthy jobs so one
+                # record cannot cause head-of-line blocking.
+                if key in self.pending:
+                    self.pending.move_to_end(key)
+            else:
+                self.pending.pop(key, None)
+                self.persisted += 1
+                progressed = True
+        if progressed:
+            self.last_success_at = datetime.now(timezone.utc).isoformat()
+        if remaining_error is not None:
+            self.failures += 1
+            self.consecutive_failures += 1
+            self.last_error = type(remaining_error).__name__
+        else:
+            self.consecutive_failures = 0
+            self.last_error = None
+        return progressed
+
+    def _isolate_conflict(self, exc: IdempotencyConflict) -> None:
+        self.pending.pop(exc.key, None)
+        self.failures += 1
+        self.idempotency_conflicts += 1
+        self.isolated += 1
+        key_hash = hashlib.sha256(exc.key.encode()).hexdigest()[:16]
+        self.dead_letters[exc.job_id] = {
+            "job_id": exc.job_id, "kind": exc.kind,
+            "camera_id": exc.camera_id, "key_hash": key_hash,
+            "conflict": "payload_mismatch", "existing_id": exc.existing_id,
+            "existing_status": exc.existing_status,
+        }
+        while len(self.dead_letters) > 100:
+            self.dead_letters.popitem(last=False)
+        logger.error(
+            "Isolated idempotency conflict job_id=%s kind=%s camera_id=%s key_hash=%s existing_id=%s existing_status=%s",
+            exc.job_id, exc.kind, exc.camera_id, key_hash,
+            exc.existing_id, exc.existing_status,
+        )
+        self.consecutive_failures = 0
+        self.last_error = None
 
     def start(self):
         if not self.task:
@@ -131,9 +219,15 @@ class CriticalIngress:
     def status(self):
         oldest = next(iter(self.pending.values()), None)
         return {"depth": len(self.pending), "capacity": self.capacity,
+                "utilization": round(len(self.pending) / self.capacity, 4),
                 "oldest_age_seconds": time.monotonic() - oldest[1] if oldest else 0,
                 "failures": self.failures, "error": self.last_error,
-                "degraded": bool(self.last_error or len(self.pending) >= self.capacity),
+                "consecutive_failures": self.consecutive_failures,
+                "last_success_at": self.last_success_at,
+                "idempotency_conflicts": self.idempotency_conflicts,
+                "isolated": self.isolated, "dead_letters": len(self.dead_letters),
+                "degraded": bool(self.last_error or self.dead_letters
+                                 or len(self.pending) >= self.capacity),
                 "persisted": self.persisted}
 
     async def close(self) -> int:

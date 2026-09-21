@@ -8,7 +8,7 @@ from uuid import uuid4
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from backend.background import Job
+from backend.background import IdempotencyConflict, Job
 from backend.database import session_scope, utc_now
 from backend.models import BackgroundTask
 
@@ -22,8 +22,18 @@ class TaskStore:
         if (row.kind, row.camera_id, row.payload_json, row.evidence_ref) != (
             job.kind, job.camera_id, job.payload_json, job.evidence_ref
         ):
-            raise ValueError("Idempotency key reused with different payload")
+            raise IdempotencyConflict(job, row)
         return row.id
+
+    def alert_reservations(self) -> dict[str, dict]:
+        """Return durable alert identities without exposing their payloads."""
+        with self.sessions() as session:
+            rows = session.execute(select(
+                BackgroundTask.idempotency_key, BackgroundTask.id,
+                BackgroundTask.status, BackgroundTask.camera_id,
+            ).where(BackgroundTask.kind == "alert_write")).all()
+            return {key: {"id": task_id, "status": status, "camera_id": camera_id}
+                    for key, task_id, status, camera_id in rows}
 
     def persist(self, job: Job) -> str:
         try:

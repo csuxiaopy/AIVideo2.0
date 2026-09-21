@@ -1,4 +1,5 @@
 import asyncio
+import importlib.util
 import json
 from collections import defaultdict
 from contextlib import contextmanager
@@ -68,6 +69,7 @@ def setup_runtime(tmp_path, db):
     post = AsyncPipeline(runtime, SimpleNamespace(), io)
     post.store = TaskStore(db)
     post.ingress.persist = post.store.persist
+    post.ingress.persist_batch = post.store.persist_many
     post.cameras = {"a": camera(), "b": camera("b")}
     post.version = 1
     runtime.async_pipeline = post
@@ -225,6 +227,47 @@ async def test_full_ingress_retains_event_and_blocks_camera(tmp_path, db):
     with db() as session:
         assert session.scalar(select(func.count()).select_from(models.BackgroundTask)) == 2
     await io.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_restores_durable_alert_reservation(tmp_path, db):
+    runtime, post, io, _ = setup_runtime(tmp_path, db)
+    alert = Job.make("alert_write", "alert:existing-event", {"immutable": True}, "a")
+    post.store.persist(alert)
+    with db() as session:
+        session.get(models.BackgroundTask, alert.id).status = "failed"
+
+    await post.restore_alert_reservations()
+    assert "alert:existing-event" in post.reserved_alerts
+    assert post.durable_alerts["alert:existing-event"]["status"] == "failed"
+    await io.close()
+
+
+def test_recovery_mark_stale_is_idempotent_and_keeps_audit(tmp_path, db):
+    path = __import__("pathlib").Path(__file__).parents[1] / "scripts" / "recover-background-tasks.py"
+    spec = importlib.util.spec_from_file_location("recover_background_tasks", path)
+    recovery = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(recovery)
+    recovery.session_scope = db
+
+    job = Job.make("alert_write", "alert:historical", {"secret": "not-exposed"}, "a")
+    store = TaskStore(db)
+    store.persist(job)
+    with db() as session:
+        row = session.get(models.BackgroundTask, job.id)
+        row.status, row.error = "failed", "RuntimeError"
+        row.created_at = utc_now() - timedelta(days=2)
+
+    cutoff = utc_now() - timedelta(days=1)
+    assert recovery.mark_stale(cutoff, "event ended") == 1
+    assert recovery.mark_stale(cutoff, "event ended") == 0
+    with db() as session:
+        row = session.get(models.BackgroundTask, job.id)
+        result = json.loads(row.result_json)
+        assert row.status == "completed" and row.error is None
+        assert result["stale"] is True
+        assert result["previous_error"] == "RuntimeError"
+        assert result["reason"] == "event ended"
 
 
 @pytest.mark.asyncio

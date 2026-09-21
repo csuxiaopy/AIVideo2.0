@@ -108,7 +108,10 @@ def _prometheus_snapshot(processed: int) -> dict[str, Any]:
 
 @router.get("/health")
 async def health() -> dict[str, Any]:
-    return {"status": "ok", "version": "1.0.0", **await context.require_runtime().status()}
+    runtime = await context.require_runtime().status()
+    postprocessing = runtime.get("postprocessing", {})
+    status = "degraded" if postprocessing.get("degraded") else "ok"
+    return {"status": status, "version": "1.0.0", **runtime}
 
 
 @router.get("/api/dashboard", dependencies=[Depends(current_user)])

@@ -34,6 +34,7 @@ COPY backend ./backend
 COPY alembic ./alembic
 COPY alembic.ini ./alembic.ini
 COPY run.py ./run.py
+COPY scripts/recover-background-tasks.py ./scripts/recover-background-tasks.py
 COPY --from=web /src/frontend/dist ./frontend/dist
 RUN mkdir -p /app/data/evidence /app/models
 EXPOSE 8100

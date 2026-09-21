@@ -143,8 +143,10 @@ class AsyncPipeline:
         self.review_applied = {}
         self.stale_results = 0
         self.failed_cameras = set()
+        self.failed_alert_cameras = set()
         self.global_write_failure = False
         self.durable_status = {}
+        self.durable_alerts = {}
         self.worker_errors = {}
         self.tasks = []
         self.reviews = ReviewQueue(self._review, self._review_completed,
@@ -178,7 +180,7 @@ class AsyncPipeline:
     def blocked(self, camera_id):
         return (self.global_write_failure or len(self.ingress.pending) >= self.ingress.capacity
                 or camera_id in self.failed_cameras or any(j.camera_id in (None, camera_id) for j in self.retained.values())
-                or self.durable_status.get("unfinished", 0) >= self.ingress.capacity)
+                or self.durable_status.get("actionable", 0) >= self.ingress.capacity)
 
     def submit(self, job):
         if not self.ingress.submit(job):
@@ -203,6 +205,7 @@ class AsyncPipeline:
                             payload_json=json.dumps({"delivery_id": delivery.id}), status="pending", attempts=0,
                             retry_at=utc_now()))
         await self.io.run(recover)
+        await self.restore_alert_reservations()
         if hasattr(self.original, "traffic_summary"):
             summary = await self.io.run(self.original.traffic_summary)
             self.flow_counts = {row["camera_id"]: int(row.get("entered_today", 0)) for row in summary["cameras"]}
@@ -212,6 +215,11 @@ class AsyncPipeline:
                       asyncio.create_task(self._maintenance(), name="postprocess-maintenance")]
         self.tasks += [asyncio.create_task(self._notifications(), name=f"notification-worker-{i}")
                        for i in range(self.runtime.settings.notification_workers)]
+
+    async def restore_alert_reservations(self):
+        """Make durable alert identities authoritative after process restart."""
+        self.durable_alerts = await self.io.run(self.store.alert_reservations)
+        self.reserved_alerts.update(self.durable_alerts)
 
     async def close(self):
         await self.reviews.close()
@@ -250,6 +258,8 @@ class AsyncPipeline:
                 "reviews": self.reviews.status(), "stale_results": self.stale_results,
                 "review_last_result": self.review_last, "worker_errors": dict(self.worker_errors),
                 "blocked_cameras": sorted(self.failed_cameras | {j.camera_id for j in self.retained.values() if j.camera_id}),
+                "failed_alert_cameras": sorted(self.failed_alert_cameras),
+                "blocked_events": self.durable_status.get("blocked_events", []),
                 "degraded": bool(self.retained or self.global_write_failure or self.failed_cameras
                     or self.reviews.unapplied or self.worker_errors or self.ingress.status()["degraded"]
                     or any(r["status"] == "failed" for r in self.durable_status.get("queues", [])))}
@@ -265,13 +275,42 @@ class AsyncPipeline:
                         rows = session.execute(select(models.BackgroundTask.kind, models.BackgroundTask.status,
                             func.count(), func.min(models.BackgroundTask.created_at)).where(
                             models.BackgroundTask.status != "completed").group_by(models.BackgroundTask.kind, models.BackgroundTask.status)).all()
-                        failed = set(session.scalars(select(models.BackgroundTask.camera_id).where(
-                            models.BackgroundTask.status == "failed", models.BackgroundTask.kind.in_(self.WRITE_KINDS))))
-                    return [{"kind": kind, "status": status, "count": count,
+                        failed_rows = session.execute(select(
+                            models.BackgroundTask.camera_id, models.BackgroundTask.kind
+                        ).where(models.BackgroundTask.status == "failed",
+                            models.BackgroundTask.kind.in_(self.WRITE_KINDS))).all()
+                        completed = dict(session.execute(select(
+                            models.BackgroundTask.kind, func.max(models.BackgroundTask.updated_at)
+                        ).where(models.BackgroundTask.status == "completed").group_by(
+                            models.BackgroundTask.kind)).all())
+                        blocked = session.execute(select(
+                            models.BackgroundTask.id, models.BackgroundTask.idempotency_key,
+                            models.BackgroundTask.kind, models.BackgroundTask.camera_id,
+                            models.BackgroundTask.status, models.BackgroundTask.error,
+                        ).where(models.BackgroundTask.status == "failed",
+                            models.BackgroundTask.kind.in_(self.WRITE_KINDS)).limit(100)).all()
+                    return ([{"kind": kind, "status": status, "count": count,
                              "oldest_age_seconds": max(0, (utc_now() - created.replace(tzinfo=timezone.utc)).total_seconds())}
-                            for kind, status, count, created in rows], failed
-                rows, failed = await self.io.run(stats)
-                self.durable_status = {"unfinished": sum(r["count"] for r in rows), "queues": rows}
+                            for kind, status, count, created in rows], failed, completed, blocked)
+                rows, failed_rows, completed, blocked = await self.io.run(stats)
+                self.durable_status = {
+                    "unfinished": sum(r["count"] for r in rows),
+                    "actionable": sum(r["count"] for r in rows if r["status"] != "failed"),
+                    "queues": rows,
+                    "last_completed_at": {kind: value.isoformat() for kind, value in completed.items()},
+                    "last_analysis_write_at": completed.get("analysis_write").isoformat()
+                        if completed.get("analysis_write") else None,
+                    "last_model_log_write_at": completed.get("model_log_write").isoformat()
+                        if completed.get("model_log_write") else None,
+                    "blocked_events": [{
+                        "task_id": task_id, "key_hash": hashlib.sha256(key.encode()).hexdigest()[:16],
+                        "kind": kind, "camera_id": camera_id, "status": status, "error": error,
+                    } for task_id, key, kind, camera_id, status, error in blocked],
+                }
+                failed = {camera_id for camera_id, kind in failed_rows
+                          if kind != "alert_write"}
+                self.failed_alert_cameras = {camera_id for camera_id, kind in failed_rows
+                                             if kind == "alert_write" and camera_id is not None}
                 self.failed_cameras = failed - {None}
                 self.global_write_failure = None in failed
                 self.worker_errors.pop("maintenance", None)
