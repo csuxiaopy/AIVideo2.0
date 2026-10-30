@@ -26,6 +26,12 @@ from uuid import uuid4
 logger = logging.getLogger(__name__)
 
 
+class ReviewDeferred(RuntimeError):
+    """Temporary upstream outage; retain immutable evidence and release worker."""
+
+    retry_after = 3.0
+
+
 @dataclass(frozen=True)
 class Job:
     id: str
@@ -364,6 +370,7 @@ class ReviewQueue:
         self.pending: OrderedDict[tuple[str, str], tuple[ReviewRequest, float]] = OrderedDict()
         self.active: dict[tuple[str, str], ReviewRequest] = {}
         self.unapplied: dict[tuple[str, str], tuple[ReviewRequest, Any, Exception | None]] = {}
+        self.deferred: dict[tuple[str, str], tuple[ReviewRequest, float, float]] = {}
         self.tasks: list[asyncio.Task] = []
         self.failures = 0
         self.closed = False
@@ -372,7 +379,9 @@ class ReviewQueue:
         if self.closed:
             return False
         key = request.camera_id, request.kind
-        if key not in self.pending and key not in self.active and key not in self.unapplied and len(set(self.pending) | set(self.active) | set(self.unapplied)) >= self.max_keys:
+        if key in self.deferred:
+            return False
+        if key not in self.pending and key not in self.active and key not in self.unapplied and len(set(self.pending) | set(self.active) | set(self.unapplied) | set(self.deferred)) >= self.max_keys:
             return False
         if self.active.get(key) == request:
             return True
@@ -387,16 +396,26 @@ class ReviewQueue:
 
     async def _worker(self):
         while not self.closed:
-            key = next((key for key in self.pending if key not in self.active and key not in self.unapplied), None)
+            key = next((key for key, (_, _, due) in self.deferred.items()
+                        if due <= time.monotonic() and key not in self.active and key not in self.unapplied), None)
+            retry = key is not None
+            if key is None:
+                key = next((key for key in self.pending if key not in self.active and key not in self.unapplied and key not in self.deferred), None)
             if key is None:
                 await asyncio.sleep(0.01)
                 continue
-            request, _ = self.pending.pop(key)
+            if retry:
+                request, age, _ = self.deferred.pop(key)
+            else:
+                request, age = self.pending.pop(key)
             self.active[key] = request
             result, error = None, None
             try:
                 try:
                     result = await asyncio.wait_for(self.handler(request), self.timeout)
+                except ReviewDeferred as exc:
+                    self.deferred[key] = request, age, time.monotonic() + exc.retry_after
+                    continue
                 except Exception as exc:
                     self.failures += 1
                     error = exc
@@ -425,7 +444,8 @@ class ReviewQueue:
 
     def status(self):
         ages = [age for _, age in self.pending.values()]
-        return {"pending": len(self.pending), "running": len(self.active),
+        ages.extend(age for _, age, _ in self.deferred.values())
+        return {"pending": len(set(self.pending) | set(self.deferred)), "deferred": len(self.deferred), "running": len(self.active),
                 "oldest_age_seconds": time.monotonic() - min(ages) if ages else 0,
                 "failures": self.failures,
                 "unapplied_results": len(self.unapplied),

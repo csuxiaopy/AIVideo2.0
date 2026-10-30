@@ -43,6 +43,45 @@ async def test_redis_queue_reclaims_stale_worker_messages():
     assert recovered.message_id == "42-0"
 
 
+@pytest.mark.asyncio
+async def test_queue_locks_are_isolated_by_queue_prefix():
+    calls = []
+
+    class FakeRedis:
+        async def set(self, key, value, **kwargs):
+            calls.append((key, value, kwargs))
+            return True
+
+        async def get(self, _key):
+            return None
+
+    general = AnalysisQueue("redis://unused", prefix="monitor:tasks")
+    fire = AnalysisQueue("redis://unused", prefix="monitor:fire-tasks")
+    general.redis = fire.redis = FakeRedis()
+    general.redis_available = fire.redis_available = True
+
+    assert await general.acquire_camera("camera-1")
+    assert await fire.acquire_camera("camera-1")
+    assert calls[0][0] == "monitor:tasks:camera-lock:camera-1"
+    assert calls[1][0] == "monitor:fire-tasks:camera-lock:camera-1"
+
+
+@pytest.mark.asyncio
+async def test_fallback_retry_preserves_task_identity_and_age():
+    queue = AnalysisQueue("redis://unused")
+    await queue.enqueue("camera-1", "normal")
+    original = await queue.get()
+
+    assert await queue.retry(original, delay_seconds=0)
+    await queue.ack(original)
+    retried = await queue.get()
+
+    assert retried.camera_id == original.camera_id
+    assert retried.task_id == original.task_id
+    assert retried.created_at == original.created_at
+    await queue.ack(retried)
+
+
 def test_fire_detector_rejects_hash_mismatch(tmp_path):
     model = tmp_path / "fire.pt"
     model.write_bytes(b"not-the-reviewed-model")

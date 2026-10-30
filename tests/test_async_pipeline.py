@@ -213,6 +213,44 @@ async def test_alert_and_notification_commit_together_and_dedupe(tmp_path, db):
 
 
 @pytest.mark.asyncio
+async def test_completed_alert_keeps_process_reservation(tmp_path, db):
+    runtime, post, io, _ = setup_runtime(tmp_path, db)
+    analysis = post.repository.add_analysis(
+        camera_id="a", mode="phone_use", status="confirmed", confidence=.9, severity="high"
+    )
+    await post.ingress.flush_one()
+    claim = post.store.claim(["analysis_write"])
+    post.store.complete(
+        claim["id"], claim["lease_token"],
+        lambda session, payload: post._write_transaction(session, "analysis_write", payload),
+    )
+    evidence = [{"camera_id": "a", "camera_name": "A", "jpeg": b"jpeg"}]
+    post.enqueue_alert(camera(), analysis, evidence, "reason", .9, 0)
+    key = next(iter(post.reserved_alerts))
+    await post.ingress.flush_one()
+
+    task = asyncio.create_task(post._writes())
+    try:
+        for _ in range(200):
+            if post.store.get(next(iter(post.durable_alerts), "missing")):
+                break
+            with db() as session:
+                row = session.scalar(select(models.BackgroundTask).where(
+                    models.BackgroundTask.kind == "alert_write"))
+                if row and row.status == "completed":
+                    break
+            await asyncio.sleep(.01)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert key in post.reserved_alerts
+    post.enqueue_alert(camera(), analysis, evidence, "reason", .9, 0)
+    assert not post.ingress.pending
+    await io.close()
+
+
+@pytest.mark.asyncio
 async def test_full_ingress_retains_event_and_blocks_camera(tmp_path, db):
     runtime, post, io, _ = setup_runtime(tmp_path, db)
     post.ingress.capacity = 1
@@ -238,9 +276,28 @@ async def test_restart_restores_durable_alert_reservation(tmp_path, db):
         session.get(models.BackgroundTask, alert.id).status = "failed"
 
     await post.restore_alert_reservations()
-    assert "alert:existing-event" in post.reserved_alerts
-    assert post.durable_alerts["alert:existing-event"]["status"] == "failed"
+    assert "alert:existing-event" not in post.reserved_alerts
+    assert "alert:existing-event" not in post.durable_alerts
     await io.close()
+
+
+@pytest.mark.asyncio
+async def test_maintenance_publishes_durable_health_without_worker_error(tmp_path, db):
+    runtime, post, io, _ = setup_runtime(tmp_path, db)
+    post.store.persist(Job.make("analysis_write", "analysis:pending", {"value": 1}, "a"))
+    task = asyncio.create_task(post._maintenance())
+    try:
+        for _ in range(100):
+            if post.durable_status or post.worker_errors:
+                break
+            await asyncio.sleep(.01)
+        assert "maintenance" not in post.worker_errors
+        assert post.durable_status["actionable"] == 1
+        assert post.durable_status["queues"][0]["kind"] == "analysis_write"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await io.close()
 
 
 def test_recovery_mark_stale_is_idempotent_and_keeps_audit(tmp_path, db):

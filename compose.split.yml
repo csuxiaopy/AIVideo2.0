@@ -1,0 +1,45 @@
+# docker compose -f compose.cpu.yml -f compose.gpu.production.yml -f compose.split.yml up -d
+services:
+  app:
+    stop_grace_period: 120s
+    ports: !reset []
+    environment:
+      ANALYSIS_INTERNAL_TOKEN: ${ANALYSIS_INTERNAL_TOKEN:?Set a random internal analysis token}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://172.16.166.229,http://172.16.166.229:8100,http://localhost:5173,http://127.0.0.1:5173}
+  web:
+    stop_grace_period: 30s
+    image: yolo-vlm-gpu:production
+    command: ["python", "-m", "uvicorn", "backend.web:app", "--host", "0.0.0.0", "--port", "8100", "--workers", "2"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://monitor:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/monitor
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:?Set APP_ENCRYPTION_KEY}
+      SESSION_IDLE_HOURS: ${SESSION_IDLE_HOURS:-8}
+      SECURE_COOKIES: ${SECURE_COOKIES:-false}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://172.16.166.229,http://172.16.166.229:8100,http://localhost:5173,http://127.0.0.1:5173}
+      ANALYSIS_URL: http://app:8100
+      REDIS_URL: redis://redis:6379/0
+      ANALYSIS_INTERNAL_TOKEN: ${ANALYSIS_INTERNAL_TOKEN:?Set a random internal analysis token}
+      NVIDIA_VISIBLE_DEVICES: void
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+    ports:
+      - "8100:8100"
+    volumes:
+      - evidence_data:/app/data/evidence:ro
+    security_opt:
+      - seccomp=unconfined
+    depends_on:
+      app:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health/web',timeout=5)"]
+      interval: 15s
+      timeout: 8s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+  prometheus:
+    volumes:
+      - ./deploy/prometheus.split.yml:/etc/prometheus/prometheus.yml:ro

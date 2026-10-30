@@ -11,6 +11,18 @@ services:
   postgres:
     image: ${POSTGRES_IMAGE:-docker.m.daocloud.io/library/postgres:17-alpine}
     pull_policy: missing
+    command:
+      - postgres
+      - -c
+      - shared_buffers=8GB
+      - -c
+      - effective_cache_size=40GB
+      - -c
+      - maintenance_work_mem=512MB
+      - -c
+      - max_wal_size=8GB
+      - -c
+      - checkpoint_completion_target=0.9
     environment:
       POSTGRES_USER: monitor
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}

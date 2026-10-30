@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import Date, case, cast, delete, desc, func, select, update
 from backend import models
+from backend.dashboard_cache import DashboardCache
 from backend.database import session_scope, utc_now
 
 
@@ -23,6 +24,9 @@ def from_json(value: str, fallback: Any) -> Any:
 
 
 class Repository:
+    def __init__(self):
+        self._dashboard_cache = DashboardCache()
+
     def create_captcha(self, row: models.CaptchaChallenge) -> models.CaptchaChallenge:
         now = utc_now()
         with session_scope() as session:
@@ -388,7 +392,7 @@ class Repository:
 
     def get_log(self, category: str, row_id: int):
         model = {"audit": models.AuditLog, "analyses": models.Analysis,
-                 "model-calls": models.ModelCallLog}.get(category)
+                 "model-calls": models.ModelCallLog, "model-switches": models.ModelSwitchLog}.get(category)
         if model is None:
             return None
         with session_scope() as session:
@@ -492,10 +496,30 @@ class Repository:
         with session_scope() as session:
             counts = {}
             for key, model in (("audit", models.AuditLog), ("analyses", models.Analysis),
-                               ("model_calls", models.ModelCallLog)):
+                               ("model_calls", models.ModelCallLog), ("model_switches", models.ModelSwitchLog)):
                 result = session.execute(delete(model).where(model.created_at < cutoff))
                 counts[key] = result.rowcount or 0
             return counts
+
+    def list_model_switch_logs(self, *, page: int, page_size: int,
+                              start=None, end=None, model=None, outcome=None):
+        from sqlalchemy import or_
+        filters = []
+        if start:
+            filters.append(models.ModelSwitchLog.created_at >= start)
+        if end:
+            filters.append(models.ModelSwitchLog.created_at < end)
+        if model:
+            filters.append(or_(models.ModelSwitchLog.from_model.ilike(f"%{model}%"),
+                               models.ModelSwitchLog.to_model.ilike(f"%{model}%")))
+        if outcome:
+            filters.append(models.ModelSwitchLog.outcome == outcome)
+        with session_scope() as session:
+            total = session.scalar(select(func.count()).select_from(models.ModelSwitchLog).where(*filters)) or 0
+            rows = list(session.scalars(select(models.ModelSwitchLog).where(*filters)
+                .order_by(models.ModelSwitchLog.created_at.desc(), models.ModelSwitchLog.id.desc())
+                .offset((page - 1) * page_size).limit(page_size)))
+            return rows, total
 
     def update_webhook_target(self, target_id: int, values: dict[str, Any]) -> models.WebhookTarget | None:
         with session_scope() as session:
@@ -575,6 +599,24 @@ class Repository:
                 .limit(1)
             )
 
+    @staticmethod
+    def _alert_range_filters(directory_id=None, start_date=None, end_date=None, alert_date=None):
+        if alert_date and (start_date or end_date):
+            raise ValueError("单日日期不能与日期段同时使用")
+        if start_date and end_date and start_date > end_date:
+            raise ValueError("开始日期不能晚于结束日期")
+        start_date = alert_date or start_date
+        end_date = alert_date or end_date
+        filters = []
+        if directory_id is not None:
+            filters.append(models.Camera.directory_id.is_(None) if directory_id == 0 else models.Camera.directory_id == directory_id)
+        zone = ZoneInfo("Asia/Shanghai")
+        if start_date:
+            filters.append(models.Alert.created_at >= datetime.combine(start_date, datetime.min.time(), tzinfo=zone).astimezone(timezone.utc))
+        if end_date:
+            filters.append(models.Alert.created_at < (datetime.combine(end_date, datetime.min.time(), tzinfo=zone) + timedelta(days=1)).astimezone(timezone.utc))
+        return filters
+
     def list_alerts(
         self,
         limit: int | None = 100,
@@ -583,6 +625,9 @@ class Repository:
         severity: str | None = None,
         alert_date: date | None = None,
         alert_ids: list[int] | None = None,
+        directory_id: int | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
     ):
         with session_scope() as session:
             priority = case(
@@ -602,11 +647,7 @@ class Repository:
                 stmt = stmt.where(models.Alert.mode == mode)
             if severity:
                 stmt = stmt.where(models.Alert.severity == severity)
-            if alert_date:
-                zone = ZoneInfo("Asia/Shanghai")
-                start = datetime.combine(alert_date, datetime.min.time(), tzinfo=zone).astimezone(timezone.utc)
-                end = (datetime.combine(alert_date, datetime.min.time(), tzinfo=zone) + timedelta(days=1)).astimezone(timezone.utc)
-                stmt = stmt.where(models.Alert.created_at >= start, models.Alert.created_at < end)
+            stmt = stmt.where(*self._alert_range_filters(directory_id, start_date, end_date, alert_date))
             if alert_ids is not None:
                 stmt = stmt.where(models.Alert.id.in_(alert_ids))
             rows = []
@@ -623,6 +664,9 @@ class Repository:
         mode: str | None = None,
         severity: str | None = None,
         alert_date: date | None = None,
+        directory_id: int | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
     ) -> tuple[list[models.Alert], int]:
         with session_scope() as session:
             filters = []
@@ -632,14 +676,10 @@ class Repository:
                 filters.append(models.Alert.mode == mode)
             if severity:
                 filters.append(models.Alert.severity == severity)
-            if alert_date:
-                zone = ZoneInfo("Asia/Shanghai")
-                start = datetime.combine(alert_date, datetime.min.time(), tzinfo=zone).astimezone(timezone.utc)
-                end = (datetime.combine(alert_date, datetime.min.time(), tzinfo=zone) + timedelta(days=1)).astimezone(timezone.utc)
-                filters.extend((models.Alert.created_at >= start, models.Alert.created_at < end))
+            filters.extend(self._alert_range_filters(directory_id, start_date, end_date, alert_date))
 
             total = session.scalar(
-                select(func.count()).select_from(models.Alert).where(*filters)
+                select(func.count()).select_from(models.Alert).join(models.Camera, models.Camera.id == models.Alert.camera_id).where(*filters)
             ) or 0
             priority = case(
                 (models.Alert.severity == "critical", 0),
@@ -934,70 +974,50 @@ class Repository:
 
     def dashboard(self) -> dict[str, Any]:
         today = datetime.now(timezone.utc).date()
+        return self._dashboard_cache.get(today.isoformat(), lambda: self._dashboard_uncached(today))
+
+    def _dashboard_uncached(self, today: date) -> dict[str, Any]:
         today_start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
         tomorrow_start = today_start + timedelta(days=1)
         with session_scope() as session:
-            cameras = session.scalar(select(func.count()).select_from(models.Camera)) or 0
-            online = session.scalar(select(func.count()).select_from(models.Camera).where(models.Camera.online)) or 0
-            alerts = session.scalar(
-                select(func.count()).select_from(models.Alert).where(
-                    models.Alert.created_at >= today_start, models.Alert.created_at < tomorrow_start
-                )
-            ) or 0
-            failures = session.scalar(
-                select(func.count()).select_from(models.Analysis).where(
-                    models.Analysis.error.is_not(None),
-                    models.Analysis.created_at >= today_start,
-                    models.Analysis.created_at < tomorrow_start,
-                )
-            ) or 0
-            entered = session.scalar(
-                select(func.coalesce(func.sum(models.TrafficAggregate.entered), 0)).where(
-                    models.TrafficAggregate.bucket_start >= today_start,
-                    models.TrafficAggregate.bucket_start < tomorrow_start,
-                )
-            ) or 0
-            exited = session.scalar(
-                select(func.coalesce(func.sum(models.TrafficAggregate.exited), 0)).where(
-                    models.TrafficAggregate.bucket_start >= today_start,
-                    models.TrafficAggregate.bucket_start < tomorrow_start,
-                )
-            ) or 0
-            scene_rows = session.execute(
-                select(models.Camera.scene_type, func.count()).group_by(models.Camera.scene_type)
-            ).all()
-            critical = session.scalar(
-                select(func.count()).select_from(models.Alert).where(
-                    models.Alert.severity == "critical",
-                    models.Alert.created_at >= today_start,
-                    models.Alert.created_at < tomorrow_start,
-                )
-            ) or 0
-            intrusions = session.scalar(
-                select(func.count()).select_from(models.Alert).where(
-                    models.Alert.mode == "intrusion",
-                    models.Alert.created_at >= today_start,
-                    models.Alert.created_at < tomorrow_start,
-                )
-            ) or 0
-            latest_traffic = list(
-                session.scalars(select(models.TrafficAggregate).order_by(desc(models.TrafficAggregate.bucket_start)))
-            )
-            current_people = sum(
-                row.current_count for row in {row.camera_id: row for row in reversed(latest_traffic)}.values()
-            )
+            scene_rows = session.execute(select(
+                models.Camera.scene_type, func.count(),
+                func.sum(case((models.Camera.online.is_(True), 1), else_=0)),
+            ).group_by(models.Camera.scene_type)).all()
+            cameras = sum(count for _, count, _ in scene_rows)
+            online = sum(int(count or 0) for _, _, count in scene_rows)
+            alerts, critical, intrusions = session.execute(select(
+                func.count(),
+                func.coalesce(func.sum(case((models.Alert.severity == "critical", 1), else_=0)), 0),
+                func.coalesce(func.sum(case((models.Alert.mode == "intrusion", 1), else_=0)), 0),
+            ).where(models.Alert.created_at >= today_start,
+                    models.Alert.created_at < tomorrow_start)).one()
+            failures = session.scalar(select(func.count()).select_from(models.Analysis).where(
+                models.Analysis.error.is_not(None),
+                models.Analysis.created_at >= today_start,
+                models.Analysis.created_at < tomorrow_start,
+            )) or 0
+            entered, exited = session.execute(select(
+                func.coalesce(func.sum(models.TrafficAggregate.entered), 0),
+                func.coalesce(func.sum(models.TrafficAggregate.exited), 0),
+            ).where(models.TrafficAggregate.bucket_start >= today_start,
+                    models.TrafficAggregate.bucket_start < tomorrow_start)).one()
+            # One covered reverse seek per camera. Only scalar counts cross
+            # the database boundary; no historical ORM objects are hydrated.
+            latest_count = select(models.TrafficAggregate.current_count).where(
+                models.TrafficAggregate.camera_id == models.Camera.id
+            ).order_by(desc(models.TrafficAggregate.bucket_start)).limit(1).correlate(
+                models.Camera).scalar_subquery()
+            current_people = session.scalar(select(
+                func.coalesce(func.sum(latest_count), 0)
+            ).select_from(models.Camera)) or 0
         return {
-            "cameras": cameras,
-            "online": online,
-            "offline": max(0, cameras - online),
-            "alerts_today": alerts,
-            "failures_today": failures,
-            "entered_today": int(entered),
-            "exited_today": int(exited),
+            "cameras": cameras, "online": online, "offline": max(0, cameras - online),
+            "alerts_today": int(alerts), "failures_today": int(failures),
+            "entered_today": int(entered), "exited_today": int(exited),
             "current_people": int(current_people),
-            "critical_alerts_today": int(critical),
-            "intrusions_today": int(intrusions),
-            "scene_counts": {scene or "custom": int(count) for scene, count in scene_rows},
+            "critical_alerts_today": int(critical), "intrusions_today": int(intrusions),
+            "scene_counts": {scene or "custom": int(count) for scene, count, _ in scene_rows},
         }
 
     def get_model_settings(self) -> models.ModelSettings:

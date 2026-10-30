@@ -276,6 +276,9 @@ class CameraBatchMove(BaseModel):
 class AlertExportRequest(BaseModel):
     alert_ids: list[int] | None = Field(default=None, min_length=1, max_length=500)
     date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    directory_id: int | None = Field(default=None, ge=0)
+    start_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     mode: str | None = None
     severity: str | None = None
 
@@ -298,6 +301,8 @@ class ModelSettingsUpdate(BaseModel):
     base_url: str = ""
     api_key: str = Field(default="", max_length=1000)
     economy_model: str = Field(min_length=1, max_length=200)
+
+    auto_failover_enabled: bool | None = None
 
     @field_validator("base_url")
     @classmethod

@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import time
+from functools import wraps
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,6 +13,8 @@ import httpx
 
 from backend.schemas import BehaviorVLMResult, Mode, OffDutyVLMResult, VLMResult
 from backend.repository import as_json
+from backend.background import ReviewDeferred
+from backend.model_switch_store import safe_error
 
 
 SYSTEM_PROMPT = """你是监控视频行为检测器，只判断请求中指定的行为。每次输入一张当前监控图片。
@@ -54,6 +57,32 @@ class VLMError(RuntimeError):
         self.request_id = request_id
 
 
+class VLMDeferred(VLMError, ReviewDeferred):
+    pass
+
+
+def retain_on_outage(method):
+    @wraps(method)
+    async def call(self, *args, **kwargs):
+        import asyncio
+        manager = getattr(self, "failover", None)
+        request_model = self.economy_model
+        if manager and manager.config.enabled and manager.deferred():
+            raise VLMDeferred("大模型故障退避或探测中，保留原始复核图片等待恢复")
+        try:
+            return await method(self, *args, **kwargs)
+        except asyncio.CancelledError:
+            if manager and not manager.closed and manager.config.enabled:
+                manager.observe({"model": request_model, "outcome": "error", "error": "大模型复核请求超时"})
+                raise VLMDeferred("大模型复核超时，保留原图等待重试") from None
+            raise
+        except VLMError as exc:
+            if manager and manager.config.enabled:
+                raise VLMDeferred(str(exc), exc.request_id) from exc
+            raise
+    return call
+
+
 def extract_json(text: str) -> dict[str, Any]:
     value = text.strip()
     value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.IGNORECASE)
@@ -76,6 +105,16 @@ class VisionModelClient:
         self.client = httpx.AsyncClient(timeout=90)
 
     def _log_call(self, **values: Any) -> None:
+        secret = getattr(self, "api_key", "")
+        for key in ("error", "raw_response"):
+            if values.get(key):
+                # Preserve full successful JSON while redacting actual secrets.
+                values[key] = values[key].replace(secret, "[REDACTED]") if secret else values[key]
+                if key == "error":
+                    values[key] = safe_error(values[key], secret)
+        manager = getattr(self, "failover", None)
+        if manager:
+            manager.observe(values)
         writer = getattr(self, "log_writer", None)
         if not writer:
             return
@@ -87,6 +126,7 @@ class VisionModelClient:
     async def close(self) -> None:
         await self.client.aclose()
 
+    @retain_on_outage
     async def analyze_behaviors(
         self, modes: set[Mode], frame: bytes,
         camera_id: str | None = None, camera_name: str = "",
@@ -110,7 +150,7 @@ class VisionModelClient:
                 {"role": "user", "content": content},
             ],
             "temperature": 0,
-            "max_completion_tokens": 500,
+            "max_completion_tokens": 2048,
             "response_format": {"type": "json_object"},
         }
         started = time.perf_counter()
@@ -204,6 +244,7 @@ class VisionModelClient:
             model=model,
         )
 
+    @retain_on_outage
     async def analyze_off_duty(
         self, frame: bytes, camera_id: str | None = None, camera_name: str = "",
     ) -> VLMResponse:
@@ -225,7 +266,7 @@ class VisionModelClient:
                 ]},
             ],
             "temperature": 0,
-            "max_completion_tokens": 300,
+            "max_completion_tokens": 2048,
             "response_format": {"type": "json_object"},
         }
         started = time.perf_counter()
@@ -309,11 +350,17 @@ class VisionModelClient:
         )
 
     async def test(self) -> dict[str, Any]:
-        started = time.perf_counter()
-        response = await self.client.get(
-            f"{self.base_url}/models", headers={"Authorization": f"Bearer {self.api_key}"}
-        )
-        if response.is_error:
-            raise VLMError(f"模型连通性测试失败：HTTP {response.status_code}")
-        return {"ok": True, "latency_ms": int((time.perf_counter() - started) * 1000)}
+        from backend.model_probe import validate_model
+        clone = VisionModelClient(self.base_url, self.api_key, self.economy_model)
+        await clone.client.aclose()
+        clone.client = httpx.AsyncClient(timeout=30, trust_env=False, follow_redirects=False)
+        try:
+            import asyncio
+            result = await asyncio.wait_for(validate_model(clone), 90)
+            manager = getattr(self, "failover", None)
+            if manager:
+                manager.observe({"model": result["model"], "outcome": "success"})
+            return result
+        finally:
+            await clone.close()
 

@@ -15,3 +15,14 @@ data/*
 *.engine
 *.onnx
 /yolo26n.pt
+
+# Local operations and deployment artifacts
+.deploy-backup-*/
+.off-duty-fix-*/
+.workbuddy/
+.pytest-report/
+*.log
+*.swp
+*.bak-*
+*.before-*
+merged.yml

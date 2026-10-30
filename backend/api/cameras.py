@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from starlette.concurrency import run_in_threadpool
+
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -140,18 +142,22 @@ def _batch_default_camera(camera_id: str, name: str, substream_url: str) -> Came
 
 @router.get("/cameras", dependencies=[Depends(current_user)])
 async def list_cameras() -> list[dict[str, Any]]:
-    return [_public(camera) for camera in context.repository.list_cameras()]
+    def _work():
+        return [_public(camera) for camera in context.repository.list_cameras()]
+    return await run_in_threadpool(_work)
 
 
 @router.get("/camera-directories", dependencies=[Depends(current_user)])
 async def list_camera_directories() -> list[dict[str, Any]]:
-    return context.repository.list_camera_directories()
+    def _work():
+        return context.repository.list_camera_directories()
+    return await run_in_threadpool(_work)
 
 
 @router.post("/camera-directories", status_code=status.HTTP_201_CREATED, dependencies=[Depends(admin_user)])
 async def create_camera_directory(payload: CameraDirectoryWrite) -> dict[str, Any]:
     try:
-        row = context.repository.create_camera_directory(payload.name)
+        row = await run_in_threadpool(context.repository.create_camera_directory, payload.name)
     except IntegrityError as exc:
         raise HTTPException(status_code=409, detail="目录名称已存在") from exc
     if context.runtime and getattr(context.runtime, "async_pipeline", None):
@@ -162,12 +168,12 @@ async def create_camera_directory(payload: CameraDirectoryWrite) -> dict[str, An
 @router.patch("/camera-directories/{directory_id}", dependencies=[Depends(admin_user)])
 async def update_camera_directory(directory_id: int, payload: CameraDirectoryWrite) -> dict[str, Any]:
     try:
-        row = context.repository.update_camera_directory(directory_id, payload.name)
+        row = await run_in_threadpool(context.repository.update_camera_directory, directory_id, payload.name)
     except IntegrityError as exc:
         raise HTTPException(status_code=409, detail="目录名称已存在") from exc
     if not row:
         raise HTTPException(status_code=404, detail="目录不存在")
-    count = next((item["camera_count"] for item in context.repository.list_camera_directories() if item["id"] == row.id), 0)
+    count = next((item["camera_count"] for item in await run_in_threadpool(context.repository.list_camera_directories) if item["id"] == row.id), 0)
     if context.runtime and getattr(context.runtime, "async_pipeline", None):
         await context.runtime.sync_cameras()
     return {"id": row.id, "name": row.name, "camera_count": count}
@@ -175,7 +181,7 @@ async def update_camera_directory(directory_id: int, payload: CameraDirectoryWri
 
 @router.delete("/camera-directories/{directory_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(admin_user)])
 async def delete_camera_directory(directory_id: int) -> Response:
-    if not context.repository.delete_camera_directory(directory_id):
+    if not await run_in_threadpool(context.repository.delete_camera_directory, directory_id):
         raise HTTPException(status_code=404, detail="目录不存在")
     if context.runtime and getattr(context.runtime, "async_pipeline", None):
         await context.runtime.sync_cameras()
@@ -184,22 +190,26 @@ async def delete_camera_directory(directory_id: int) -> Response:
 
 @router.get("/scene-templates", dependencies=[Depends(admin_user)])
 async def scene_templates() -> list[dict[str, Any]]:
-    return scene_templates_public()
+    def _work():
+        return scene_templates_public()
+    return await run_in_threadpool(_work)
 
 
 @router.get("/capabilities", dependencies=[Depends(admin_user)])
 async def capabilities() -> list[dict[str, Any]]:
-    return capabilities_public()
+    def _work():
+        return capabilities_public()
+    return await run_in_threadpool(_work)
 
 
 @router.post("/cameras", status_code=status.HTTP_201_CREATED, dependencies=[Depends(admin_user)])
 async def create_camera(payload: CameraCreate) -> dict[str, Any]:
-    if context.repository.get_camera(payload.id):
+    if await run_in_threadpool(context.repository.get_camera, payload.id):
         raise HTTPException(status_code=409, detail="摄像头 ID 已存在")
-    if payload.directory_id is not None and not context.repository.get_camera_directory(payload.directory_id):
+    if payload.directory_id is not None and not await run_in_threadpool(context.repository.get_camera_directory, payload.directory_id):
         raise HTTPException(status_code=404, detail="目录不存在")
     camera = _camera_model(payload)
-    context.repository.create_camera(camera)
+    await run_in_threadpool(context.repository.create_camera, camera)
     await context.require_runtime().sync_cameras()
     return _public(camera)
 
@@ -226,7 +236,7 @@ async def create_cameras_batch(payload: CameraBatchCreate) -> dict[str, Any]:
                 messages.append(f"{field_name}：{message}")
             errors.append({"row": row, "id": camera_id, "message": "；".join(messages)})
 
-    existing = context.repository.existing_camera_ids([camera.id for camera in validated])
+    existing = await run_in_threadpool(context.repository.existing_camera_ids, [camera.id for camera in validated])
     for row, item in enumerate(payload.items, start=1):
         camera_id = item.camera_id.strip()
         if camera_id in existing:
@@ -236,7 +246,7 @@ async def create_cameras_batch(payload: CameraBatchCreate) -> dict[str, Any]:
 
     cameras = [_camera_model(camera) for camera in validated]
     try:
-        context.repository.create_cameras(cameras)
+        await run_in_threadpool(context.repository.create_cameras, cameras)
     except IntegrityError as exc:
         raise HTTPException(
             status_code=409,
@@ -250,7 +260,7 @@ async def create_cameras_batch(payload: CameraBatchCreate) -> dict[str, Any]:
 async def update_camera_substreams(payload: CameraBatchCreate) -> dict[str, Any]:
     ids = [item.camera_id.strip() for item in payload.items]
     duplicates = sorted({camera_id for camera_id in ids if ids.count(camera_id) > 1})
-    existing = context.repository.existing_camera_ids(ids)
+    existing = await run_in_threadpool(context.repository.existing_camera_ids, ids)
     missing = sorted(set(ids) - existing)
     if duplicates or missing:
         raise HTTPException(
@@ -261,14 +271,14 @@ async def update_camera_substreams(payload: CameraBatchCreate) -> dict[str, Any]
         item.camera_id.strip(): context.cipher.encrypt(item.substream_url.strip())
         for item in payload.items
     }
-    updated = context.repository.update_camera_substreams(encrypted)
+    updated = await run_in_threadpool(context.repository.update_camera_substreams, encrypted)
     await context.require_runtime().sync_cameras()
     return {"success": True, "updated": updated, "missing_ids": []}
 
 
 @router.post("/cameras/batch-delete", dependencies=[Depends(admin_user)])
 async def delete_cameras_batch(payload: CameraBatchDelete) -> dict[str, Any]:
-    deleted_ids = context.repository.delete_cameras(payload.ids)
+    deleted_ids = await run_in_threadpool(context.repository.delete_cameras, payload.ids)
     for camera_id in deleted_ids:
         await _remove_camera_runtime(camera_id)
     deleted_set = set(deleted_ids)
@@ -278,10 +288,10 @@ async def delete_cameras_batch(payload: CameraBatchDelete) -> dict[str, Any]:
 
 @router.post("/cameras/batch-move", dependencies=[Depends(admin_user)])
 async def move_cameras_batch(payload: CameraBatchMove) -> dict[str, Any]:
-    if payload.directory_id is not None and not context.repository.get_camera_directory(payload.directory_id):
+    if payload.directory_id is not None and not await run_in_threadpool(context.repository.get_camera_directory, payload.directory_id):
         raise HTTPException(status_code=404, detail="目录不存在")
-    existing = context.repository.existing_camera_ids(payload.ids)
-    moved = context.repository.move_cameras(list(existing), payload.directory_id)
+    existing = await run_in_threadpool(context.repository.existing_camera_ids, payload.ids)
+    moved = await run_in_threadpool(context.repository.move_cameras, list(existing), payload.directory_id)
     if context.runtime and getattr(context.runtime, "async_pipeline", None):
         await context.runtime.sync_cameras()
     return {"moved": moved, "missing_ids": [camera_id for camera_id in payload.ids if camera_id not in existing]}
@@ -291,11 +301,11 @@ async def move_cameras_batch(payload: CameraBatchMove) -> dict[str, Any]:
 async def configure_off_duty_schedules(payload: ScheduleSpec | None = None) -> dict[str, Any]:
     camera_ids = [
         camera.id
-        for camera in context.repository.list_cameras()
+        for camera in await run_in_threadpool(context.repository.list_cameras)
         if Mode.OFF_DUTY.value in from_json(camera.modes_json, [])
     ]
     schedule = payload.model_dump(mode="json") if payload is not None else OFF_DUTY_DEFAULT_SCHEDULE
-    updated = context.repository.update_cameras_schedule(camera_ids, as_json(schedule))
+    updated = await run_in_threadpool(context.repository.update_cameras_schedule, camera_ids, as_json(schedule))
     runtime = context.require_runtime()
     for camera_id in camera_ids:
         runtime.rules.remove(camera_id)
@@ -305,17 +315,19 @@ async def configure_off_duty_schedules(payload: ScheduleSpec | None = None) -> d
 
 @router.get("/cameras/{camera_id}", dependencies=[Depends(current_user)])
 async def get_camera(camera_id: str) -> dict[str, Any]:
-    return _public(_camera_or_404(camera_id))
+    def _work():
+        return _public(_camera_or_404(camera_id))
+    return await run_in_threadpool(_work)
 
 
 @router.patch("/cameras/{camera_id}", dependencies=[Depends(admin_user)])
 async def patch_camera(camera_id: str, payload: CameraPatch) -> dict[str, Any]:
-    camera = _camera_or_404(camera_id)
+    camera = await run_in_threadpool(_camera_or_404, camera_id)
     effective = _effective_patch(camera, payload)
     new_camera_id = effective.id
-    if new_camera_id != camera_id and context.repository.get_camera(new_camera_id):
+    if new_camera_id != camera_id and await run_in_threadpool(context.repository.get_camera, new_camera_id):
         raise HTTPException(status_code=409, detail="摄像头 ID 已存在")
-    if "directory_id" in payload.model_fields_set and payload.directory_id is not None and not context.repository.get_camera_directory(payload.directory_id):
+    if "directory_id" in payload.model_fields_set and payload.directory_id is not None and not await run_in_threadpool(context.repository.get_camera_directory, payload.directory_id):
         raise HTTPException(status_code=404, detail="目录不存在")
     values = payload.model_dump(
         exclude_none=True,
@@ -350,9 +362,9 @@ async def patch_camera(camera_id: str, payload: CameraPatch) -> dict[str, Any]:
         runtime.next_fire_run.pop(camera_id, None)
         runtime.queued.discard(camera_id)
         runtime.fire_queued.discard(camera_id)
-        updated = context.repository.rename_and_update_camera(camera_id, new_camera_id, values)
+        updated = await run_in_threadpool(context.repository.rename_and_update_camera, camera_id, new_camera_id, values)
     else:
-        updated = context.repository.update_camera(camera_id, values)
+        updated = await run_in_threadpool(context.repository.update_camera, camera_id, values)
         if payload.geometry is not None or payload.options is not None or payload.schedule is not None:
             runtime = context.require_runtime()
             runtime.rules.remove(camera_id)
@@ -363,7 +375,7 @@ async def patch_camera(camera_id: str, payload: CameraPatch) -> dict[str, Any]:
 
 @router.delete("/cameras/{camera_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(admin_user)])
 async def delete_camera(camera_id: str) -> Response:
-    if not context.repository.delete_camera(camera_id):
+    if not await run_in_threadpool(context.repository.delete_camera, camera_id):
         raise HTTPException(status_code=404, detail="摄像头不存在")
     await _remove_camera_runtime(camera_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -371,10 +383,10 @@ async def delete_camera(camera_id: str) -> Response:
 
 @router.put("/cameras/{camera_id}/modes", dependencies=[Depends(admin_user)])
 async def update_modes(camera_id: str, payload: ModesUpdate) -> dict[str, Any]:
-    camera = _camera_or_404(camera_id)
+    camera = await run_in_threadpool(_camera_or_404, camera_id)
     geometry = GeometrySpec.model_validate(from_json(camera.geometry_json, {}))
     _validate_combination(camera, payload.modes, geometry)
-    updated = context.repository.update_camera(
+    updated = await run_in_threadpool(context.repository.update_camera, 
         camera_id, {"modes_json": as_json([mode.value for mode in payload.modes])}
     )
     if context.runtime and getattr(context.runtime, "async_pipeline", None):
@@ -384,10 +396,10 @@ async def update_modes(camera_id: str, payload: ModesUpdate) -> dict[str, Any]:
 
 @router.put("/cameras/{camera_id}/geometry", dependencies=[Depends(admin_user)])
 async def update_geometry(camera_id: str, payload: GeometrySpec) -> dict[str, Any]:
-    camera = _camera_or_404(camera_id)
+    camera = await run_in_threadpool(_camera_or_404, camera_id)
     modes = [Mode(value) for value in from_json(camera.modes_json, [])]
     _validate_combination(camera, modes, payload)
-    updated = context.repository.update_camera(camera_id, {"geometry_json": payload.model_dump_json()})
+    updated = await run_in_threadpool(context.repository.update_camera, camera_id, {"geometry_json": payload.model_dump_json()})
     if context.runtime and getattr(context.runtime, "async_pipeline", None):
         context.runtime.rules.remove(camera_id)
         await context.runtime.sync_cameras()
@@ -396,8 +408,8 @@ async def update_geometry(camera_id: str, payload: GeometrySpec) -> dict[str, An
 
 @router.put("/cameras/{camera_id}/schedule", dependencies=[Depends(admin_user)])
 async def update_schedule(camera_id: str, payload: ScheduleSpec) -> dict[str, Any]:
-    _camera_or_404(camera_id)
-    updated = context.repository.update_camera(
+    await run_in_threadpool(_camera_or_404, camera_id)
+    updated = await run_in_threadpool(context.repository.update_camera, 
         camera_id, {"schedule_json": payload.model_dump_json()}
     )
     context.require_runtime().rules.remove(camera_id)
@@ -450,7 +462,7 @@ async def analyze_camera(camera_id: str) -> dict[str, Any]:
 
 @router.post("/cameras/{camera_id}/preview/start", dependencies=[Depends(admin_user)])
 async def start_preview(camera_id: str) -> dict[str, object]:
-    _camera_or_404(camera_id)
+    await run_in_threadpool(_camera_or_404, camera_id)
     try:
         return await context.require_runtime().media.start_preview(camera_id)
     except PreviewLimitError as exc:
@@ -461,7 +473,7 @@ async def start_preview(camera_id: str) -> dict[str, object]:
 
 @router.post("/cameras/{camera_id}/preview/heartbeat", dependencies=[Depends(admin_user)])
 async def heartbeat_preview(camera_id: str, payload: PreviewSessionRequest) -> dict[str, bool]:
-    _camera_or_404(camera_id)
+    await run_in_threadpool(_camera_or_404, camera_id)
     media = context.require_runtime().media
     active = media.session_camera.get(payload.session_id) == camera_id
     active = active and await media.heartbeat_preview(payload.session_id)
@@ -472,7 +484,7 @@ async def heartbeat_preview(camera_id: str, payload: PreviewSessionRequest) -> d
 
 @router.post("/cameras/{camera_id}/preview/stop", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(admin_user)])
 async def stop_preview(camera_id: str, payload: PreviewSessionRequest) -> Response:
-    _camera_or_404(camera_id)
+    await run_in_threadpool(_camera_or_404, camera_id)
     media = context.require_runtime().media
     if media.session_camera.get(payload.session_id) == camera_id:
         await media.stop_preview(payload.session_id)
@@ -481,7 +493,7 @@ async def stop_preview(camera_id: str, payload: PreviewSessionRequest) -> Respon
 
 @router.get("/cameras/{camera_id}/preview", dependencies=[Depends(admin_user)])
 async def preview(camera_id: str, session_id: str = Query(min_length=16, max_length=100)) -> StreamingResponse:
-    _camera_or_404(camera_id)
+    await run_in_threadpool(_camera_or_404, camera_id)
     runtime = context.require_runtime()
     if runtime.media.session_camera.get(session_id) != camera_id:
         raise HTTPException(status_code=404, detail="实时预览会话不存在或已过期")
@@ -496,8 +508,10 @@ async def preview(camera_id: str, session_id: str = Query(min_length=16, max_len
 
 @router.get("/cameras/{camera_id}/snapshot", dependencies=[Depends(current_user)])
 async def snapshot(camera_id: str) -> Response:
-    _camera_or_404(camera_id)
-    jpeg = context.require_runtime().media.preview_jpeg(camera_id)
-    if not jpeg:
-        raise HTTPException(status_code=503, detail="尚无可用画面")
-    return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+    def _work():
+        _camera_or_404(camera_id)
+        jpeg = context.require_runtime().media.preview_jpeg(camera_id)
+        if not jpeg:
+            raise HTTPException(status_code=503, detail="尚无可用画面")
+        return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+    return await run_in_threadpool(_work)

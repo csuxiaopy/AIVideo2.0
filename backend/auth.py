@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from starlette.concurrency import run_in_threadpool
+
 from datetime import timedelta, timezone
 from typing import Annotated
 
@@ -46,19 +48,21 @@ async def current_user(
     monitor_session: Annotated[str | None, Cookie()] = None,
     csrf: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
 ) -> models.User:
-    found = resolve_session(monitor_session)
-    if not found:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登入")
-    session, user = found
-    if request.method not in SAFE_METHODS and csrf != session.csrf_token:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CSRF 校验失败")
-    response.set_cookie(
-        SESSION_COOKIE, monitor_session, httponly=True, samesite="lax",
-        secure=context.settings.secure_cookies,
-        max_age=context.settings.session_idle_hours * 3600, path="/",
-    )
-    request.state.user = user
-    return user
+    def _work():
+        found = resolve_session(monitor_session)
+        if not found:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登入")
+        session, user = found
+        if request.method not in SAFE_METHODS and csrf != session.csrf_token:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CSRF 校验失败")
+        response.set_cookie(
+            SESSION_COOKIE, monitor_session, httponly=True, samesite="lax",
+            secure=context.settings.secure_cookies,
+            max_age=context.settings.session_idle_hours * 3600, path="/",
+        )
+        request.state.user = user
+        return user
+    return await run_in_threadpool(_work)
 
 
 async def admin_user(user: Annotated[models.User, Depends(current_user)]) -> models.User:

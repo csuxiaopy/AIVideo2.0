@@ -34,5 +34,8 @@ models/
 docs/
 deploy/
 scripts/
+!scripts/
+scripts/*
+!scripts/recover-background-tasks.py
 frontend/*.md
 *.md

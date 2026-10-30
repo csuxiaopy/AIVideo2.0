@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.database import Base, utc_now
@@ -12,6 +12,9 @@ class BackgroundTask(Base):
     """Durable outbox. Payloads contain JSON values/references, never sessions."""
 
     __tablename__ = "background_tasks"
+    __table_args__ = (
+        Index("ix_background_tasks_status_updated_id", "status", "updated_at", "id"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     idempotency_key: Mapped[str] = mapped_column(String(240), unique=True, nullable=False)
@@ -163,6 +166,7 @@ class ModelSettings(Base):
     base_url: Mapped[str] = mapped_column(Text, default="")
     api_key_encrypted: Mapped[str] = mapped_column(Text, default="")
     economy_model: Mapped[str] = mapped_column(String(200), default="qwen3.7-flash")
+    auto_failover_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
@@ -295,6 +299,44 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
+
+
+class BackgroundTaskCompletion(Base):
+    __tablename__ = "background_task_completions"
+
+    kind: Mapped[str] = mapped_column(String(40), primary_key=True)
+    last_completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ModelSwitchLog(Base):
+    __tablename__ = "model_switch_logs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trigger: Mapped[str] = mapped_column(String(20), default="automatic", nullable=False)
+    base_url: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    from_model: Mapped[str] = mapped_column(String(200), nullable=False)
+    to_model: Mapped[str | None] = mapped_column(String(200))
+    reason_code: Mapped[str] = mapped_column(String(60), default="", nullable=False)
+    reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    outcome: Mapped[str] = mapped_column(String(20), default="running", nullable=False, index=True)
+    candidates_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    attempts_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    actor_user_id: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ModelFailoverState(Base):
+    __tablename__ = "model_failover_state"
+    config_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    failure_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reason_code: Mapped[str] = mapped_column(String(60), default="", nullable=False)
+    reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_candidates_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
 
 
 class ModelCallLog(Base):

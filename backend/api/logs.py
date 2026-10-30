@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from starlette.concurrency import run_in_threadpool
+
 import csv
 import io
 import json
@@ -53,6 +55,15 @@ def model_call_public(row, detail: bool = False) -> dict[str, Any]:
     return result
 
 
+def model_switch_public(row, detail: bool = False) -> dict[str, Any]:
+    result = {key: getattr(row, key) for key in (
+        "id", "trigger", "base_url", "from_model", "to_model", "reason_code", "reason",
+        "http_status", "outcome", "created_at", "completed_at", "actor_user_id")}
+    if detail:
+        result.update(candidates=from_json(row.candidates_json, []), attempts=from_json(row.attempts_json, []))
+    return result
+
+
 def _page(items: list[Any], total: int, page: int, page_size: int, presenter) -> dict[str, Any]:
     return {"items": [presenter(row) for row in items], "total": total,
             "page": page, "page_size": page_size}
@@ -64,11 +75,13 @@ async def audit_logs(
     start: datetime | None = None, end: datetime | None = None,
     username: str | None = None, action: str | None = None, outcome: str | None = None,
 ) -> dict[str, Any]:
-    rows, total = context.repository.list_audit_logs(
-        page=page, page_size=page_size, start=_aware(start), end=_aware(end),
-        username=username, action=action, outcome=outcome,
-    )
-    return _page(rows, total, page, page_size, audit_public)
+    def _work():
+        rows, total = context.repository.list_audit_logs(
+            page=page, page_size=page_size, start=_aware(start), end=_aware(end),
+            username=username, action=action, outcome=outcome,
+        )
+        return _page(rows, total, page, page_size, audit_public)
+    return await run_in_threadpool(_work)
 
 
 @router.get("/analyses")
@@ -78,12 +91,14 @@ async def analysis_logs(
     camera_name: str | None = None, mode: str | None = None, status: str | None = None,
     occupancy_status: str | None = None, off_duty_state: str | None = None,
 ) -> dict[str, Any]:
-    rows, total = context.repository.list_analysis_logs(
-        page=page, page_size=page_size, start=_aware(start), end=_aware(end),
-        camera_name=camera_name, mode=mode, status=status,
-        occupancy_status=occupancy_status, off_duty_state=off_duty_state,
-    )
-    return _page(rows, total, page, page_size, analysis_public)
+    def _work():
+        rows, total = context.repository.list_analysis_logs(
+            page=page, page_size=page_size, start=_aware(start), end=_aware(end),
+            camera_name=camera_name, mode=mode, status=status,
+            occupancy_status=occupancy_status, off_duty_state=off_duty_state,
+        )
+        return _page(rows, total, page, page_size, analysis_public)
+    return await run_in_threadpool(_work)
 
 
 @router.get("/model-calls")
@@ -93,25 +108,44 @@ async def model_call_logs(
     camera_id: str | None = None, model: str | None = None,
     stage: str | None = None, outcome: str | None = None,
 ) -> dict[str, Any]:
-    rows, total = context.repository.list_model_call_logs(
-        page=page, page_size=page_size, start=_aware(start), end=_aware(end),
-        camera_id=camera_id, model=model, stage=stage, outcome=outcome,
-    )
-    return _page(rows, total, page, page_size, model_call_public)
+    def _work():
+        rows, total = context.repository.list_model_call_logs(
+            page=page, page_size=page_size, start=_aware(start), end=_aware(end),
+            camera_id=camera_id, model=model, stage=stage, outcome=outcome,
+        )
+        return _page(rows, total, page, page_size, model_call_public)
+    return await run_in_threadpool(_work)
+
+
+@router.get("/model-switches")
+async def model_switch_logs(
+    _: AdminUser, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
+    start: datetime | None = None, end: datetime | None = None,
+    model: str | None = None, outcome: str | None = None,
+) -> dict[str, Any]:
+    def work():
+        rows, total = context.repository.list_model_switch_logs(page=page, page_size=page_size,
+            start=_aware(start), end=_aware(end), model=model, outcome=outcome)
+        return _page(rows, total, page, page_size, model_switch_public)
+    return await run_in_threadpool(work)
 
 
 @router.get("/{category}/{row_id}")
 async def log_detail(category: str, row_id: int, _: AdminUser) -> dict[str, Any]:
-    row = context.repository.get_log(category, row_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="日志不存在")
-    if category == "audit":
-        return audit_public(row, True)
-    if category == "analyses":
-        return analysis_public(row)
-    if category == "model-calls":
-        return model_call_public(row, True)
-    raise HTTPException(status_code=404, detail="日志分类不存在")
+    def _work():
+        row = context.repository.get_log(category, row_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="日志不存在")
+        if category == "audit":
+            return audit_public(row, True)
+        if category == "analyses":
+            return analysis_public(row)
+        if category == "model-calls":
+            return model_call_public(row, True)
+        if category == "model-switches":
+            return model_switch_public(row, True)
+        raise HTTPException(status_code=404, detail="日志分类不存在")
+    return await run_in_threadpool(_work)
 
 
 def _export_rows(category: str, filters: dict[str, Any]):
@@ -140,6 +174,9 @@ def _export_rows(category: str, filters: dict[str, Any]):
         return all_pages(context.repository.list_model_call_logs,
                          camera_id=filters.get("camera_id"), model=filters.get("model"),
                          stage=filters.get("stage"), outcome=filters.get("outcome")), model_call_public
+    if category == "model-switches":
+        return all_pages(context.repository.list_model_switch_logs,
+                         model=filters.get("model"), outcome=filters.get("outcome")), model_switch_public
     raise HTTPException(status_code=404, detail="日志分类不存在")
 
 
@@ -152,22 +189,24 @@ def _csv_cell(value: Any) -> Any:
 
 @router.post("/{category}/export")
 async def export_logs(category: str, filters: dict[str, Any], _: AdminUser) -> StreamingResponse:
-    for key in ("start", "end"):
-        if isinstance(filters.get(key), str) and filters[key]:
-            try:
-                filters[key] = datetime.fromisoformat(filters[key].replace("Z", "+00:00"))
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=f"{key} 时间格式错误") from exc
-    rows, presenter = _export_rows(category, filters)
-    rendered = [presenter(row, True) if category in {"audit", "model-calls"} else presenter(row)
-                for row in rows]
-    output = io.StringIO()
-    if rendered:
-        writer = csv.DictWriter(output, fieldnames=list(rendered[0]), extrasaction="ignore")
-        writer.writeheader()
-        for item in rendered:
-            writer.writerow({key: _csv_cell(value) for key, value in item.items()})
-    data = ("\ufeff" + output.getvalue()).encode("utf-8")
-    return StreamingResponse(iter([data]), media_type="text/csv; charset=utf-8", headers={
-        "Content-Disposition": f'attachment; filename="{category}-logs.csv"'
-    })
+    def _work():
+        for key in ("start", "end"):
+            if isinstance(filters.get(key), str) and filters[key]:
+                try:
+                    filters[key] = datetime.fromisoformat(filters[key].replace("Z", "+00:00"))
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=f"{key} 时间格式错误") from exc
+        rows, presenter = _export_rows(category, filters)
+        rendered = [presenter(row, True) if category in {"audit", "model-calls", "model-switches"} else presenter(row)
+                    for row in rows]
+        output = io.StringIO()
+        if rendered:
+            writer = csv.DictWriter(output, fieldnames=list(rendered[0]), extrasaction="ignore")
+            writer.writeheader()
+            for item in rendered:
+                writer.writerow({key: _csv_cell(value) for key, value in item.items()})
+        data = ("\ufeff" + output.getvalue()).encode("utf-8")
+        return StreamingResponse(iter([data]), media_type="text/csv; charset=utf-8", headers={
+            "Content-Disposition": f'attachment; filename="{category}-logs.csv"'
+        })
+    return await run_in_threadpool(_work)

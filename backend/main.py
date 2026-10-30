@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Response
@@ -18,7 +19,8 @@ from backend.api.settings import router as settings_router
 from backend.database import bootstrap_admin, upgrade_schema
 from backend.auth import current_user
 from backend.audit import audit_http_request
-from backend.pipeline import MonitoringRuntime
+from backend.analysis_owner import AnalysisBoundary, AnalysisOwner
+from starlette.concurrency import run_in_threadpool
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -26,15 +28,24 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    upgrade_schema()
-    bootstrap_admin()
-    context.runtime = MonitoringRuntime(context.settings, context.repository, context.cipher)
-    await context.runtime.start()
+    from backend.pipeline import MonitoringRuntime
+    owner = AnalysisOwner() if os.environ.get("ANALYSIS_INTERNAL_TOKEN") else None
+    if owner:
+        await run_in_threadpool(owner.acquire)
     try:
+        await run_in_threadpool(upgrade_schema)
+        await run_in_threadpool(bootstrap_admin)
+        context.runtime = MonitoringRuntime(context.settings, context.repository, context.cipher)
+        await context.runtime.start()
         yield
     finally:
-        await context.runtime.close()
-        context.runtime = None
+        try:
+            if context.runtime is not None:
+                await context.runtime.close()
+                context.runtime = None
+        finally:
+            if owner:
+                await run_in_threadpool(owner.release)
 
 
 def create_app() -> FastAPI:
@@ -51,6 +62,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.middleware("http")(audit_http_request)
+    app.add_middleware(AnalysisBoundary)
     app.include_router(auth_router)
     app.include_router(cameras_router)
     app.include_router(monitoring_router)

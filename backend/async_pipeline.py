@@ -26,6 +26,7 @@ from backend.repository import from_json
 from backend.schemas import CameraOptions, Mode, ScheduleSpec
 from backend.rules import is_scheduled
 from backend.task_store import TaskStore
+from backend.task_stats import CompletionStats
 
 logger = logging.getLogger(__name__)
 REVIEW: ContextVar[ReviewRequest | None] = ContextVar("monitor_review", default=None)
@@ -138,6 +139,7 @@ class AsyncPipeline:
         self.flow_pending = {}
         self.retained: dict[str, Job] = {}
         self.reserved_alerts = set()
+        self.alert_retry_after = {}
         self.review_evidence: dict[str, bytes] = {}
         self.review_last = {}
         self.review_applied = {}
@@ -146,6 +148,9 @@ class AsyncPipeline:
         self.failed_alert_cameras = set()
         self.global_write_failure = False
         self.durable_status = {}
+        self.completion_stats = CompletionStats(sessions=session_scope)
+        self.cleanup_status = {"last_run_at": None, "last_deleted": 0, "total_deleted": 0}
+        self._next_cleanup_at = 0.0
         self.durable_alerts = {}
         self.worker_errors = {}
         self.tasks = []
@@ -255,6 +260,7 @@ class AsyncPipeline:
     def status(self):
         return {"enabled": True, "config_version": self.version, "writes": self.ingress.status(),
                 "retained": len(self.retained), "durable": self.durable_status,
+                "cleanup": self.cleanup_status,
                 "reviews": self.reviews.status(), "stale_results": self.stale_results,
                 "review_last_result": self.review_last, "worker_errors": dict(self.worker_errors),
                 "blocked_cameras": sorted(self.failed_cameras | {j.camera_id for j in self.retained.values() if j.camera_id}),
@@ -270,6 +276,22 @@ class AsyncPipeline:
                 self._admit_retained()
                 if not self.retained and len(self.ingress.pending) < self.ingress.capacity:
                     self._flush_flow()
+                monotonic_now = time.monotonic()
+                if monotonic_now >= self._next_cleanup_at:
+                    now = utc_now()
+                    deleted = await self.io.run(
+                        self.store.prune_terminal,
+                        now - timedelta(days=self.runtime.settings.background_completed_retention_days),
+                        now - timedelta(days=self.runtime.settings.background_failed_retention_days),
+                        self.runtime.settings.background_cleanup_batch_size,
+                    )
+                    self.cleanup_status = {
+                        "last_run_at": now.isoformat(),
+                        "last_deleted": deleted,
+                        "total_deleted": self.cleanup_status["total_deleted"] + deleted,
+                        "batch_size": self.runtime.settings.background_cleanup_batch_size,
+                    }
+                    self._next_cleanup_at = monotonic_now + self.runtime.settings.background_cleanup_interval_seconds
                 def stats():
                     with session_scope() as session:
                         rows = session.execute(select(models.BackgroundTask.kind, models.BackgroundTask.status,
@@ -279,10 +301,7 @@ class AsyncPipeline:
                             models.BackgroundTask.camera_id, models.BackgroundTask.kind
                         ).where(models.BackgroundTask.status == "failed",
                             models.BackgroundTask.kind.in_(self.WRITE_KINDS))).all()
-                        completed = dict(session.execute(select(
-                            models.BackgroundTask.kind, func.max(models.BackgroundTask.updated_at)
-                        ).where(models.BackgroundTask.status == "completed").group_by(
-                            models.BackgroundTask.kind)).all())
+                        completed = self.completion_stats.latest()
                         blocked = session.execute(select(
                             models.BackgroundTask.id, models.BackgroundTask.idempotency_key,
                             models.BackgroundTask.kind, models.BackgroundTask.camera_id,
@@ -291,7 +310,7 @@ class AsyncPipeline:
                             models.BackgroundTask.kind.in_(self.WRITE_KINDS)).limit(100)).all()
                     return ([{"kind": kind, "status": status, "count": count,
                              "oldest_age_seconds": max(0, (utc_now() - created.replace(tzinfo=timezone.utc)).total_seconds())}
-                            for kind, status, count, created in rows], failed, completed, blocked)
+                            for kind, status, count, created in rows], failed_rows, completed, blocked)
                 rows, failed_rows, completed, blocked = await self.io.run(stats)
                 self.durable_status = {
                     "unfinished": sum(r["count"] for r in rows),
@@ -387,6 +406,14 @@ class AsyncPipeline:
         ):
             self.stale_results += 1
             return {"stale": True, "reason": "evidence_expired_before_dispatch"}
+        if not self.online(request.camera_id):
+            return {"stale": True, "reason": "camera_unavailable"}
+        if not is_scheduled(ScheduleSpec.model_validate(from_json(camera.schedule_json, {})), utc_now()):
+            return {"stale": True, "reason": "schedule_ended"}
+        if request.event_id:
+            state = self.runtime.rules.for_camera(request.camera_id)
+            if not state.absence_since or state.absence_since.isoformat() != request.event_id:
+                return {"stale": True, "reason": "event_ended_or_person_returned"}
         token = REVIEW.set(request)
         try:
             now = datetime.fromisoformat(request.sampled_at)
@@ -429,13 +456,7 @@ class AsyncPipeline:
                 if current_event == request.event_id:
                     sampled_at = datetime.fromisoformat(request.sampled_at)
                     evidence = self.review_evidence.get(request.evidence_ref)
-                    state.record_off_duty_review(True, sampled_at, evidence, 0.0)
-                    if state.absence_alerted:
-                        camera = self.repository.get_camera(request.camera_id)
-                        if camera is not None:
-                            await self.runtime._maybe_create_off_duty_alert(
-                                camera, analysis, sampled_at
-                            )
+                    state.record_off_duty_review(False, sampled_at)
         def finish():
             with session_scope() as session:
                 row = session.scalar(select(models.BackgroundTask).where(
@@ -462,9 +483,16 @@ class AsyncPipeline:
             return
         identity = [subject, analysis.mode, members or (event_started_at.isoformat() if event_started_at else analysis.id)]
         key = "alert:" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-        if key in self.reserved_alerts:
+        if key in self.reserved_alerts or time.monotonic() < self.alert_retry_after.get(key, 0):
             return
+        if analysis.mode == Mode.OFF_DUTY.value:
+            candidate = {"camera_id": camera.id, "camera_fingerprint": fingerprint(camera),
+                         "mode": analysis.mode, "members": members}
+            if self.alert_invalid_reason(candidate):
+                return
         self.reserved_alerts.add(key)
+        for camera_id in members:
+            self.runtime.rules.for_camera(camera_id).absence_report_state = "report_generating"
         directory = self.directories.get(camera.directory_id)
         self.submit(Job.make("alert_write", key, {
             "camera_id": camera.id, "camera_fingerprint": fingerprint(camera),
@@ -480,22 +508,45 @@ class AsyncPipeline:
                            "jpeg_b64": base64.b64encode(item["jpeg"]).decode()} for item in evidence_items],
         }, camera.id))
 
-    def alert_valid(self, payload):
+    def alert_invalid_reason(self, payload):
         camera = self.cameras.get(payload["camera_id"])
-        if not camera or not camera.enabled or fingerprint(camera) != payload["camera_fingerprint"]:
-            return False
+        if not camera or not camera.enabled:
+            return "camera_disabled_or_deleted"
+        if fingerprint(camera) != payload["camera_fingerprint"]:
+            return "configuration_changed"
         if payload["mode"] == Mode.OFF_DUTY.value:
             members = {c.id for c in self.cameras.values() if c.enabled and c.directory_id == camera.directory_id
                        and Mode.OFF_DUTY.value in from_json(c.modes_json, [])}
             if members != set(payload["members"]):
-                return False
+                return "directory_members_changed"
             for camera_id, event_id in payload["members"].items():
                 state = self.runtime.rules.for_camera(camera_id)
-                if (not self.online(camera_id) or not state.absence_vlm_confirmed or not state.absence_alerted
-                    or not state.absence_since or state.absence_since.isoformat() != event_id
-                    or not is_scheduled(ScheduleSpec.model_validate(from_json(self.cameras[camera_id].schedule_json, {})), utc_now())):
-                    return False
-        return True
+                if not state.absence_since or state.absence_since.isoformat() != event_id:
+                    return "absence_event_changed:" + camera_id
+                if not self.online(camera_id):
+                    return "camera_offline:" + camera_id
+                if not is_scheduled(ScheduleSpec.model_validate(from_json(self.cameras[camera_id].schedule_json, {})), utc_now()):
+                    return "outside_schedule:" + camera_id
+                if not state.absence_alerted:
+                    return "threshold_not_reached:" + camera_id
+                if not state.absence_vlm_confirmed or state.absence_evidence_jpeg is None:
+                    return "model_confirmation_missing:" + camera_id
+        return None
+
+    def alert_valid(self, payload):
+        return self.alert_invalid_reason(payload) is None
+
+    def report_status(self, payload, status, reason):
+        for camera_id, event_id in payload.get("members", {}).items():
+            state = self.runtime.rules.for_camera(camera_id)
+            if state.absence_since and state.absence_since.isoformat() == event_id:
+                state.absence_report_state = status
+                self.repository.add_analysis(camera_id=camera_id, mode=Mode.OFF_DUTY.value,
+                    status="confirmed" if status == "report_generated" else "uncertain",
+                    occupancy_status="person_absent", off_duty_state=status,
+                    analysis_source="alert_writer", absence_started_at=state.absence_since,
+                    absence_elapsed_seconds=max(0, int((utc_now()-state.absence_since).total_seconds())),
+                    confidence=state.absence_confidence, reason=reason)
 
     async def _writes(self):
         # A single transaction writer preserves traffic bucket/current ordering;
@@ -524,13 +575,15 @@ class AsyncPipeline:
                 payload = json.loads(claim["payload_json"])
                 valid = True
                 if claim["kind"] == "alert_write":
-                    valid = self.alert_valid(payload)
+                    payload["invalid_reason"] = self.alert_invalid_reason(payload)
+                    valid = payload["invalid_reason"] is None
                     if valid:
                         for index, item in enumerate(payload["evidences"]):
                             item["evidence_path"] = f"alert-{claim['id']}-{index}.jpg"
                             await self.io.run(atomic_evidence, self.runtime.settings.evidence_dir,
                                              item["evidence_path"], base64.b64decode(item["jpeg_b64"]))
-                        valid = self.alert_valid(payload)
+                        payload["invalid_reason"] = self.alert_invalid_reason(payload)
+                        valid = payload["invalid_reason"] is None
                 outcome = {}
                 def handler(session, _):
                     result = self._write_transaction(session, claim["kind"], payload, valid)
@@ -538,13 +591,17 @@ class AsyncPipeline:
                     return result
                 committed = await self.io.run(self.store.complete, claim["id"], claim["lease_token"], handler)
                 if committed and claim["kind"] == "alert_write":
-                    self.reserved_alerts.discard(claim["key"])
                     subject = str(payload["directory_id"]) if payload["directory_cooldown"] else payload["camera_id"]
                     if outcome.get("alert_id") or outcome.get("cooldown_at"):
                         self.alert_cooldowns[payload["directory_cooldown"], subject, payload["mode"]] = (
                             datetime.fromisoformat(outcome["cooldown_at"]).replace(tzinfo=timezone.utc)
                             if outcome.get("cooldown_at") else utc_now())
+                    if not outcome.get("alert_id"):
+                        self.reserved_alerts.discard(claim["key"])
+                        self.alert_retry_after[claim["key"]] = time.monotonic() + 30
+                        self.report_status(payload, "report_failed", outcome.get("reason", outcome.get("skipped", "report_not_written")))
                     if outcome.get("alert_id"):
+                        self.report_status(payload, "report_generated", "离岗报告已成功生成")
                         self.cooldowns[payload["directory_id"], payload["mode"]] = utc_now()
                         # Do not reset a newer event created while the transaction ran.
                         for camera_id, event_id in payload["members"].items():
@@ -561,7 +618,13 @@ class AsyncPipeline:
                 self.worker_errors["writes"] = type(exc).__name__
                 if claim:
                     try:
-                        await self.io.run(self.store.fail, claim["id"], claim["lease_token"], type(exc).__name__)
+                        failed = await self.io.run(self.store.fail, claim["id"], claim["lease_token"], type(exc).__name__)
+                        if failed and claim["kind"] == "alert_write":
+                            row = await self.io.run(self.store.get, claim["id"])
+                            self.report_status(json.loads(claim["payload_json"]), "report_failed", type(exc).__name__)
+                            if row and row["status"] == "failed":
+                                self.reserved_alerts.discard(claim["key"])
+                                self.alert_retry_after[claim["key"]] = time.monotonic() + 30
                     except Exception:
                         pass  # Lease recovery retains the durable work.
                 await asyncio.sleep(1)
@@ -599,10 +662,10 @@ class AsyncPipeline:
             row.exited += payload["exited"]
             return {}
         if not valid:
-            return {"stale": True}
+            return {"stale": True, "reason": payload.get("invalid_reason") or "event_validation_failed"}
         camera = session.get(models.Camera, payload["camera_id"])
         if not camera or not camera.enabled or fingerprint(camera) != payload["camera_fingerprint"]:
-            return {"stale": True}
+            return {"stale": True, "reason": "configuration_changed_or_camera_deleted"}
         subject = (models.Alert.directory_id == payload["directory_id"] if payload["directory_cooldown"]
                    else models.Alert.camera_id == payload["camera_id"])
         last = session.scalar(select(func.max(models.Alert.created_at)).where(subject, models.Alert.mode == payload["mode"]))

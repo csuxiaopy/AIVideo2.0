@@ -106,6 +106,68 @@ def test_public_status_omits_payload_and_evidence(store):
     assert "internal.jpg" not in json.dumps(store.get(job.id))
 
 
+def test_prune_terminal_applies_retention_and_batch_limit(store):
+    now = utc_now()
+    rows = [
+        ("completed-old-1", "completed", now - timedelta(days=4)),
+        ("completed-old-2", "completed", now - timedelta(days=4)),
+        ("completed-fresh", "completed", now - timedelta(days=2)),
+        ("failed-old", "failed", now - timedelta(days=31)),
+        ("failed-fresh", "failed", now - timedelta(days=29)),
+        ("pending-old", "pending", now - timedelta(days=90)),
+    ]
+    with store.sessions() as session:
+        for task_id, status, updated_at in rows:
+            session.add(BackgroundTask(
+                id=task_id,
+                idempotency_key=task_id,
+                kind="analysis_write",
+                payload_json="{}",
+                status=status,
+                updated_at=updated_at,
+                created_at=updated_at,
+                retry_at=updated_at,
+            ))
+
+    assert store.prune_terminal(
+        now - timedelta(days=3), now - timedelta(days=30), limit=2
+    ) == 2
+    assert store.prune_terminal(
+        now - timedelta(days=3), now - timedelta(days=30), limit=2
+    ) == 1
+    with store.sessions() as session:
+        remaining = set(session.scalars(select(BackgroundTask.id)))
+    assert remaining == {"completed-fresh", "failed-fresh", "pending-old"}
+
+
+def test_prune_terminal_rejects_unbounded_batch(store):
+    now = utc_now()
+    with pytest.raises(ValueError):
+        store.prune_terminal(now, now, limit=20001)
+
+
+def test_prune_terminal_keeps_analysis_dependency_for_failed_alert(store):
+    now = utc_now()
+    with store.sessions() as session:
+        session.add(BackgroundTask(
+            id="analysis-dependency", idempotency_key="analysis-dependency",
+            kind="analysis_write", payload_json="{}", result_json='{"analysis_id": 1}',
+            status="completed", attempts=1, retry_at=now,
+            created_at=now - timedelta(days=10), updated_at=now - timedelta(days=10),
+        ))
+        session.add(BackgroundTask(
+            id="failed-alert", idempotency_key="failed-alert", kind="alert_write",
+            payload_json='{"analysis_job_id":"analysis-dependency"}', status="failed",
+            attempts=5, retry_at=now, created_at=now - timedelta(days=5),
+            updated_at=now - timedelta(days=5),
+        ))
+
+    assert store.prune_terminal(
+        now - timedelta(days=3), now - timedelta(days=30), limit=10000
+    ) == 0
+    assert store.get("analysis-dependency")["status"] == "completed"
+
+
 def test_batch_persist_claim_and_complete_are_idempotent(store):
     jobs = [Job.make("test", f"key-{i}", {"value": i}) for i in range(10)]
     assert store.persist_many(jobs) == [job.id for job in jobs]
@@ -190,8 +252,10 @@ def test_alert_reservations_restore_all_durable_states(store):
         job = Job.make("alert_write", f"alert:{state}", {"state": state}, state)
         store.persist(job)
         with store.sessions() as session:
-            session.get(BackgroundTask, job.id).status = state
-        expected[job.key] = state
+            row = session.get(BackgroundTask, job.id)
+            row.status = state
+            if state == "completed": row.result_json = '{"alert_id":123}'
+        if state != "failed": expected[job.key] = state
     reservations = store.alert_reservations()
     assert {key: value["status"] for key, value in reservations.items()} == expected
 

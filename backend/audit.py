@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from starlette.concurrency import run_in_threadpool
+
 import logging
 from typing import Any
 
@@ -55,7 +57,7 @@ async def audit_http_request(request: Request, call_next):
 
     actor = None
     try:
-        found = resolve_session(request.cookies.get(SESSION_COOKIE), touch=False)
+        found = await run_in_threadpool(resolve_session, request.cookies.get(SESSION_COOKIE), touch=False)
         actor = found[1] if found else None
     except Exception:
         logger.exception("Unable to resolve audit actor")
@@ -78,7 +80,7 @@ async def audit_http_request(request: Request, call_next):
             if is_login and not actor:
                 summary["attempted_username"] = attempted_username
             try:
-                context.repository.add_audit_log(
+                await run_in_threadpool(context.repository.add_audit_log, 
                     actor_user_id=getattr(actor, "id", None),
                     actor_username=getattr(actor, "username", "") or attempted_username,
                     actor_display_name=getattr(actor, "display_name", ""),

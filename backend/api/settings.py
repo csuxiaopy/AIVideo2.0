@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from starlette.concurrency import run_in_threadpool
+
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -10,6 +12,7 @@ from backend.schemas import (DisplaySettingsUpdate, DetectorSettingsUpdate, Mode
     RetentionSettingsUpdate, WebhookTargetCreate, WebhookTargetUpdate)
 from backend.webhook import WebhookClient
 from backend.auth import admin_user, current_user
+from backend.model_switch_store import ModelConfig, ModelSwitchStore
 
 
 router = APIRouter(prefix="/api/settings")
@@ -17,19 +20,24 @@ router = APIRouter(prefix="/api/settings")
 
 @router.get("/models", dependencies=[Depends(admin_user)])
 async def get_models() -> dict[str, Any]:
-    row = context.repository.get_model_settings()
-    return {
-        "provider": row.provider,
-        "base_url": row.base_url,
-        "economy_model": row.economy_model,
-        "api_key_configured": bool(row.api_key_encrypted),
-        "updated_at": row.updated_at,
-    }
+    def _work():
+        row = context.repository.get_model_settings()
+        return {
+            "provider": row.provider,
+            "base_url": row.base_url,
+            "economy_model": row.economy_model,
+            "auto_failover_enabled": row.auto_failover_enabled,
+            "failover_after_seconds": 1800,
+            "failover": ModelSwitchStore.load_state(ModelConfig.from_row(row)),
+            "api_key_configured": bool(row.api_key_encrypted),
+            "updated_at": row.updated_at,
+        }
+    return await run_in_threadpool(_work)
 
 
 @router.put("/models", dependencies=[Depends(admin_user)])
-async def put_models(payload: ModelSettingsUpdate) -> dict[str, Any]:
-    existing = context.repository.get_model_settings()
+async def put_models(payload: ModelSettingsUpdate, actor=Depends(admin_user)) -> dict[str, Any]:
+    existing = await run_in_threadpool(context.repository.get_model_settings)
     effective_key = payload.api_key or (
         context.cipher.decrypt(existing.api_key_encrypted) if existing.api_key_encrypted else ""
     )
@@ -39,17 +47,18 @@ async def put_models(payload: ModelSettingsUpdate) -> dict[str, Any]:
         "provider": payload.provider,
         "base_url": payload.base_url,
         "economy_model": payload.economy_model,
+        "auto_failover_enabled": payload.auto_failover_enabled,
     }
     if payload.api_key:
         values["api_key_encrypted"] = context.cipher.encrypt(payload.api_key)
-    context.repository.save_model_settings(values)
+    await run_in_threadpool(ModelSwitchStore.save_manual, values, getattr(actor, "id", None))
     await context.require_runtime().reload_models()
     return await get_models()
 
 
 @router.post("/models/test", dependencies=[Depends(admin_user)])
 async def test_models() -> dict[str, Any]:
-    row = context.repository.get_model_settings()
+    row = await run_in_threadpool(context.repository.get_model_settings)
     if row.provider == "mock":
         return {"ok": True, "provider": "mock", "latency_ms": 0}
     vlm = context.require_runtime().vlm
@@ -63,7 +72,7 @@ async def test_models() -> dict[str, Any]:
 
 @router.get("/detectors", dependencies=[Depends(admin_user)])
 async def get_detectors() -> dict[str, Any]:
-    row = context.repository.get_detector_settings()
+    row = await run_in_threadpool(context.repository.get_detector_settings)
     runtime_status = await context.require_runtime().status()
     return {
         "general_model": runtime_status["detectors"]["general"].get("model", row.general_model),
@@ -79,7 +88,7 @@ async def get_detectors() -> dict[str, Any]:
 
 @router.put("/detectors", dependencies=[Depends(admin_user)])
 async def put_detectors(payload: DetectorSettingsUpdate) -> dict[str, Any]:
-    context.repository.save_detector_settings(payload.model_dump())
+    await run_in_threadpool(context.repository.save_detector_settings, payload.model_dump())
     await context.require_runtime().reload_detectors()
     return await get_detectors()
 
@@ -97,44 +106,52 @@ def webhook_target_public(row) -> dict[str, Any]:
 
 @router.get("/webhooks", dependencies=[Depends(admin_user)])
 async def get_webhooks() -> dict[str, Any]:
-    return {
-        "items": [webhook_target_public(row) for row in context.repository.list_webhook_targets()],
-    }
+    def _work():
+        return {
+            "items": [webhook_target_public(row) for row in context.repository.list_webhook_targets()],
+        }
+    return await run_in_threadpool(_work)
 
 
 @router.post("/webhooks", status_code=201, dependencies=[Depends(admin_user)])
 async def create_webhook(payload: WebhookTargetCreate) -> dict[str, Any]:
-    if payload.enabled and not payload.url.startswith("https://"):
-        raise HTTPException(status_code=400, detail="启用企业微信机器人时必须配置 HTTPS URL")
-    values = payload.model_dump(exclude={"auto_severities"})
-    values["secret_encrypted"] = ""
-    values["auto_severities_json"] = as_json(payload.auto_severities)
-    return webhook_target_public(context.repository.create_webhook_target(values))
+    def _work():
+        if payload.enabled and not payload.url.startswith("https://"):
+            raise HTTPException(status_code=400, detail="启用企业微信机器人时必须配置 HTTPS URL")
+        values = payload.model_dump(exclude={"auto_severities"})
+        values["secret_encrypted"] = ""
+        values["auto_severities_json"] = as_json(payload.auto_severities)
+        return webhook_target_public(context.repository.create_webhook_target(values))
+    return await run_in_threadpool(_work)
 
 
 @router.put("/webhooks/{target_id}", dependencies=[Depends(admin_user)])
 async def update_webhook(target_id: int, payload: WebhookTargetUpdate) -> dict[str, Any]:
-    existing = context.repository.get_webhook_target(target_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Webhook 目标不存在")
-    if payload.enabled and not payload.url.startswith("https://"):
-        raise HTTPException(status_code=400, detail="启用企业微信机器人时必须配置 HTTPS URL")
-    values = payload.model_dump(exclude={"auto_severities"})
-    values["auto_severities_json"] = as_json(payload.auto_severities)
-    row = context.repository.update_webhook_target(target_id, values)
-    return webhook_target_public(row)
+    def _work():
+        existing = context.repository.get_webhook_target(target_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Webhook 目标不存在")
+        if payload.enabled and not payload.url.startswith("https://"):
+            raise HTTPException(status_code=400, detail="启用企业微信机器人时必须配置 HTTPS URL")
+        values = payload.model_dump(exclude={"auto_severities"})
+        values["auto_severities_json"] = as_json(payload.auto_severities)
+        row = context.repository.update_webhook_target(target_id, values)
+        return webhook_target_public(row)
+    return await run_in_threadpool(_work)
 
 
 @router.delete("/webhooks/{target_id}", dependencies=[Depends(admin_user)])
 async def delete_webhook(target_id: int) -> dict[str, bool]:
-    if not context.repository.delete_webhook_target(target_id):
-        raise HTTPException(status_code=404, detail="Webhook 目标不存在")
-    return {"deleted": True}
+    def _work():
+        if not context.repository.delete_webhook_target(target_id):
+            raise HTTPException(status_code=404, detail="Webhook 目标不存在")
+        return {"deleted": True}
+    return await run_in_threadpool(_work)
 
 
 @router.post("/webhooks/{target_id}/test", dependencies=[Depends(admin_user)])
 async def test_webhook_target(target_id: int) -> dict[str, bool]:
-    row = context.repository.get_webhook_target(target_id)
+    row = await run_in_threadpool(context.repository.get_webhook_target, target_id)
     if not row or not row.url:
         raise HTTPException(status_code=400, detail="Webhook 目标不存在或配置不完整")
     client = WebhookClient()
@@ -151,34 +168,38 @@ async def test_webhook_target(target_id: int) -> dict[str, bool]:
 
 @router.get("/retention", dependencies=[Depends(admin_user)])
 async def get_retention() -> dict[str, Any]:
-    row = context.repository.get_retention_settings()
-    return {
-        "alert_retention_days": row.alert_retention_days,
-        "log_retention_days": row.log_retention_days,
-        "auto_cleanup_enabled": row.auto_cleanup_enabled,
-        "updated_at": row.updated_at,
-    }
+    def _work():
+        row = context.repository.get_retention_settings()
+        return {
+            "alert_retention_days": row.alert_retention_days,
+            "log_retention_days": row.log_retention_days,
+            "auto_cleanup_enabled": row.auto_cleanup_enabled,
+            "updated_at": row.updated_at,
+        }
+    return await run_in_threadpool(_work)
 
 
 @router.put("/retention", dependencies=[Depends(admin_user)])
 async def put_retention(payload: RetentionSettingsUpdate) -> dict[str, Any]:
-    context.repository.save_retention_settings(payload.model_dump())
+    await run_in_threadpool(context.repository.save_retention_settings, payload.model_dump())
     return await get_retention()
 
 
 @router.get("/display", dependencies=[Depends(current_user)])
 async def get_display() -> dict[str, Any]:
-    row = context.repository.get_display_settings()
-    return {
-        "show_traffic_report": row.show_traffic_report,
-        "show_current_store_count": row.show_current_store_count,
-        "updated_at": row.updated_at,
-    }
+    def _work():
+        row = context.repository.get_display_settings()
+        return {
+            "show_traffic_report": row.show_traffic_report,
+            "show_current_store_count": row.show_current_store_count,
+            "updated_at": row.updated_at,
+        }
+    return await run_in_threadpool(_work)
 
 
 @router.patch("/display", dependencies=[Depends(admin_user)])
 async def patch_display(payload: DisplaySettingsUpdate) -> dict[str, Any]:
     values = payload.model_dump(exclude_none=True)
     if values:
-        context.repository.save_display_settings(values)
+        await run_in_threadpool(context.repository.save_display_settings, values)
     return await get_display()

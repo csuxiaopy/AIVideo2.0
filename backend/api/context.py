@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 
 from backend.config import Settings, get_settings
-from backend.pipeline import MonitoringRuntime
+if TYPE_CHECKING:
+    from backend.pipeline import MonitoringRuntime
 from backend.repository import Repository
 from backend.security import SecretCipher
 
@@ -17,7 +19,7 @@ class ApplicationContext:
     settings: Settings
     repository: Repository
     cipher: SecretCipher
-    runtime: MonitoringRuntime | None = None
+    runtime: MonitoringRuntime | Any | None = None
 
     def require_runtime(self) -> MonitoringRuntime:
         if self.runtime is None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from starlette.concurrency import run_in_threadpool
+
 import asyncio
 import os
 import shutil
@@ -16,6 +18,7 @@ from openpyxl import Workbook
 from openpyxl.drawing.image import Image as ExcelImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from sqlalchemy import text
 
 from backend.api.context import context
 from backend.api.presenters import alert_public, analysis_public
@@ -27,6 +30,7 @@ from backend.schemas import (
 )
 from backend.capabilities import CORE_CAPABILITIES
 from backend.auth import admin_user, current_user, websocket_user
+from backend.database import engine
 
 
 router = APIRouter()
@@ -34,6 +38,74 @@ router = APIRouter()
 _process_started_at = time.time()
 _cpu_sample: tuple[int, int] | None = None
 _task_sample: tuple[float, int] | None = None
+
+
+def _database_status(snapshot: dict[str, Any]) -> str:
+    if not snapshot.get("connected"):
+        return "critical"
+    if (snapshot.get("connection_percent", 0) >= 90
+            or snapshot.get("longest_transaction_seconds", 0) >= 300
+            or snapshot.get("background_tasks_dead_percent", 0) >= 20):
+        return "critical"
+    if (snapshot.get("connection_percent", 0) >= 70
+            or snapshot.get("lock_waiters", 0) > 0
+            or snapshot.get("longest_transaction_seconds", 0) >= 60
+            or snapshot.get("background_tasks_dead_percent", 0) >= 10):
+        return "warning"
+    return "healthy"
+
+
+def _database_snapshot() -> dict[str, Any]:
+    try:
+        with engine.connect() as connection:
+            if connection.dialect.name != "postgresql":
+                connection.execute(text("SELECT 1"))
+                return {"connected": True, "status": "healthy", "engine": connection.dialect.name}
+            row = connection.execute(text("""
+                SELECT
+                    pg_database_size(current_database()) AS database_size,
+                    current_setting('max_connections')::int AS max_connections,
+                    (SELECT count(*) FROM pg_stat_activity
+                     WHERE datname = current_database()) AS connections,
+                    (SELECT count(*) FROM pg_stat_activity
+                     WHERE datname = current_database() AND state = 'active'
+                       AND pid <> pg_backend_pid()) AS active_connections,
+                    (SELECT count(*) FROM pg_stat_activity
+                     WHERE datname = current_database() AND wait_event_type = 'Lock') AS lock_waiters,
+                    COALESCE((SELECT max(EXTRACT(EPOCH FROM (now() - xact_start)))
+                     FROM pg_stat_activity WHERE datname = current_database()
+                       AND xact_start IS NOT NULL AND pid <> pg_backend_pid()), 0)
+                       AS longest_transaction_seconds,
+                    COALESCE((SELECT n_live_tup FROM pg_stat_user_tables
+                     WHERE relname = 'background_tasks'), 0) AS background_tasks_live,
+                    COALESCE((SELECT n_dead_tup FROM pg_stat_user_tables
+                     WHERE relname = 'background_tasks'), 0) AS background_tasks_dead,
+                    (SELECT last_autovacuum FROM pg_stat_user_tables
+                     WHERE relname = 'background_tasks') AS background_tasks_last_autovacuum
+            """)).mappings().one()
+        result = {"connected": True, "engine": "postgresql", **dict(row)}
+        result["database_size"] = int(result["database_size"] or 0)
+        result["max_connections"] = int(result["max_connections"] or 0)
+        result["connections"] = int(result["connections"] or 0)
+        result["active_connections"] = int(result["active_connections"] or 0)
+        result["lock_waiters"] = int(result["lock_waiters"] or 0)
+        result["longest_transaction_seconds"] = round(float(result["longest_transaction_seconds"] or 0), 1)
+        live, dead = int(result["background_tasks_live"] or 0), int(result["background_tasks_dead"] or 0)
+        result["background_tasks_live"], result["background_tasks_dead"] = live, dead
+        result["background_tasks_dead_percent"] = round(dead / max(1, live + dead) * 100, 2)
+        vacuum = result.get("background_tasks_last_autovacuum")
+        result["background_tasks_last_autovacuum"] = vacuum.isoformat() if vacuum else None
+        result["connection_percent"] = round(
+            result["connections"] / max(1, result["max_connections"]) * 100, 1
+        )
+        result["status"] = _database_status(result)
+        return result
+    except Exception as exc:
+        result = {
+            "connected": False, "engine": "postgresql", "status": "critical",
+            "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+        }
+        return result
 
 
 def _host_snapshot() -> dict[str, Any]:
@@ -110,16 +182,25 @@ def _prometheus_snapshot(processed: int) -> dict[str, Any]:
 async def health() -> dict[str, Any]:
     runtime = await context.require_runtime().status()
     postprocessing = runtime.get("postprocessing", {})
-    status = "degraded" if postprocessing.get("degraded") else "ok"
+    queue = runtime.get("queue", {})
+    status = "degraded" if (postprocessing.get("degraded") or queue.get("status") != "healthy"
+        or (runtime.get("vlm_failover") or {}).get("status") in {"degraded", "probing"}) else "ok"
     return {"status": status, "version": "1.0.0", **runtime}
 
 
 @router.get("/api/dashboard", dependencies=[Depends(current_user)])
 async def dashboard() -> dict[str, Any]:
     return {
-        **context.repository.dashboard(),
+        **await run_in_threadpool(context.repository.dashboard),
         "runtime": await context.require_runtime().status(),
     }
+
+
+def _validate_alert_dates(date, start_date, end_date):
+    if date and (start_date or end_date):
+        raise HTTPException(status_code=422, detail="单日日期不能与日期段同时使用")
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(status_code=422, detail="开始日期不能晚于结束日期")
 
 
 @router.get("/api/alerts", dependencies=[Depends(current_user)])
@@ -130,16 +211,22 @@ async def alerts(
     mode: str | None = None,
     severity: str | None = None,
     date: date_type | None = None,
+    directory_id: int | None = Query(default=None, ge=0),
+    start_date: date_type | None = None,
+    end_date: date_type | None = None,
 ) -> dict[str, Any]:
-    rows, total = context.repository.list_alerts_page(
-        page, page_size, camera_id, mode, severity, date
-    )
-    return {
-        "items": [alert_public(row, context.repository.webhook_deliveries(row.id)) for row in rows],
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-    }
+    _validate_alert_dates(date, start_date, end_date)
+    def _work():
+        rows, total = context.repository.list_alerts_page(
+            page, page_size, camera_id, mode, severity, date, directory_id, start_date, end_date
+        )
+        return {
+            "items": [alert_public(row, context.repository.webhook_deliveries(row.id)) for row in rows],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+    return await run_in_threadpool(_work)
 
 
 def _alert_workbook(rows: list[Any]) -> BytesIO:
@@ -193,15 +280,17 @@ def _alert_workbook(rows: list[Any]) -> BytesIO:
 
 @router.post("/api/alerts/export", dependencies=[Depends(current_user)])
 async def export_alerts(payload: AlertExportRequest) -> StreamingResponse:
-    alert_date = None
-    if payload.date:
-        try:
-            alert_date = date_type.fromisoformat(payload.date)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail="日期格式必须为 YYYY-MM-DD") from exc
-    rows = context.repository.list_alerts(
+    try:
+        alert_date = date_type.fromisoformat(payload.date) if payload.date else None
+        start_date = date_type.fromisoformat(payload.start_date) if payload.start_date else None
+        end_date = date_type.fromisoformat(payload.end_date) if payload.end_date else None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="日期格式必须为有效的 YYYY-MM-DD") from exc
+    _validate_alert_dates(alert_date, start_date, end_date)
+    rows = await run_in_threadpool(context.repository.list_alerts, 
         None, mode=payload.mode, severity=payload.severity,
         alert_date=alert_date, alert_ids=payload.alert_ids,
+        directory_id=payload.directory_id, start_date=start_date, end_date=end_date,
     )
     filename = f"alerts-{payload.date or 'all'}.xlsx"
     workbook = await asyncio.to_thread(_alert_workbook, rows)
@@ -214,10 +303,12 @@ async def export_alerts(payload: AlertExportRequest) -> StreamingResponse:
 
 @router.get("/api/alert-webhook-targets", dependencies=[Depends(current_user)])
 async def alert_webhook_targets() -> dict[str, Any]:
-    return {"items": [
-        {"id": row.id, "name": row.name, "enabled": row.enabled}
-        for row in context.repository.list_webhook_targets(enabled_only=True)
-    ]}
+    def _work():
+        return {"items": [
+            {"id": row.id, "name": row.name, "enabled": row.enabled}
+            for row in context.repository.list_webhook_targets(enabled_only=True)
+        ]}
+    return await run_in_threadpool(_work)
 
 
 @router.post("/api/alerts/webhook-send", dependencies=[Depends(current_user)])
@@ -246,7 +337,8 @@ async def delete_alerts(
 async def system_monitor() -> dict[str, Any]:
     runtime = await context.require_runtime().status()
     processed = int(runtime.get("workers", {}).get("processed", 0))
-    dashboard_snapshot = context.repository.dashboard()
+    dashboard_snapshot = await run_in_threadpool(context.repository.dashboard)
+    database = await asyncio.to_thread(_database_snapshot)
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "uptime_seconds": max(0, int(time.time() - _process_started_at)),
@@ -258,6 +350,7 @@ async def system_monitor() -> dict[str, Any]:
             "online_cameras": int(dashboard_snapshot.get("online", 0)),
             "camera_count": int(dashboard_snapshot.get("cameras", 0)),
         },
+        "database": database,
         "runtime": runtime,
     }
 
@@ -272,28 +365,34 @@ async def delete_selected_alerts(payload: AlertBatchDelete) -> dict[str, Any]:
 async def analyses(
     limit: int = Query(default=100, ge=1, le=500), camera_id: str | None = None
 ) -> list[dict[str, Any]]:
-    return [analysis_public(row) for row in context.repository.list_analyses(limit, camera_id)]
+    def _work():
+        return [analysis_public(row) for row in context.repository.list_analyses(limit, camera_id)]
+    return await run_in_threadpool(_work)
 
 
 @router.get("/api/traffic", dependencies=[Depends(current_user)])
 async def traffic(
     camera_id: str | None = None, limit: int = Query(default=1440, ge=1, le=10000)
 ) -> list[dict[str, Any]]:
-    return [
-        {
-            "camera_id": row.camera_id,
-            "bucket_start": row.bucket_start,
-            "current_count": row.current_count,
-            "entered": row.entered,
-            "exited": row.exited,
-        }
-        for row in context.repository.traffic(camera_id, limit)
-    ]
+    def _work():
+        return [
+            {
+                "camera_id": row.camera_id,
+                "bucket_start": row.bucket_start,
+                "current_count": row.current_count,
+                "entered": row.entered,
+                "exited": row.exited,
+            }
+            for row in context.repository.traffic(camera_id, limit)
+        ]
+    return await run_in_threadpool(_work)
 
 
 @router.get("/api/traffic/summary", dependencies=[Depends(current_user)])
 async def traffic_summary() -> dict[str, Any]:
-    return context.repository.traffic_summary()
+    def _work():
+        return context.repository.traffic_summary()
+    return await run_in_threadpool(_work)
 
 
 def _month_start(month: str) -> date_type:
@@ -318,7 +417,9 @@ def _month_start(month: str) -> date_type:
 async def traffic_monthly(
     month: str = Query(pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
 ) -> dict[str, Any]:
-    return context.repository.traffic_monthly(_month_start(month))
+    def _work():
+        return context.repository.traffic_monthly(_month_start(month))
+    return await run_in_threadpool(_work)
 
 
 def _traffic_monthly_workbook(report: dict[str, Any]) -> BytesIO:
@@ -381,7 +482,7 @@ def _traffic_monthly_workbook(report: dict[str, Any]) -> BytesIO:
 @router.post("/api/traffic/monthly/export", dependencies=[Depends(current_user)])
 async def export_traffic_monthly(payload: TrafficMonthlyRequest) -> StreamingResponse:
     month = _month_start(payload.month)
-    report = context.repository.traffic_monthly(month)
+    report = await run_in_threadpool(context.repository.traffic_monthly, month)
     workbook = await asyncio.to_thread(_traffic_monthly_workbook, report)
     return StreamingResponse(
         workbook,
@@ -397,7 +498,7 @@ async def workers() -> dict[str, Any]:
 
 @router.websocket("/ws/events")
 async def events_socket(websocket: WebSocket) -> None:
-    if websocket_user(websocket) is None:
+    if await run_in_threadpool(websocket_user, websocket) is None:
         await websocket.close(code=4401)
         return
     await websocket.accept()

@@ -159,6 +159,7 @@ class CameraRuleState:
     absence_confirmation_at: datetime | None = None
     absence_evidence_jpeg: bytes | None = None
     absence_confidence: float = 0.0
+    absence_report_state: str | None = None
     absence_threshold_at: datetime | None = None
     absence_threshold_sampled_at: datetime | None = None
     phone_since: datetime | None = None
@@ -260,6 +261,7 @@ class CameraRuleState:
 
     def reset_off_duty_confirmation(self, reset_review: bool = False) -> None:
         self.absence_vlm_confirmed = False
+        self.absence_report_state = None
         self.absence_confirmation_at = None
         self.absence_evidence_jpeg = None
         self.absence_confidence = 0.0

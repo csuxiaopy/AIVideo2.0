@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from backend.background import IdempotencyConflict, Job
@@ -19,6 +19,23 @@ class TaskStore:
 
     @staticmethod
     def _check(row, job):
+        if job.kind == row.kind == "alert_write":
+            result = json.loads(row.result_json or "{}")
+            previous, current = json.loads(row.payload_json), json.loads(job.payload_json)
+            same_event = (
+                previous.get("mode") == current.get("mode") == "off_duty"
+                and bool(current.get("members"))
+                and previous.get("members") == current.get("members")
+                and previous.get("directory_id") == current.get("directory_id")
+                and job.camera_id in current.get("members", {})
+            )
+            if same_event and (row.status == "failed" or (row.status == "completed" and (result.get("stale") or result.get("skipped") == "cooldown"))):
+                # Revalidate a current event without replaying historical work.
+                row.payload_json, row.camera_id, row.evidence_ref = job.payload_json, job.camera_id, job.evidence_ref
+                row.status, row.attempts, row.retry_at = "pending", 0, utc_now()
+                row.result_json, row.error = None, None
+                row.lease_token, row.lease_until, row.updated_at = None, None, utc_now()
+                return row.id
         if (row.kind, row.camera_id, row.payload_json, row.evidence_ref) != (
             job.kind, job.camera_id, job.payload_json, job.evidence_ref
         ):
@@ -30,15 +47,63 @@ class TaskStore:
         with self.sessions() as session:
             rows = session.execute(select(
                 BackgroundTask.idempotency_key, BackgroundTask.id,
-                BackgroundTask.status, BackgroundTask.camera_id,
+                BackgroundTask.status, BackgroundTask.camera_id, BackgroundTask.result_json,
             ).where(BackgroundTask.kind == "alert_write")).all()
             return {key: {"id": task_id, "status": status, "camera_id": camera_id}
-                    for key, task_id, status, camera_id in rows}
+                    for key, task_id, status, camera_id, result_json in rows
+                    if status in {"pending", "running", "retry"}
+                    or (status == "completed" and json.loads(result_json or "{}").get("alert_id"))}
+
+    def prune_terminal(
+        self,
+        completed_before: datetime,
+        failed_before: datetime,
+        limit: int = 10000,
+    ) -> int:
+        """Delete one bounded batch of expired terminal outbox rows."""
+        if not 1 <= limit <= 20000:
+            raise ValueError("Cleanup batch must contain 1..20000 rows")
+        expired = or_(
+            and_(BackgroundTask.status == "completed", BackgroundTask.updated_at < completed_before),
+            and_(BackgroundTask.status == "failed", BackgroundTask.updated_at < failed_before),
+        )
+        with self.sessions() as session:
+            # Alert writes refer to their analysis outbox row by UUID. Keep that
+            # completed dependency until the referring alert reaches a terminal
+            # completed state or ages out under the failed-task policy.
+            protected_analysis_ids: set[str] = set()
+            payloads = session.scalars(select(BackgroundTask.payload_json).where(
+                BackgroundTask.kind == "alert_write",
+                BackgroundTask.status != "completed",
+            ))
+            for payload_json in payloads:
+                try:
+                    analysis_job_id = json.loads(payload_json).get("analysis_job_id")
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if analysis_job_id:
+                    protected_analysis_ids.add(str(analysis_job_id))
+            eligible = expired
+            if protected_analysis_ids:
+                eligible = and_(expired, BackgroundTask.id.not_in(protected_analysis_ids))
+            ids = list(session.scalars(
+                select(BackgroundTask.id)
+                .where(eligible)
+                .order_by(BackgroundTask.updated_at, BackgroundTask.id)
+                .limit(limit)
+            ))
+            if not ids:
+                return 0
+            result = session.execute(
+                delete(BackgroundTask).where(BackgroundTask.id.in_(ids), eligible),
+                execution_options={"synchronize_session": False},
+            )
+            return int(result.rowcount or 0)
 
     def persist(self, job: Job) -> str:
         try:
             with self.sessions() as session:
-                previous = session.scalar(select(BackgroundTask).where(BackgroundTask.idempotency_key == job.key))
+                previous = session.scalar(select(BackgroundTask).where(BackgroundTask.idempotency_key == job.key).with_for_update())
                 if previous:
                     return self._check(previous, job)
                 session.add(BackgroundTask(
@@ -62,7 +127,7 @@ class TaskStore:
         try:
             with self.sessions() as session:
                 existing = {row.idempotency_key: row for row in session.scalars(select(BackgroundTask).where(
-                    BackgroundTask.idempotency_key.in_([job.key for job in jobs])))}
+                    BackgroundTask.idempotency_key.in_([job.key for job in jobs])).with_for_update())}
                 ids = []
                 for job in jobs:
                     if job.key in existing:

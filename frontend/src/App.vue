@@ -53,6 +53,7 @@ type SystemMonitor = {
   timestamp:string;uptime_seconds:number
   host:{cpu_percent:number;cpu_count:number;memory_used:number;memory_total:number;memory_percent:number;disk_used:number;disk_total:number;disk_percent:number}
   application:{task_rate:number;vlm_calls_total:number;analysis_average_ms:number;processed:number;failures:number;online_cameras:number;camera_count:number}
+  database:{connected:boolean;status:'healthy'|'warning'|'critical';engine:string;database_size?:number;connections?:number;max_connections?:number;connection_percent?:number;active_connections?:number;lock_waiters?:number;longest_transaction_seconds?:number;background_tasks_live?:number;background_tasks_dead?:number;background_tasks_dead_percent?:number;background_tasks_last_autovacuum?:string;error?:string}
   runtime:any
 }
 type MonitorPoint = {time:string;cpu:number;memory:number;disk:number;taskRate:number;queue:number}
@@ -77,7 +78,7 @@ const alerts = ref<any[]>([])
 const recentAlerts = ref<any[]>([])
 const alertData=reactive<{total:number;page:number;page_size:number}>({total:0,page:1,page_size:100})
 const alertLoading=ref(false)
-type LogCategory = 'audit'|'analyses'|'model-calls'
+type LogCategory = 'audit'|'analyses'|'model-calls'|'model-switches'
 const logCategory=ref<LogCategory>('audit')
 const logData=reactive<{items:any[];total:number;page:number;page_size:number}>({items:[],total:0,page:1,page_size:50})
 const logFilters=reactive({start:'',end:'',analysis_start:'',analysis_end:'',username:'',action:'',camera_id:'',camera_name:'',mode:'',status:'',occupancy_status:'',off_duty_state:'',model:'',stage:'',outcome:''})
@@ -210,9 +211,9 @@ const handleTrafficMonthlyResize=()=>{void updateTrafficMonthlyScroll()}
 const severityLevels = [
   {value:'normal',label:'NORMAL'},{value:'high',label:'HIGH'},{value:'critical',label:'CRITICAL'},
 ] as const
-const alertFilter = reactive({date:'',mode:'',severity:''})
+const alertFilter = reactive({directory_id:'',start_date:'',end_date:'',mode:'',severity:''})
 let alertFilterSeq = 0
-const hasAlertFilter = computed(()=>!!alertFilter.date||!!alertFilter.mode||!!alertFilter.severity)
+const hasAlertFilter = computed(()=>!!alertFilter.directory_id||!!alertFilter.start_date||!!alertFilter.end_date||!!alertFilter.mode||!!alertFilter.severity)
 const alertRows = computed(()=>alerts.value)
 const alertPages=computed(()=>Math.max(1,Math.ceil(alertData.total/alertData.page_size)))
 const selectedAlertIds=ref<number[]>([])
@@ -223,14 +224,19 @@ const sendModal=ref(false)
 const selectedTargetIds=ref<number[]>([])
 const enabledWebhookTargets=computed(()=>webhookTargets.value.filter(target=>target.enabled&&(!isAdmin.value||target.url)))
 const allAlertsSelected=computed(()=>alertRows.value.length>0&&alertRows.value.every(row=>selectedAlertIds.value.includes(row.id)))
-const toggleAllAlerts=()=>{selectedAlertIds.value=allAlertsSelected.value?[]:alertRows.value.map(row=>row.id)}
+const toggleAllAlerts=()=>{
+  const pageIds=new Set(alertRows.value.map(row=>row.id))
+  selectedAlertIds.value=allAlertsSelected.value
+    ?selectedAlertIds.value.filter(id=>!pageIds.has(id))
+    :[...new Set([...selectedAlertIds.value,...pageIds])]
+}
 const toggleDeliveryDetails=(id:number)=>{expandedDeliveryIds.value=expandedDeliveryIds.value.includes(id)?expandedDeliveryIds.value.filter(x=>x!==id):[...expandedDeliveryIds.value,id]}
 const loadAlerts = async (page=alertData.page) => {
   const seq=++alertFilterSeq
   alertLoading.value=true
   try{
     const params=new URLSearchParams({page:String(page),page_size:String(alertData.page_size)})
-    if(alertFilter.date)params.set('date',alertFilter.date)
+    for(const key of ['directory_id','start_date','end_date'] as const)if(alertFilter[key])params.set(key,alertFilter[key])
     if(alertFilter.mode)params.set('mode',alertFilter.mode)
     if(alertFilter.severity)params.set('severity',alertFilter.severity)
     const result=await api<{items:any[];total:number;page:number;page_size:number}>(`/api/alerts?${params.toString()}`)
@@ -239,14 +245,14 @@ const loadAlerts = async (page=alertData.page) => {
     if(page>pages){await loadAlerts(pages);return}
     alerts.value=result.items
     Object.assign(alertData,{total:result.total,page:result.page,page_size:result.page_size})
-    selectedAlertIds.value=selectedAlertIds.value.filter(id=>result.items.some(row=>row.id===id))
     expandedDeliveryIds.value=expandedDeliveryIds.value.filter(id=>result.items.some(row=>row.id===id))
   }catch(error:any){notify(`告警筛选加载失败：${error.message}`,'error')}
   finally{if(seq===alertFilterSeq)alertLoading.value=false}
 }
-const applyAlertFilter = async () => {selectedAlertIds.value=[];await loadAlerts(1)}
-const resetAlertFilter = async () => {alertFilter.date='';alertFilter.mode='';alertFilter.severity='';selectedAlertIds.value=[];await loadAlerts(1)}
-watch(()=>[alertFilter.date,alertFilter.mode,alertFilter.severity],()=>{selectedAlertIds.value=[]})
+const validAlertDates=()=>{if(alertFilter.start_date&&alertFilter.end_date&&alertFilter.start_date>alertFilter.end_date){notify('开始日期不能晚于结束日期','error');return false}return true}
+const applyAlertFilter = async () => {selectedAlertIds.value=[];if(validAlertDates())await loadAlerts(1)}
+const resetAlertFilter = async () => {alertFilter.directory_id='';alertFilter.start_date='';alertFilter.end_date='';alertFilter.mode='';alertFilter.severity='';selectedAlertIds.value=[];await loadAlerts(1)}
+watch(()=>[alertFilter.directory_id,alertFilter.start_date,alertFilter.end_date,alertFilter.mode,alertFilter.severity],()=>{selectedAlertIds.value=[]})
 const loadAll = async (silent=false) => {
   if (!silent) loading.value=true
   try {
@@ -262,7 +268,6 @@ const loadAll = async (silent=false) => {
     if(isAdmin.value){const [st,cp]=await Promise.all([api('/api/scene-templates'),api('/api/capabilities')]);templates.value=st;capabilities.value=cp}
     if(active.value==='traffic'&&!displaySettings.show_traffic_report) setTab('dashboard')
     if(active.value==='traffic'&&trafficMonth.value===currentTrafficMonth) void loadTrafficMonthly(true)
-    if(hasAlertFilter.value) void applyAlertFilter()
   } catch (error:any) { if(!silent) notify(error.message,'error') }
   finally { loading.value=false }
 }
@@ -437,7 +442,7 @@ const removeDirectory=async(directory:CameraDirectory)=>{const ok=await dialogCo
 const moveSelectedCameras=async()=>{if(!selectedCameraIds.value.length)return;const directoryId=moveDirectory.value?Number(moveDirectory.value):null;try{const result=await api('/api/cameras/batch-move',{method:'POST',body:JSON.stringify({ids:selectedCameraIds.value,directory_id:directoryId})});selectedCameraIds.value=[];notify(`已移动 ${result.moved} 个摄像头`);await loadAll(true)}catch(error:any){notify(error.message,'error')}}
 
 const exportSelectedAlerts=async()=>{if(!selectedAlertIds.value.length)return;try{await download('/api/alerts/export',{alert_ids:selectedAlertIds.value},`告警-已选择-${new Date().toISOString().slice(0,10)}.xlsx`);notify(`已导出 ${selectedAlertIds.value.length} 条告警`)}catch(error:any){notify(error.message,'error')}}
-const exportFilteredAlerts=async()=>{try{await download('/api/alerts/export',{date:alertFilter.date||null,mode:alertFilter.mode||null,severity:alertFilter.severity||null},`告警-${alertFilter.date||'全部'}.xlsx`);notify('筛选结果已导出')}catch(error:any){notify(error.message,'error')}}
+const exportFilteredAlerts=async()=>{if(!validAlertDates())return;try{await download('/api/alerts/export',{directory_id:alertFilter.directory_id?Number(alertFilter.directory_id):null,start_date:alertFilter.start_date||null,end_date:alertFilter.end_date||null,mode:alertFilter.mode||null,severity:alertFilter.severity||null},`告警-${[alertFilter.start_date,alertFilter.end_date].filter(Boolean).join('_')||'全部'}.xlsx`);notify('筛选结果已导出')}catch(error:any){notify(error.message,'error')}}
 const deleteSelectedAlerts=async()=>{
   if(!selectedAlertIds.value.length)return
   const ids=[...selectedAlertIds.value]
@@ -452,7 +457,7 @@ const deleteSelectedAlerts=async()=>{
   }catch(error:any){notify(error.message,'error')}
 }
 
-const modelSettings=reactive<any>({provider:'mock',base_url:'',api_key:'',economy_model:'qwen-vl',api_key_configured:false})
+const modelSettings=reactive<any>({provider:'mock',base_url:'',api_key:'',economy_model:'qwen-vl',api_key_configured:false,auto_failover_enabled:true,failover:null})
 const detectorSettings=reactive<any>({general_model:'yolo26s.pt',general_device:'cpu',fire_smoke_model:'models/fire_smoke_yolov8.pt',fire_smoke_device:'cpu',model_sha256:'',license_name:'AGPL-3.0 (internal pilot only)',runtime:{}})
 const retentionSettings=reactive<any>({alert_retention_days:30,log_retention_days:30,auto_cleanup_enabled:true})
 const displaySettings=reactive({show_traffic_report:true,show_current_store_count:true})
@@ -467,7 +472,7 @@ const saveModels=async()=>{try{
   if(baseUrl){try{new URL(baseUrl)}catch{notify('Base URL 不是合法的 URL','error');return}}
   await api('/api/settings/models',{method:'PUT',body:JSON.stringify(modelSettings)});notify('视觉大模型配置已保存');await loadSettings()
 }catch(error:any){notify(error.message,'error')}}
-const testModels=async()=>{testing.value=true;try{const r=await api('/api/settings/models/test',{method:'POST'});notify(`模型连接成功，延迟 ${r.latency_ms||0}ms`)}catch(error:any){notify(error.message,'error')}finally{testing.value=false}}
+const testModels=async()=>{testing.value=true;try{const r=await api('/api/settings/models/test',{method:'POST'});notify(`模型图片识别及业务格式验证通过，耗时 ${r.latency_ms||0}ms`)}catch(error:any){notify(error.message,'error')}finally{testing.value=false}}
 const resetWebhookForm=()=>Object.assign(webhookForm,{id:null,name:'',enabled:false,url:'',auto_severities:[]})
 const editWebhook=(target:any)=>Object.assign(webhookForm,{...target,auto_severities:[...target.auto_severities]})
 const saveWebhook=async()=>{try{const id=webhookForm.id;const path=id?`/api/settings/webhooks/${id}`:'/api/settings/webhooks';await api(path,{method:id?'PUT':'POST',body:JSON.stringify(webhookForm)});notify(`Webhook 已${id?'更新':'新增'}`);resetWebhookForm();await loadWebhooks()}catch(error:any){notify(error.message,'error')}}
@@ -501,6 +506,7 @@ const activeLogFilters=()=>{
   if(logCategory.value==='audit')Object.assign(values,{username:logFilters.username,action:logFilters.action,outcome:logFilters.outcome})
   if(logCategory.value==='analyses')Object.assign(values,{camera_name:logFilters.camera_name,mode:logFilters.mode,status:logFilters.status,occupancy_status:logFilters.occupancy_status,off_duty_state:logFilters.off_duty_state})
   if(logCategory.value==='model-calls')Object.assign(values,{camera_id:logFilters.camera_id,model:logFilters.model,stage:logFilters.stage,outcome:logFilters.outcome})
+  if(logCategory.value==='model-switches')Object.assign(values,{model:logFilters.model,outcome:logFilters.outcome})
   return Object.fromEntries(Object.entries(values).filter(([,value])=>value!==''))
 }
 const loadLogs=async(page=1)=>{if(!isAdmin.value||!validateAnalysisLogRange())return;logLoading.value=true;try{const params=new URLSearchParams({...activeLogFilters(),page:String(page),page_size:String(logData.page_size)});const result=await api(`/api/logs/${logCategory.value}?${params}`);Object.assign(logData,result);expandedLogId.value=null}catch(error:any){notify(`日志加载失败：${error.message}`,'error')}finally{logLoading.value=false}}
@@ -509,9 +515,9 @@ const resetLogFilters=()=>{Object.assign(logFilters,{start:'',end:'',analysis_st
 const logDetailKey=(id:number)=>`${logCategory.value}:${id}`
 const toggleLogDetail=async(row:any)=>{if(expandedLogId.value===row.id){expandedLogId.value=null;return}try{const key=logDetailKey(row.id);if(!logDetails[key])logDetails[key]=await api(`/api/logs/${logCategory.value}/${row.id}`);expandedLogId.value=row.id}catch(error:any){notify(error.message,'error')}}
 const exportLogs=async()=>{if(!validateAnalysisLogRange())return;try{await download(`/api/logs/${logCategory.value}/export`,activeLogFilters(),`${logCategory.value}-logs.csv`);notify('日志已导出')}catch(error:any){notify(error.message,'error')}}
-const logResultText=(row:any)=>row.outcome==='success'?'成功':row.outcome==='failure'||row.outcome==='error'?'失败':row.status||row.outcome
+const logResultText=(row:any)=>row.outcome==='success'?'成功':row.outcome==='failure'||row.outcome==='error'?'失败':row.outcome==='skipped'?'未替换':row.outcome==='running'?'探测中':row.status||row.outcome
 const occupancyText=(value:string|null)=>value==='person_present'?'有人':value==='person_absent'?'无人':value==='unknown'?'未知':'—'
-const offDutyStateText=(value:string|null)=>({person_present:'有人',person_absent_accumulating:'无人·计时中',person_absent_pending_review:'无人·待复核',person_absent_confirmed:'确认无人',person_present_confirmed:'确认有人',analysis_failed:'分析失败',historical_unknown:'历史状态未知'} as Record<string,string>)[value||'']||'—'
+const offDutyStateText=(value:string|null)=>({person_present:'有人',person_absent_accumulating:'无人·计时中',person_absent_pending_review:'无人·待复核',person_absent_confirmed:'确认无人',person_absent_waiting_directory:'已确认无人·等待目录条件',report_generating:'报告生成中',report_generated:'已生成报告',report_failed:'报告生成失败',person_present_confirmed:'确认有人',analysis_failed:'分析失败',historical_unknown:'历史状态未知'} as Record<string,string>)[value||'']||'—'
 const elapsedText=(seconds:number|null)=>seconds==null?'—':seconds<60?`${seconds} 秒`:`${Math.floor(seconds/60)} 分 ${seconds%60} 秒`
 const prettyLog=(value:any)=>JSON.stringify(value,null,2)
 const loadSystemMonitor=async(silent=false)=>{
@@ -537,7 +543,17 @@ const monitorPath=(key:keyof Omit<MonitorPoint,'time'>,fixedMax?:number)=>{
 const monitorArea=(key:keyof Omit<MonitorPoint,'time'>,fixedMax?:number)=>{const path=monitorPath(key,fixedMax);return path?`0,100 ${path} 100,100`:''}
 const monitorStartTime=computed(()=>monitorHistory.value.length?shortTime(monitorHistory.value[0].time):'--:--:--')
 const monitorEndTime=computed(()=>monitorHistory.value.length?shortTime(monitorHistory.value.at(-1)?.time):'--:--:--')
-const monitorHealthy=computed(()=>!!systemMonitor.value&&systemMonitor.value.runtime?.scheduler?.status==='running'&&systemMonitor.value.runtime?.detectors?.general?.status==='ready'&&systemMonitor.value.runtime?.detectors?.fire_smoke?.status==='ready')
+const queueHealth=computed(()=>systemMonitor.value?.runtime?.queue?.status||'degraded')
+const databaseHealth=computed(()=>systemMonitor.value?.database?.status||'critical')
+const monitorHealthy=computed(()=>!!systemMonitor.value&&systemMonitor.value.runtime?.scheduler?.status==='running'&&systemMonitor.value.runtime?.detectors?.general?.status==='ready'&&systemMonitor.value.runtime?.detectors?.fire_smoke?.status==='ready'&&queueHealth.value==='healthy'&&databaseHealth.value==='healthy')
+const queueHealthLabel=computed(()=>queueHealth.value==='healthy'?'队列可靠':queueHealth.value==='recovering'?'队列恢复中':'队列已降级')
+const queueWarning=computed(()=>{
+  if(queueHealth.value==='recovering')return 'Redis已恢复，正在迁移本进程内存积压'
+  const general=systemMonitor.value?.runtime?.queue?.general?.backend==='in_memory'
+  const critical=systemMonitor.value?.runtime?.queue?.critical?.backend==='in_memory'
+  const target=general&&critical?'普通与烟火队列':critical?'烟火队列':'普通队列'
+  return `Redis不可用，${target}已切换到进程内存；应用重启可能丢失这些任务`
+})
 const refreshCurrent=()=>active.value==='system-monitor'?loadSystemMonitor():loadAll()
 const setTab=(name:string)=>{if(!visibleTabs.value.some(tab=>tab.key===name))name='dashboard';if(name==='traffic'&&!displaySettings.show_traffic_report){notify('人流报表已在系统配置中关闭','error');name='dashboard'}active.value=name;location.hash=name;if(name==='system-monitor')startSystemMonitor();else stopSystemMonitor();if(name==='traffic')void loadTrafficMonthly();if(name==='settings')loadSettings();if(name==='webhooks')loadWebhooks();if(name==='users')loadUsers();if(name==='logs')loadLogs(logData.page)}
 const focusDashboardCamera=async(row:TrafficCameraSummary|null)=>{
@@ -861,7 +877,8 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
               <article><i :class="systemMonitor?.runtime?.scheduler?.status==='running'?'good':'bad'"></i><div><b>任务调度器</b><small>SCHEDULER</small></div><span>{{systemMonitor?.runtime?.scheduler?.status||'unknown'}}</span></article>
               <article><i :class="systemMonitor?.runtime?.detectors?.general?.status==='ready'?'good':'bad'"></i><div><b>通用 YOLO</b><small>GENERAL DETECTOR</small></div><span>{{systemMonitor?.runtime?.detectors?.general?.status||'unknown'}}</span></article>
               <article><i :class="systemMonitor?.runtime?.detectors?.fire_smoke?.status==='ready'?'good':'bad'"></i><div><b>烟火检测器</b><small>FIRE / SMOKE</small></div><span>{{systemMonitor?.runtime?.detectors?.fire_smoke?.status||'unknown'}}</span></article>
-              <article><i :class="systemMonitor?.runtime?.queue?.status==='redis'?'good':'warn'"></i><div><b>任务队列</b><small>QUEUE BACKEND</small></div><span>{{systemMonitor?.runtime?.queue?.status||'unknown'}}</span></article>
+              <article><i :class="queueHealth==='healthy'?'good':queueHealth==='recovering'?'warn':'bad'"></i><div><b>任务队列</b><small>QUEUE RELIABILITY</small></div><span>{{queueHealthLabel}}</span></article>
+              <article><i :class="databaseHealth==='healthy'?'good':databaseHealth==='warning'?'warn':'bad'"></i><div><b>PostgreSQL</b><small>DATABASE</small></div><span>{{databaseHealth}}</span></article>
             </div>
           </section>
           <section class="panel workload-panel">
@@ -874,6 +891,37 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             </dl>
           </section>
         </div>
+        <section class="panel queue-reliability" :class="queueHealth">
+          <div class="section-head"><div><h2>队列可靠性</h2><span class="head-en">QUEUE RELIABILITY</span><p>普通分析与烟火检测使用相互隔离的Redis队列</p></div><strong>{{queueHealthLabel}}</strong></div>
+          <div v-if="queueHealth!=='healthy'" class="queue-warning">
+            {{queueWarning}}
+          </div>
+          <dl>
+            <div><dt>普通队列后端</dt><dd>{{systemMonitor?.runtime?.queue?.general?.backend||'unknown'}}</dd></div>
+            <div><dt>Redis连接</dt><dd>{{systemMonitor?.runtime?.queue?.general?.redis_connected?'正常':'断开'}}</dd></div>
+            <div><dt>内存积压</dt><dd>{{systemMonitor?.runtime?.queue?.general?.fallback_depth||0}} / {{systemMonitor?.runtime?.queue?.general?.capacity||0}}</dd></div>
+            <div><dt>累计拒绝</dt><dd :class="{danger:(systemMonitor?.runtime?.queue?.general?.rejected_total||0)>0}">{{systemMonitor?.runtime?.queue?.general?.rejected_total||0}}</dd></div>
+            <div><dt>重连次数</dt><dd>{{systemMonitor?.runtime?.queue?.general?.reconnect_attempts||0}}</dd></div>
+            <div><dt>降级开始</dt><dd>{{systemMonitor?.runtime?.queue?.general?.degraded_since?formatTime(systemMonitor.runtime.queue.general.degraded_since):'—'}}</dd></div>
+            <div><dt>烟火队列后端</dt><dd>{{systemMonitor?.runtime?.queue?.critical?.backend||'unknown'}}</dd></div>
+            <div><dt>烟火内存积压</dt><dd>{{systemMonitor?.runtime?.queue?.critical?.fallback_depth||0}} / {{systemMonitor?.runtime?.queue?.critical?.capacity||0}}</dd></div>
+          </dl>
+          <p v-if="systemMonitor?.runtime?.queue?.general?.last_error" class="queue-error">最后错误：{{systemMonitor.runtime.queue.general.last_error}}</p>
+        </section>
+        <section class="panel database-health" :class="databaseHealth">
+          <div class="section-head"><div><h2>数据库核心指标</h2><span class="head-en">POSTGRESQL CORE METRICS</span><p>连接、容量、锁、事务与任务表维护状态</p></div><strong>{{databaseHealth==='healthy'?'数据库健康':databaseHealth==='warning'?'数据库警告':'数据库异常'}}</strong></div>
+          <dl>
+            <div><dt>数据库容量</dt><dd>{{formatBytes(systemMonitor?.database?.database_size||0)}}</dd></div>
+            <div><dt>连接使用率</dt><dd :class="{danger:(systemMonitor?.database?.connection_percent||0)>=90}">{{systemMonitor?.database?.connections||0}} / {{systemMonitor?.database?.max_connections||0}}（{{systemMonitor?.database?.connection_percent||0}}%）</dd></div>
+            <div><dt>活跃连接</dt><dd>{{systemMonitor?.database?.active_connections||0}}</dd></div>
+            <div><dt>锁等待</dt><dd :class="{danger:(systemMonitor?.database?.lock_waiters||0)>0}">{{systemMonitor?.database?.lock_waiters||0}}</dd></div>
+            <div><dt>最长事务</dt><dd :class="{danger:(systemMonitor?.database?.longest_transaction_seconds||0)>=300}">{{systemMonitor?.database?.longest_transaction_seconds||0}} 秒</dd></div>
+            <div><dt>任务表有效行</dt><dd>{{systemMonitor?.database?.background_tasks_live||0}}</dd></div>
+            <div><dt>任务表死元组</dt><dd :class="{danger:(systemMonitor?.database?.background_tasks_dead_percent||0)>=20}">{{systemMonitor?.database?.background_tasks_dead||0}}（{{systemMonitor?.database?.background_tasks_dead_percent||0}}%）</dd></div>
+            <div><dt>最近自动清理</dt><dd>{{systemMonitor?.database?.background_tasks_last_autovacuum?formatTime(systemMonitor.database.background_tasks_last_autovacuum):'—'}}</dd></div>
+          </dl>
+          <p v-if="systemMonitor?.database?.error" class="queue-error">数据库错误：{{systemMonitor.database.error}}</p>
+        </section>
       </section>
 
       <!-- ============ 摄像头配置 CAMERA MANAGEMENT ============ -->
@@ -955,10 +1003,12 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         <section class="panel table-panel">
           <div class="section-head">
             <div><h2>告警中心</h2><span class="head-en">AI ALERT CENTER</span><p>烟火紧急告警置顶；仅确认违规才告警</p></div>
-            <div class="actions"><button class="ghost" :disabled="!selectedAlertIds.length" @click="exportSelectedAlerts">导出勾选 ({{selectedAlertIds.length}})</button><button class="ghost" @click="exportFilteredAlerts">导出筛选结果</button><button class="primary" :disabled="!selectedAlertIds.length" @click="openWebhookSend"><TechIcon name="webhook" :size="13"/>发送企业微信 ({{selectedAlertIds.length}})</button><button v-if="isAdmin" class="danger" :disabled="!selectedAlertIds.length" @click="deleteSelectedAlerts"><TechIcon name="trash" :size="13"/>删除勾选 ({{selectedAlertIds.length}})</button><button v-if="isAdmin" class="link" @click="cleanupAlerts"><TechIcon name="trash" :size="13"/>清理历史</button></div>
+            <div class="actions"><button class="ghost" :disabled="!selectedAlertIds.length" @click="selectedAlertIds=[]">清除勾选</button><button class="ghost" :disabled="!selectedAlertIds.length" @click="exportSelectedAlerts">导出勾选 ({{selectedAlertIds.length}})</button><button class="ghost" @click="exportFilteredAlerts">导出筛选结果</button><button class="primary" :disabled="!selectedAlertIds.length" @click="openWebhookSend"><TechIcon name="webhook" :size="13"/>发送企业微信 ({{selectedAlertIds.length}})</button><button v-if="isAdmin" class="danger" :disabled="!selectedAlertIds.length" @click="deleteSelectedAlerts"><TechIcon name="trash" :size="13"/>删除勾选 ({{selectedAlertIds.length}})</button><button v-if="isAdmin" class="link" @click="cleanupAlerts"><TechIcon name="trash" :size="13"/>清理历史</button></div>
           </div>
           <div class="filter-bar">
-            <label class="filter-item"><span class="filter-label">日期 / DATE</span><input v-model="alertFilter.date" type="date" @change="applyAlertFilter"></label>
+            <label class="filter-item"><span class="filter-label">营业厅</span><select v-model="alertFilter.directory_id" @change="applyAlertFilter"><option value="">全部营业厅</option><option value="0">未分组</option><option v-for="directory in cameraDirectories" :key="directory.id" :value="String(directory.id)">{{directory.name}}</option></select></label>
+            <label class="filter-item"><span class="filter-label">开始日期</span><input v-model="alertFilter.start_date" type="date" :max="alertFilter.end_date||undefined" @change="applyAlertFilter"></label>
+            <label class="filter-item"><span class="filter-label">结束日期</span><input v-model="alertFilter.end_date" type="date" :min="alertFilter.start_date||undefined" @change="applyAlertFilter"></label>
             <label class="filter-item"><span class="filter-label">事件类型 / EVENT</span>
               <select v-model="alertFilter.mode" @change="applyAlertFilter">
                 <option value="">全部事件</option>
@@ -1120,11 +1170,12 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
       <!-- ============ 日志管理 ADMIN LOGS ============ -->
       <section v-else-if="active==='logs'" class="page logs-page">
         <section class="panel logs-shell">
-          <div class="section-head"><div><h2>日志管理</h2><span class="head-en">ADMINISTRATOR LOGS</span><p>用户审计、摄像头分析与外部大模型调用记录</p></div><button class="ghost" @click="exportLogs"><TechIcon name="database" :size="13"/>导出当前筛选</button></div>
+          <div class="section-head"><div><h2>日志管理</h2><span class="head-en">ADMINISTRATOR LOGS</span><p>用户审计、摄像头分析、大模型调用与替换记录</p></div><button class="ghost" @click="exportLogs"><TechIcon name="database" :size="13"/>导出当前筛选</button></div>
           <div class="log-tabs">
             <button :class="{active:logCategory==='audit'}" @click="switchLogCategory('audit')">用户操作日志</button>
             <button :class="{active:logCategory==='analyses'}" @click="switchLogCategory('analyses')">摄像头分析日志</button>
             <button :class="{active:logCategory==='model-calls'}" @click="switchLogCategory('model-calls')">大模型调用日志</button>
+            <button :class="{active:logCategory==='model-switches'}" @click="switchLogCategory('model-switches')">大模型替换日志</button>
           </div>
           <div class="log-filters">
             <template v-if="logCategory==='analyses'"><label>开始时间<input v-model="logFilters.analysis_start" type="datetime-local"></label><label>结束时间<input v-model="logFilters.analysis_end" type="datetime-local"></label></template>
@@ -1133,23 +1184,25 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
             <template v-if="logCategory==='analyses'"><label>摄像头<input v-model.trim="logFilters.camera_name" placeholder="摄像头名称"></label></template>
             <template v-else-if="logCategory==='model-calls'"><label>摄像头<input v-model.trim="logFilters.camera_id" placeholder="摄像头 ID"></label></template>
             <template v-if="logCategory==='analyses'"><label>检测模式<select v-model="logFilters.mode"><option value="">全部</option><option v-for="(_,mode) in modeInfo" :key="mode" :value="mode">{{modeName(mode)}}</option></select></label><label>分析状态<select v-model="logFilters.status"><option value="">全部</option><option value="confirmed">confirmed</option><option value="suspected">suspected</option><option value="uncertain">uncertain</option><option value="none">none</option></select></label></template>
-            <template v-if="logCategory==='analyses'"><label>人员判定<select v-model="logFilters.occupancy_status"><option value="">全部</option><option value="person_present">有人</option><option value="person_absent">无人</option><option value="unknown">未知</option></select></label><label>离岗阶段<select v-model="logFilters.off_duty_state"><option value="">全部</option><option value="person_present">有人</option><option value="person_absent_accumulating">无人·计时中</option><option value="person_absent_pending_review">无人·待复核</option><option value="person_absent_confirmed">确认无人</option><option value="person_present_confirmed">确认有人</option><option value="analysis_failed">分析失败</option><option value="historical_unknown">历史状态未知</option></select></label></template>
+            <template v-if="logCategory==='analyses'"><label>人员判定<select v-model="logFilters.occupancy_status"><option value="">全部</option><option value="person_present">有人</option><option value="person_absent">无人</option><option value="unknown">未知</option></select></label><label>离岗阶段<select v-model="logFilters.off_duty_state"><option value="">全部</option><option value="person_present">有人</option><option value="person_absent_accumulating">无人·计时中</option><option value="person_absent_pending_review">无人·待复核</option><option value="person_absent_confirmed">确认无人</option><option value="person_absent_waiting_directory">等待目录条件</option><option value="report_generating">报告生成中</option><option value="report_generated">已生成报告</option><option value="report_failed">报告生成失败</option><option value="person_present_confirmed">确认有人</option><option value="analysis_failed">分析失败</option><option value="historical_unknown">历史状态未知</option></select></label></template>
             <template v-if="logCategory==='model-calls'"><label>模型<input v-model.trim="logFilters.model" placeholder="模型名称"></label><label>阶段<select v-model="logFilters.stage"><option value="">全部</option><option value="single">单模型检测</option></select></label></template>
-            <label v-if="logCategory!=='analyses'">结果<select v-model="logFilters.outcome"><option value="">全部</option><option value="success">成功</option><option value="failure">失败</option><option value="error">错误</option></select></label>
+            <label v-if="logCategory==='model-switches'">模型<input v-model.trim="logFilters.model" placeholder="原模型或替换后的模型"></label>
+            <label v-if="logCategory!=='analyses'">结果<select v-model="logFilters.outcome"><option value="">全部</option><option value="success">成功</option><option value="failure">失败</option><option value="error" v-if="logCategory!=='model-switches'">错误</option><option v-if="logCategory==='model-switches'" value="skipped">未替换</option><option v-if="logCategory==='model-switches'" value="running">探测中</option></select></label>
             <div class="actions"><button class="primary" @click="loadLogs(1)">查询</button><button class="ghost" @click="resetLogFilters">重置</button></div>
           </div>
           <div class="log-summary"><span>共 {{logData.total}} 条</span><span>第 {{logData.page}} / {{logPages}} 页</span></div>
           <div class="log-table-wrap">
             <table class="log-table">
-              <thead><tr v-if="logCategory==='audit'"><th>时间</th><th>用户</th><th>操作</th><th>目标</th><th>结果</th><th></th></tr><tr v-else-if="logCategory==='analyses'"><th>时间</th><th>摄像头</th><th>模式</th><th>人员判定 / 阶段</th><th>无人持续</th><th>分析图片</th><th>置信度</th><th>耗时</th><th></th></tr><tr v-else><th>时间</th><th>摄像头</th><th>阶段 / 模型</th><th>模式</th><th>结果</th><th>耗时</th><th></th></tr></thead>
+              <thead><tr v-if="logCategory==='audit'"><th>时间</th><th>用户</th><th>操作</th><th>目标</th><th>结果</th><th></th></tr><tr v-else-if="logCategory==='analyses'"><th>时间</th><th>摄像头</th><th>模式</th><th>人员判定 / 阶段</th><th>无人持续</th><th>分析图片</th><th>置信度</th><th>耗时</th><th></th></tr><tr v-else-if="logCategory==='model-switches'"><th>时间 / 来源</th><th>原模型</th><th>替换后模型</th><th>原因</th><th>结果</th><th></th></tr><tr v-else><th>时间</th><th>摄像头</th><th>阶段 / 模型</th><th>模式</th><th>结果</th><th>耗时</th><th></th></tr></thead>
               <tbody>
                 <template v-for="row in logData.items" :key="row.id">
                   <tr v-if="logCategory==='audit'"><td>{{formatTime(row.created_at)}}</td><td><b>{{row.actor_display_name||row.actor_username||'未知用户'}}</b><small>{{row.actor_username}}</small></td><td>{{row.action}}<small>{{row.method}} {{row.path}}</small></td><td>{{row.target_type}} {{row.target_id}}</td><td><span class="log-result" :class="row.outcome">{{logResultText(row)}} · {{row.status_code}}</span></td><td><button class="link" @click="toggleLogDetail(row)">详情</button></td></tr>
                   <tr v-else-if="logCategory==='analyses'"><td>{{formatTime(row.created_at)}}</td><td><b>{{row.camera_name||row.camera_id||'已删除摄像头'}}</b><small>{{row.camera_id}}</small></td><td>{{modeName(row.mode)}}<small>{{row.analysis_source||''}}</small></td><td><template v-if="row.mode==='off_duty'"><b>{{occupancyText(row.occupancy_status)}}</b><small>{{offDutyStateText(row.off_duty_state)}}</small></template><span v-else class="log-result" :class="row.status">{{row.status}}</span></td><td>{{row.mode==='off_duty'?elapsedText(row.absence_elapsed_seconds):'—'}}</td><td><EvidencePreview :src="row.evidence_url" alt="分析图片" /></td><td>{{Math.round(row.confidence*100)}}%</td><td>{{row.latency_ms}} ms</td><td><button class="link" @click="toggleLogDetail(row)">详情</button></td></tr>
+                  <tr v-else-if="logCategory==='model-switches'"><td>{{formatTime(row.created_at)}}<small>{{row.trigger==='automatic'?'自动替换':'管理员修改'}}</small></td><td><b>{{row.from_model}}</b></td><td><b>{{row.to_model||'— 未替换'}}</b></td><td><span class="switch-reason">{{row.reason}}</span><small v-if="row.http_status">HTTP {{row.http_status}}</small></td><td><span class="log-result" :class="row.outcome">{{logResultText(row)}}</span></td><td><button class="link" @click="toggleLogDetail(row)">候选与详情</button></td></tr>
                   <tr v-else><td>{{formatTime(row.created_at)}}</td><td><b>{{row.camera_name||row.camera_id||'已删除摄像头'}}</b><small>{{row.camera_id}}</small></td><td><b>{{row.stage==='single'?'单模型':row.stage==='economy'?'经济':'增强'}}</b><small>{{row.model}}</small></td><td>{{row.modes?.map((m:Mode)=>modeName(m)).join('、')}}</td><td><span class="log-result" :class="row.outcome">{{logResultText(row)}}<template v-if="row.http_status"> · {{row.http_status}}</template></span></td><td>{{row.latency_ms}} ms</td><td><button class="link" @click="toggleLogDetail(row)">详情</button></td></tr>
-                  <tr v-if="expandedLogId===row.id" class="log-detail-row"><td :colspan="logCategory==='audit'?6:logCategory==='analyses'?9:7"><pre>{{prettyLog(logDetails[logDetailKey(row.id)]||row)}}</pre></td></tr>
+                  <tr v-if="expandedLogId===row.id" class="log-detail-row"><td :colspan="logCategory==='audit'||logCategory==='model-switches'?6:logCategory==='analyses'?9:7"><pre>{{prettyLog(logDetails[logDetailKey(row.id)]||row)}}</pre></td></tr>
                 </template>
-                <tr v-if="!logData.items.length"><td :colspan="logCategory==='analyses'?9:7" class="empty-cell">{{logLoading?'正在加载…':'暂无日志'}}</td></tr>
+                <tr v-if="!logData.items.length"><td :colspan="logCategory==='analyses'?9:logCategory==='model-switches'?6:7" class="empty-cell">{{logLoading?'正在加载…':'暂无日志'}}</td></tr>
               </tbody>
             </table>
           </div>
@@ -1189,16 +1242,18 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
         <section class="panel settings-card settings-card-retention">
           <div class="section-head"><div><h2>数据保留</h2><span class="head-en">DATA RETENTION</span><p>到期自动清理告警记录与证据图片</p></div><label class="switch"><input v-model="retentionSettings.auto_cleanup_enabled" type="checkbox"><span></span></label></div>
           <label>告警保留天数<input v-model.number="retentionSettings.alert_retention_days" type="number" min="1" max="365"><small class="field-hint">超过该天数的告警与证据会被自动清理；也可在告警中心手动清理</small></label>
-          <label>日志保留天数<input v-model.number="retentionSettings.log_retention_days" type="number" min="1" max="365"><small class="field-hint">用户操作、摄像头分析和大模型调用日志统一保留，默认 30 天</small></label>
+          <label>日志保留天数<input v-model.number="retentionSettings.log_retention_days" type="number" min="1" max="365"><small class="field-hint">用户操作、摄像头分析、大模型调用和替换日志统一保留，默认 30 天</small></label>
           <button class="primary" @click="saveRetention">保存保留策略</button>
         </section>
 
         <section class="panel settings-card settings-card-model">
-          <div class="section-head"><div><h2>外部视觉大模型</h2><span class="head-en">VISION LANGUAGE MODEL</span><p>用于玩手机、人员吸烟检测与离岗告警终审</p></div><span class="status-dot" :class="{ready:modelSettings.api_key_configured||modelSettings.provider==='mock',warn:!modelSettings.api_key_configured&&modelSettings.provider!=='mock'}">{{modelSettings.api_key_configured?'● CONFIGURED':modelSettings.provider==='mock'?'● MOCK 模式':'● 未配置'}}</span></div>
+          <div class="section-head"><div><h2>外部视觉大模型</h2><span class="head-en">VISION LANGUAGE MODEL</span><p>用于玩手机、人员吸烟检测与离岗告警终审</p></div><span class="status-dot" :class="{ready:(modelSettings.api_key_configured&&!modelSettings.failover?.failure_since)||modelSettings.provider==='mock',warn:!!modelSettings.failover?.failure_since||(!modelSettings.api_key_configured&&modelSettings.provider!=='mock')}">{{modelSettings.failover?.failure_since?'● 模型故障':modelSettings.api_key_configured?'● CONFIGURED':modelSettings.provider==='mock'?'● MOCK 模式':'● 未配置'}}</span></div>
           <label>提供商<select v-model="modelSettings.provider"><option value="openai_compatible">OpenAI 兼容接口</option><option value="mock">模拟模式</option></select></label>
           <label>Base URL<input v-model.trim="modelSettings.base_url" placeholder="http://192.168.1.100:8000/v1"><small class="field-hint">支持 HTTP / HTTPS：内网模型服务可使用 HTTP，公网服务建议 HTTPS。地址需包含 /v1，末尾斜杠可省略。HTTP 明文传输存在 API Key 泄露风险，建议仅用于受信内网。</small></label>
           <label>API Key<input v-model="modelSettings.api_key" type="password" placeholder="留空表示保持现有密钥"><small class="field-hint">首次配置必须填写；保存后留空表示继续使用现有密钥。密钥不会回显。</small></label>
           <label>检测模型<input v-model.trim="modelSettings.economy_model"></label>
+          <label class="failover-setting"><input v-model="modelSettings.auto_failover_enabled" type="checkbox">连续故障满 30 分钟后自动替换<small class="field-hint">使用同一网址和密钥，验证图片识别及业务格式后替换；任一有效响应会重新计时，替换后不自动切回。</small></label>
+          <p v-if="modelSettings.failover?.failure_since" class="field-hint">连续故障开始：{{formatTime(modelSettings.failover.failure_since)}}<br>{{modelSettings.failover.reason}}<template v-if="modelSettings.failover.next_attempt_at"><br>下次探测：{{formatTime(modelSettings.failover.next_attempt_at)}}</template></p>
           <div class="actions"><button class="primary" @click="saveModels">保存</button><button class="ghost" :disabled="testing" @click="testModels"><TechIcon name="zap" :size="13"/>{{testing?'TESTING…':'测试已保存配置'}}</button></div>
         </section>
 

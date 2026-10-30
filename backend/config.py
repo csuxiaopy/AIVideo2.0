@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -59,6 +60,10 @@ class Settings(BaseSettings):
     review_timeout_seconds: float = 90
     review_max_evidence_age_seconds: float = 120
     notification_workers: int = 4
+    background_completed_retention_days: int = Field(default=3, ge=1, le=365)
+    background_failed_retention_days: int = Field(default=30, ge=1, le=3650)
+    background_cleanup_batch_size: int = Field(default=10000, ge=5000, le=20000)
+    background_cleanup_interval_seconds: int = Field(default=60, ge=10, le=3600)
     fire_smoke_model: str = "models/fire_smoke_yolov8.pt"
     fire_smoke_sha256: str = "ac0a10257b2bc1f20c9d957f8adeeb61dd6140322fc19d0b4a116cb491776d16"
     fire_smoke_device: str = "cpu"

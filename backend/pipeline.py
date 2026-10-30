@@ -37,7 +37,7 @@ from backend.rules import (
 )
 from backend.schemas import CameraOptions, Detection, GeometrySpec, Mode, ScheduleSpec
 from backend.security import SecretCipher
-from backend.vlm import VLMError, VisionModelClient
+from backend.vlm import VLMDeferred, VLMError, VisionModelClient
 from backend.webhook import WebhookClient
 
 
@@ -141,7 +141,8 @@ class MonitoringRuntime:
         self.event_bus = EventBus()
         self.queue = AnalysisQueue(settings.redis_url, maxsize=settings.analysis_queue_maxsize)
         self.fire_queue = AnalysisQueue(
-            settings.redis_url, maxsize=settings.analysis_queue_maxsize, prefix="monitor:fire-tasks"
+            settings.redis_url, maxsize=settings.analysis_queue_maxsize,
+            prefix="monitor:fire-tasks",
         )
         self.rules = RuleStateRegistry()
         self.media = MediaGateway(
@@ -268,6 +269,9 @@ class MonitoringRuntime:
 
     async def close(self) -> None:
         self.running = False
+        if getattr(self, "model_failover", None):
+            await self.model_failover.close()
+            self.model_failover = None
         tasks = [task for task in [self.scheduler_task, self.cleanup_task, self.preview_detector_task, *self.worker_tasks, *self.fire_worker_tasks] if task]
         for task in tasks:
             task.cancel()
@@ -287,7 +291,13 @@ class MonitoringRuntime:
         self.yolo.close()
 
     async def reload_models(self) -> None:
-        model_settings = self.repository.get_model_settings()
+        from backend.model_failover import ModelFailover
+        from backend.model_switch_store import ModelConfig
+        import asyncio
+        model_settings = await asyncio.to_thread(self.repository.get_model_settings)
+        if getattr(self, "model_failover", None):
+            await self.model_failover.close()
+            self.model_failover = None
         if self.vlm:
             await self.vlm.close()
             self.vlm = None
@@ -300,6 +310,8 @@ class MonitoringRuntime:
                 model_settings.economy_model,
                 log_writer=self.repository.add_model_call_log,
             )
+            self.model_failover = ModelFailover(self.vlm, ModelConfig.from_row(model_settings), self.cipher)
+            await self.model_failover.start()
 
     async def reload_detectors(self) -> None:
         detector_settings = self.repository.get_detector_settings()
@@ -574,13 +586,18 @@ class MonitoringRuntime:
         queue = self.fire_queue if fire_only else self.queue
         queued = self.fire_queued if fire_only else self.queued
         while self.running:
-            task = await queue.get()
+            task = None
             acquired = False
+            failed = False
             try:
+                task = await queue.get()
                 if getattr(self, "async_pipeline", None) and self.async_pipeline.blocked(task.camera_id):
                     continue
                 acquired = await queue.acquire_camera(task.camera_id)
                 if not acquired:
+                    # Analysis is latest-frame work. Dropping this duplicate is
+                    # safer than retrying it: the scheduler will enqueue a fresh
+                    # task next period after the in-flight owner releases its lock.
                     continue
                 async with self.camera_locks[task.camera_id]:
                     camera = self.repository.get_camera(task.camera_id)
@@ -623,14 +640,33 @@ class MonitoringRuntime:
             except asyncio.CancelledError:
                 raise
             except Exception:
+                failed = True
                 TASKS.labels(status="failed").inc()
                 self.failures += 1
-                logger.exception("Camera task failed: %s", task.camera_id)
+                logger.exception(
+                    "Camera task failed: %s",
+                    task.camera_id if task is not None else f"{queue.prefix}:receive",
+                )
+                if task is None:
+                    await asyncio.sleep(1)
             finally:
-                if acquired:
-                    await queue.release_camera(task.camera_id)
-                queued.discard(task.camera_id)
-                await queue.ack(task)
+                if task is not None:
+                    try:
+                        if acquired:
+                            await queue.release_camera(task.camera_id)
+                    except Exception:
+                        logger.exception("Failed to release camera queue lock: %s", task.camera_id)
+                    queued.discard(task.camera_id)
+                    try:
+                        if failed and fire_only:
+                            if await queue.retry(task, delay_seconds=1):
+                                await queue.ack(task)
+                        else:
+                            await queue.ack(task)
+                    except Exception:
+                        # The Redis message remains pending and can be reclaimed;
+                        # the in-memory admission flag must never remain stuck.
+                        logger.exception("Failed to acknowledge camera task: %s", task.camera_id)
 
     def fire_due(self, camera_id: str) -> bool:
         return time.monotonic() >= self.next_fire_run.get(camera_id, 0.0)
@@ -796,8 +832,16 @@ class MonitoringRuntime:
                     off_duty_state = "person_present"
                     reason = "岗位区域内检测到人员"
                 elif state.absence_alerted:
-                    off_duty_state = "person_absent_pending_review"
-                    reason = "岗位区域持续无人，等待大模型复核"
+                    off_duty_state = (
+                        state.absence_report_state
+                        or ("person_absent_waiting_directory" if state.absence_vlm_confirmed
+                            else "person_absent_pending_review")
+                    )
+                    reason = {
+                        "person_absent_waiting_directory": "已确认无人，等待目录联合报警条件",
+                        "report_generating": "离岗条件满足，报告正在写入",
+                        "report_failed": "报告写入失败，将自动重试",
+                    }.get(off_duty_state, "岗位区域持续无人，等待大模型复核")
                 else:
                     off_duty_state = "person_absent_accumulating"
                     reason = "岗位区域无人，连续离岗计时中"
@@ -1176,7 +1220,8 @@ class MonitoringRuntime:
                 return False
             member_states = [self.rules.for_camera(item.id) for item in members]
             if not all(
-                item.absence_vlm_confirmed
+                item.absence_alerted
+                and item.absence_vlm_confirmed
                 and item.absence_evidence_jpeg is not None
                 and item.absence_since is not None
                 for item in member_states
@@ -1313,6 +1358,8 @@ class MonitoringRuntime:
                 "final_review": True, "reason": result.reason,
             }
         except VLMError as exc:
+            if isinstance(exc, VLMDeferred):
+                raise
             VLM_CALLS.labels(mode=Mode.OFF_DUTY.value, status="error").inc()
             if getattr(self, "async_pipeline", None):
                 reason = self.async_pipeline.review_invalid(camera.id, Mode.OFF_DUTY.value)
@@ -1377,7 +1424,7 @@ class MonitoringRuntime:
                 state.phone_event_update(False, options.phone_use_seconds, now)
             if Mode.OFF_DUTY in modes:
                 if off_duty_event_started_at:
-                    state.record_off_duty_review(True, now, frame_jpeg, 0.0)
+                    state.record_off_duty_review(False, now)
             for mode in sorted(modes, key=lambda item: item.value):
                 analysis = self.repository.add_analysis(
                     camera_id=camera.id, mode=mode.value, status="uncertain", confidence=0,
@@ -1429,7 +1476,7 @@ class MonitoringRuntime:
                 if mode == Mode.OFF_DUTY:
                     if result.status == "none":
                         state.reset_off_duty_event()
-                    elif off_duty_event_started_at:
+                    elif off_duty_event_started_at and confirmed:
                         # Only an explicit "person present" result interrupts a
                         # behavior-owned absence event. Other results keep timing.
                         state.record_off_duty_review(
@@ -1456,6 +1503,8 @@ class MonitoringRuntime:
                 })
             return output
         except VLMError as exc:
+            if isinstance(exc, VLMDeferred):
+                raise
             VLM_CALLS.labels(mode="behavior_combined", status="error").inc()
             output = []
             if getattr(self, "async_pipeline", None):
@@ -1466,18 +1515,14 @@ class MonitoringRuntime:
                     if mode == Mode.OFF_DUTY:
                         off_duty_analysis = analysis
                 if Mode.OFF_DUTY in modes and off_duty_event_started_at:
-                    state.record_off_duty_review(True, now, frame_jpeg, 0.0)
-                    if state.absence_alerted:
-                        await self._maybe_create_off_duty_alert(
-                            camera, off_duty_analysis, now
-                        )
+                    state.record_off_duty_review(False, now)
                 # Never mutate an event on a failed asynchronous model request.
                 return [{"mode": mode.value, "status": "uncertain"} for mode in modes]
             if Mode.PHONE_USE in modes:
                 state.phone_event_update(False, options.phone_use_seconds, now)
             if Mode.OFF_DUTY in modes:
                 if off_duty_event_started_at:
-                    state.record_off_duty_review(True, now, frame_jpeg, 0.0)
+                    state.record_off_duty_review(False, now)
             off_duty_analysis = None
             for mode in sorted(modes, key=lambda item: item.value):
                 VLM_CALLS.labels(mode=mode.value, status="error").inc()
@@ -1496,7 +1541,18 @@ class MonitoringRuntime:
     async def status(self) -> dict[str, Any]:
         general_depth = await self.queue.depths()
         fire_depth = await self.fire_queue.depths()
+        general_status = self.queue.status()
+        critical_status = self.fire_queue.status()
+        queue_backends = {general_status["backend"], critical_status["backend"]}
+        queue_state = (
+            "degraded" if ("in_memory" in queue_backends
+                           or general_status["rejected_recently"]
+                           or critical_status["rejected_recently"])
+            else "recovering" if "recovering" in queue_backends
+            else "healthy"
+        )
         return {
+            "vlm_failover": self.model_failover.status() if getattr(self, "model_failover", None) else None,
             "postprocessing": (self.async_pipeline.status() if getattr(self, "async_pipeline", None)
                                else {"enabled": False}),
             "person_detection": self.person_detection_status(),
@@ -1523,7 +1579,10 @@ class MonitoringRuntime:
             },
             "yolo": {"status": "ready" if self.yolo.available else "degraded", "detail": self.yolo.detail},
             "queue": {
-                "status": "redis" if self.queue.redis_available else "in_memory",
+                "status": queue_state,
+                "backend": general_status["backend"],
+                "general": general_status,
+                "critical": critical_status,
                 "depth": general_depth,
                 "fire_depth": fire_depth,
             },
