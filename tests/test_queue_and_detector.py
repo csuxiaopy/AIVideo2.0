@@ -24,6 +24,47 @@ async def test_fallback_queue_respects_priority_and_reports_per_priority_depth()
 
 
 @pytest.mark.asyncio
+async def test_redis_failure_is_visible_and_falls_back_without_dropping_task():
+    class BrokenRedis:
+        async def xinfo_groups(self, stream):
+            raise ConnectionError("redis down")
+
+        async def aclose(self):
+            pass
+
+    queue = AnalysisQueue("redis://unused", maxsize=1)
+    queue.redis = BrokenRedis()
+    queue.redis_available = True
+    queue.backend = "redis"
+
+    assert await queue.enqueue("camera-1")
+    assert queue.status()["backend"] == "in_memory"
+    assert queue.status()["degraded_since"] is not None
+    assert queue.status()["last_error"].startswith("ConnectionError")
+    assert await queue.enqueue("camera-2") is None
+    assert queue.status()["rejected_total"] == 1
+    assert queue.status()["rejected_recently"]
+
+
+@pytest.mark.asyncio
+async def test_recovery_migrates_memory_work_before_switching_to_redis():
+    migrated = []
+
+    class RecoveredRedis:
+        async def xadd(self, stream, values):
+            migrated.append((stream, values))
+
+    queue = AnalysisQueue("redis://unused")
+    await queue.enqueue("camera-1", "high")
+    await queue._migrate_fallback(RecoveredRedis())
+
+    assert queue.status()["backend"] == "redis"
+    assert queue.status()["redis_connected"]
+    assert queue.status()["fallback_depth"] == 0
+    assert migrated[0][1]["camera_id"] == "camera-1"
+
+
+@pytest.mark.asyncio
 async def test_redis_queue_reclaims_stale_worker_messages():
     queue = AnalysisQueue("redis://unused")
 
@@ -129,7 +170,7 @@ def test_yolo_process_pool_configuration_and_main_process_tracking(monkeypatch):
     assert detections[0].track_id is not None
     assert detector.status()["inference_processes"] == 4
     assert detector.status()["threads_per_process"] == 5
-    executor = detector.executor
+    executor = detector.executors[0]
     detector.close()
     assert executor.closed
 

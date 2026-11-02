@@ -57,9 +57,9 @@ def _predict_in_worker(
     """Load one model per process and return only serializable raw detections."""
     global _worker_model
     if _worker_model is None:
-        from ultralytics import YOLO
+        from backend.detectors.tensorrt_runtime import DetectionModel
 
-        _worker_model = YOLO(model_name)
+        _worker_model = DetectionModel(model_name, device, imgsz)
     image = decode_jpeg(jpeg)
     height, width = image.shape[:2]
     result = _worker_model.predict(
@@ -80,9 +80,9 @@ def _predict_batch_in_worker(
 ) -> list[tuple[int, int, list[tuple[int, str, float, tuple[float, float, float, float]]]]]:
     global _worker_model
     if _worker_model is None:
-        from ultralytics import YOLO
+        from backend.detectors.tensorrt_runtime import DetectionModel
 
-        _worker_model = YOLO(model_name)
+        _worker_model = DetectionModel(model_name, device, imgsz)
     images = [decode_jpeg(jpeg) for jpeg in jpegs]
     predictions = _worker_model.predict(
         source=images, imgsz=imgsz, conf=confidence, iou=iou, device=device, verbose=False
@@ -324,6 +324,7 @@ class YoloDetector:
             "model": self.model_name,
             "device": self.device,
             "devices": self.devices,
+            "backend_policy": "tensorrt_with_pytorch_fallback" if os.getenv("TENSORRT_ENABLED", "false").lower() == "true" else "pytorch",
             "imgsz": self.imgsz,
             "conf": self.confidence,
             "iou": self.iou,

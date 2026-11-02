@@ -45,9 +45,9 @@ class FireSmokeDetector:
                 raise RuntimeError(
                     f"model SHA256 mismatch: expected {self.expected_sha256}, got {self.model_hash}"
                 )
-            from ultralytics import YOLO
+            from backend.detectors.tensorrt_runtime import DetectionModel
 
-            self.model = YOLO(str(path))
+            self.model = DetectionModel(str(path), self.device, self.imgsz)
             names = {str(value).lower() for value in self.model.names.values()}
             if not ({"fire", "flame"} & names) or "smoke" not in names:
                 raise RuntimeError(f"模型类别必须包含 fire/flame 和 smoke，实际为 {sorted(names)}")
@@ -100,6 +100,7 @@ class FireSmokeDetector:
             "model": self.version,
             "sha256": self.model_hash,
             "device": self.device,
+            "backend": getattr(self.model, "backend", "pytorch"),
             "latency_ms": self.last_latency_ms,
             "processed": self.processed,
             "failures": self.failures,

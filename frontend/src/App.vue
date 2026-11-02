@@ -50,6 +50,7 @@ const active = ref('dashboard')
 const loading = ref(false)
 const dashboard = ref<any>({runtime:{}})
 type SystemMonitor = {
+  gpu?:{available:boolean;devices:{index:number;name:string;utilization_percent:number|null;memory_used_mb:number|null;memory_total_mb:number|null;temperature_c:number|null}[]}
   timestamp:string;uptime_seconds:number
   host:{cpu_percent:number;cpu_count:number;memory_used:number;memory_total:number;memory_percent:number;disk_used:number;disk_total:number;disk_percent:number}
   application:{task_rate:number;vlm_calls_total:number;analysis_average_ms:number;processed:number;failures:number;online_cameras:number;camera_count:number}
@@ -836,6 +837,14 @@ onUnmounted(()=>{window.clearInterval(refreshTimer);window.clearInterval(clockTi
           <button class="ghost" @click="loadSystemMonitor()"><TechIcon name="refresh" :size="14" :class="{spin:systemMonitorLoading}"/>刷新</button>
         </div>
 
+        <div class="monitor-stat-grid" v-if="systemMonitor?.gpu?.devices?.length">
+          <article v-for="gpu in systemMonitor.gpu.devices" :key="gpu.index" class="monitor-stat" :class="{warning:(gpu.utilization_percent||0)>90}">
+            <header><span>GPU {{gpu.index}} 使用率</span><TechIcon name="cpu" :size="17"/></header>
+            <strong>{{gpu.utilization_percent==null?'—':gpu.utilization_percent.toFixed(1)}}<small>%</small></strong>
+            <footer>{{gpu.name}} · 显存 {{gpu.memory_used_mb??'—'}} / {{gpu.memory_total_mb??'—'}} MB · {{gpu.temperature_c??'—'}}℃</footer>
+          </article>
+        </div>
+        <p v-else class="muted">GPU 指标暂不可用</p>
         <div class="monitor-stat-grid">
           <article class="monitor-stat" :class="{warning:(systemMonitor?.host.cpu_percent||0)>80}"><header><span>CPU 使用率</span><TechIcon name="cpu" :size="17"/></header><strong>{{systemMonitor?.host.cpu_percent?.toFixed(1)||'0.0'}}<small>%</small></strong><footer>{{systemMonitor?.host.cpu_count||0}} LOGICAL CORES</footer></article>
           <article class="monitor-stat" :class="{warning:(systemMonitor?.host.memory_percent||0)>85}"><header><span>内存使用率</span><TechIcon name="activity" :size="17"/></header><strong>{{systemMonitor?.host.memory_percent?.toFixed(1)||'0.0'}}<small>%</small></strong><footer>{{formatBytes(systemMonitor?.host.memory_used)}} / {{formatBytes(systemMonitor?.host.memory_total)}}</footer></article>

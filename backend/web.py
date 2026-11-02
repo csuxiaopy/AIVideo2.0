@@ -62,7 +62,21 @@ def create_web_app():
                 remote_routes.append(route)
                 if hasattr(route, "methods"):
                     async def forward(request):
-                        return await request.app.state.runtime_proxy.http(request)
+                        response = await request.app.state.runtime_proxy.http(request)
+                        if request.url.path == "/api/system-monitor" and response.status_code == 200:
+                            import asyncio, json
+                            from backend.gpu_monitor import gpu_snapshot
+                            body = b"".join([chunk async for chunk in response.body_iterator])
+                            if response.headers.get("content-encoding") == "gzip":
+                                import gzip
+                                body = gzip.decompress(body)
+                            data = json.loads(body)
+                            data["gpu"] = await asyncio.to_thread(gpu_snapshot)
+                            from starlette.responses import JSONResponse
+                            enriched = JSONResponse(data, background=response.background)
+                            enriched.raw_headers += [(k,v) for k,v in response.raw_headers if k.lower() not in {b"content-length",b"content-type",b"content-encoding"}]
+                            return enriched
+                        return response
                     app.add_route(route.path, forward, methods=list(route.methods))
                 else:
                     async def forward_socket(websocket):

@@ -1,0 +1,8 @@
+ARG BASE_IMAGE=yolo-vlm-gpu:before-tensorrt-20261030
+FROM ${BASE_IMAGE}
+COPY scripts/tensorrt-fix-stack.py /app/scripts/tensorrt-fix-stack.py
+RUN pip install --no-cache-dir tensorrt-cu11==10.3.0 onnx==1.17.0 \
+    && python /app/scripts/tensorrt-fix-stack.py \
+    && python -c "import tensorrt; assert tensorrt.__version__ == '10.3.0'"
+COPY backend/detectors/ /app/backend/detectors/
+ENV TENSORRT_ENABLED=true

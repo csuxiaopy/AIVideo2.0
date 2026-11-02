@@ -26,3 +26,5 @@ data/*
 *.bak-*
 *.before-*
 merged.yml
+# Deployment-generated TensorRT manifests
+models/*.fp16.json

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from backend.gpu_monitor import gpu_snapshot
 
 from starlette.concurrency import run_in_threadpool
 
@@ -343,6 +344,7 @@ async def system_monitor() -> dict[str, Any]:
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "uptime_seconds": max(0, int(time.time() - _process_started_at)),
         "host": _host_snapshot(),
+        "gpu": await asyncio.to_thread(gpu_snapshot),
         "application": {
             **_prometheus_snapshot(processed),
             "processed": processed,

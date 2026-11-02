@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import math
+from contextlib import asynccontextmanager
 import logging
 import time
 from collections import defaultdict, deque
@@ -60,7 +62,7 @@ BEHAVIOR_INTERVAL_SECONDS = 180
 OFF_DUTY_REVIEW_INTERVAL_SECONDS = 30 * 60
 PEOPLE_FLOW_INTERVAL_SECONDS = 1
 OFF_DUTY_INTERVAL_SECONDS = 10
-FIRE_SMOKE_INTERVAL_SECONDS = 30
+FIRE_SMOKE_INTERVAL_SECONDS = 10
 
 
 def event_time(value: datetime, schedule: ScheduleSpec) -> str:
@@ -202,6 +204,10 @@ class MonitoringRuntime:
         self.queued: set[str] = set()
         self.fire_queued: set[str] = set()
         self.camera_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self.fire_locks = defaultdict(asyncio.Lock)
+        self.fire_config_signatures = {}
+        self.fire_last_sample_at = {}
+        self.fire_scheduler_task = None
         self.directory_locks: dict[int | None, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.off_duty_memberships: dict[int | None, tuple[str, ...]] = {}
         self.processed = 0
@@ -257,6 +263,7 @@ class MonitoringRuntime:
         )
         if self.settings.scheduler_enabled:
             self.scheduler_task = asyncio.create_task(self._scheduler(), name="camera-scheduler")
+            self.fire_scheduler_task = asyncio.create_task(self._fire_scheduler(), name="fire-scheduler")
             self.cleanup_task = asyncio.create_task(self._cleanup_loop(), name="alert-cleanup")
             self.worker_tasks = [
                 asyncio.create_task(self._worker(index, fire_only=False), name=f"analysis-worker-{index}")
@@ -272,7 +279,7 @@ class MonitoringRuntime:
         if getattr(self, "model_failover", None):
             await self.model_failover.close()
             self.model_failover = None
-        tasks = [task for task in [self.scheduler_task, self.cleanup_task, self.preview_detector_task, *self.worker_tasks, *self.fire_worker_tasks] if task]
+        tasks = [task for task in [self.scheduler_task, getattr(self, "fire_scheduler_task", None), self.cleanup_task, self.preview_detector_task, *self.worker_tasks, *self.fire_worker_tasks] if task]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -413,12 +420,12 @@ class MonitoringRuntime:
             recovering = not camera.online
             await self.media.capture(camera_id)
             general = await self._process(camera, force=True, recovering=recovering)
-            modes = set(from_json(camera.modes_json, []))
-            if Mode.FIRE_SMOKE.value in modes:
-                fire = await self._process_fire(camera, force=True)
-                general["results"].extend(fire["results"])
             self._record_analysis_time(camera_id)
-            return general
+        modes = set(from_json(camera.modes_json, []))
+        if Mode.FIRE_SMOKE.value in modes:
+            fire = await self._process_fire(camera, force=True)
+            general["results"].extend(fire["results"])
+        return general
 
     def _record_analysis_time(self, camera_id: str) -> None:
         persistence = getattr(self, "capture_persistence", None)
@@ -485,7 +492,10 @@ class MonitoringRuntime:
             while samples and samples[0] < now - 60:
                 samples.popleft()
             elapsed = min(60, now - self.mode_detection_started[(camera_id, mode)])
+            gaps = sorted(b-a for a,b in zip(samples, list(samples)[1:]))
             result[mode][camera_id] = {
+                "interval_p50_seconds": round(gaps[len(gaps)//2], 3) if gaps else None,
+                "interval_p95_seconds": round(gaps[min(len(gaps)-1, math.ceil(len(gaps)*0.95)-1)], 3) if gaps else None,
                 "completed_in_window": len(samples),
                 "window_seconds": round(elapsed, 3),
                 "frequency_hz": round(len(samples) / elapsed, 3) if elapsed >= 1 else None,
@@ -517,13 +527,6 @@ class MonitoringRuntime:
                         task_id = await self.queue.enqueue(camera.id, priority)
                         if task_id:
                             self.queued.add(camera.id)
-                fire_has_new_frame = bool(frame and frame.sequence > self.last_fire_sequence[camera.id])
-                if (Mode.FIRE_SMOKE.value in modes and fire_has_new_frame
-                        and now >= self.next_fire_run.get(camera.id, now)
-                        and camera.id not in self.fire_queued):
-                    task_id = await self.fire_queue.enqueue(camera.id, "critical")
-                    if task_id:
-                        self.fire_queued.add(camera.id)
             for priority, depth in (await self.queue.depths()).items():
                 QUEUE_GAUGE.labels(priority=priority).set(depth)
             for priority, depth in (await self.fire_queue.depths()).items():
@@ -537,6 +540,37 @@ class MonitoringRuntime:
                 CAPTURE_OVERWRITE_GAUGE.labels(camera_id=camera_id).set(int(capture["overwritten_frames"]))
             self.last_heartbeat = utc_now()
             await asyncio.sleep(0.5)
+
+    def _advance_fire_due(self, camera_id, now):
+        due = self.next_fire_run.get(camera_id, now)
+        self.next_fire_run[camera_id] = due + (max(0, math.floor((now-due)/FIRE_SMOKE_INTERVAL_SECONDS)) + 1) * FIRE_SMOKE_INTERVAL_SECONDS
+
+    async def _fire_scheduler(self):
+        while self.running:
+            now = time.monotonic()
+            cameras = await asyncio.to_thread(self.repository.list_cameras)
+            for camera in cameras:
+                if not camera.enabled:
+                    continue
+                modes = set(from_json(camera.modes_json, []))
+                frame = self.media.latest(camera.id)
+                fire_has_new_frame = bool(frame and frame.sequence > self.last_fire_sequence[camera.id])
+                if (Mode.FIRE_SMOKE.value in modes and fire_has_new_frame
+                        and now >= self.next_fire_run.get(camera.id, now)
+                        and camera.id not in self.fire_queued):
+                    task_id = await self.fire_queue.enqueue(camera.id, "critical")
+                    if task_id:
+                        self.fire_queued.add(camera.id)
+                        self._advance_fire_due(camera.id, now)
+            await asyncio.sleep(0.1)
+
+    @asynccontextmanager
+    async def _worker_camera_lock(self, camera_id, fire_only):
+        if fire_only:
+            yield
+        else:
+            async with self.camera_locks[camera_id]:
+                yield
 
     async def _cleanup_loop(self) -> None:
         while self.running:
@@ -599,7 +633,7 @@ class MonitoringRuntime:
                     # safer than retrying it: the scheduler will enqueue a fresh
                     # task next period after the in-flight owner releases its lock.
                     continue
-                async with self.camera_locks[task.camera_id]:
+                async with self._worker_camera_lock(task.camera_id, fire_only):
                     camera = self.repository.get_camera(task.camera_id)
                     if camera and camera.enabled:
                         queue_wait = ((utc_now() - task.created_at).total_seconds()
@@ -611,9 +645,9 @@ class MonitoringRuntime:
                             ANALYSIS_FRAME_AGE.observe(
                                 max(0.0, (utc_now() - frame.captured_at).total_seconds())
                             )
-                            self.next_fire_run[camera.id] = time.monotonic() + FIRE_SMOKE_INTERVAL_SECONDS
-                            await self._process_fire(camera)
-                            self.last_fire_sequence[camera.id] = frame.sequence
+                            outcome = await self._process_fire(camera, frame=frame)
+                            if outcome.get("skipped") or outcome.get("detector_error"):
+                                continue
                             self._record_mode_detection(
                                 camera.id, Mode.FIRE_SMOKE.value, queue_wait,
                                 (utc_now() - frame.captured_at).total_seconds(),
@@ -1003,12 +1037,40 @@ class MonitoringRuntime:
         ANALYSIS_LATENCY.observe(time.perf_counter() - started)
         return {"camera_id": camera.id, "results": results, "frame_sequence": getattr(frame, "sequence", 0)}
 
-    async def _process_fire(self, camera: models.Camera, force: bool = False) -> dict[str, Any]:
-        frame = self.media.latest(camera.id)
-        if not frame:
-            if force:
-                raise RuntimeError("视频源尚无可用画面")
-            return {"camera_id": camera.id, "results": [], "skipped": "no_frame"}
+    async def _process_fire(self, camera, force=False, frame=None):
+        from backend.async_pipeline import fingerprint
+        lock = self.fire_locks[camera.id]
+        if lock.locked() and not force:
+            return {"results": [], "skipped": "fire_busy"}
+        async with lock:
+            camera = await asyncio.to_thread(self.repository.get_camera, camera.id)
+            if not camera or not camera.enabled:
+                return {"results": [], "skipped": "camera_inactive"}
+            frame = frame or self.media.latest(camera.id)
+            if not frame or frame.sequence <= self.last_fire_sequence[camera.id]:
+                return {"results": [], "skipped": "duplicate_or_missing_frame"}
+            age = (utc_now() - frame.captured_at).total_seconds()
+            if age > 2 * FIRE_SMOKE_INTERVAL_SECONDS:
+                state = self.rules.for_camera(camera.id)
+                state.fire_consecutive = 0
+                state.smoke_window.clear()
+                return {"results": [], "skipped": "stale_frame"}
+            previous = self.fire_last_sample_at.get(camera.id)
+            signature = fingerprint(camera)
+            if (self.fire_config_signatures.get(camera.id) != signature
+                    or (previous and (frame.captured_at-previous).total_seconds() > 3 * FIRE_SMOKE_INTERVAL_SECONDS)):
+                state = self.rules.for_camera(camera.id)
+                state.fire_consecutive = 0
+                state.smoke_window.clear()
+                self.fire_config_signatures[camera.id] = signature
+            result = await self._process_fire_frame(camera, frame, signature, force)
+            # A failed frame must not contribute again to a temporal sequence.
+            self.last_fire_sequence[camera.id] = frame.sequence
+            self.fire_last_sample_at[camera.id] = frame.captured_at
+            return result
+
+    async def _process_fire_frame(self, camera, frame, signature, force=False):
+        from backend.async_pipeline import fingerprint
         modes = set(from_json(camera.modes_json, []))
         if Mode.FIRE_SMOKE.value not in modes:
             return {"camera_id": camera.id, "results": []}
@@ -1045,8 +1107,19 @@ class MonitoringRuntime:
             return {"camera_id": camera.id, "results": [], "detector_error": self.fire_smoke.detail}
 
         try:
-            detections = await asyncio.to_thread(self.fire_smoke.detect, frame.jpeg)
+            detector = self.fire_smoke
+            detections = await asyncio.to_thread(detector.detect, frame.jpeg)
+            current = await asyncio.to_thread(self.repository.get_camera, camera.id)
+            if (not current or not current.enabled or fingerprint(current) != signature
+                    or detector is not self.fire_smoke):
+                state.fire_consecutive = 0
+                state.smoke_window.clear()
+                return {"results": [], "skipped": "stale_configuration"}
+            if any(not math.isfinite(item.confidence) or not 0 <= item.confidence <= 1 for item in detections):
+                raise ValueError("Invalid detector confidence; temporal state reset")
         except Exception as exc:
+            state.fire_consecutive = 0
+            state.smoke_window.clear()
             self.repository.add_analysis(
                 camera_id=camera.id,
                 mode=Mode.FIRE_SMOKE.value,
@@ -1072,6 +1145,20 @@ class MonitoringRuntime:
         fire_items = [item for item in qualified if item.class_name == "fire"]
         smoke_items = [item for item in qualified if item.class_name == "smoke"]
         fire_confirmed, smoke_confirmed = state.fire_smoke_update(bool(fire_items), bool(smoke_items))
+
+        if not qualified:
+            self.repository.add_analysis(
+                camera_id=camera.id, mode=Mode.FIRE_SMOKE.value,
+                status="none", confidence=max((item.confidence for item in detections), default=0.0),
+                severity="info", reason="本次未检出达到告警阈值的烟火候选",
+                local_model=self.fire_smoke.version,
+                model_version=self.fire_smoke.model_hash[:12] or self.fire_smoke.version,
+                latency_ms=self.fire_smoke.last_latency_ms,
+                usage_json=as_json({"frame_sequence": frame.sequence,
+                    "sampled_at": frame.captured_at.isoformat(), "raw_candidates": len(detections),
+                    "fire_threshold": options.fire_confidence, "smoke_threshold": options.smoke_confidence,
+                    "backend": getattr(getattr(self.fire_smoke, "model", None), "backend", "pytorch")}),
+            )
 
         for kind, items, confirmed in (
             ("fire", fire_items, fire_confirmed),
